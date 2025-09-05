@@ -1,0 +1,100 @@
+@startuml AI_Job_Processing_Flow
+
+title AI Job Processing - From Job Folder to Final CSV Output
+
+skinparam backgroundColor transparent
+skinparam sequenceMessageAlign center
+
+participant "02.exe\n(Go Application)" as GoApp
+participant "Job Folder\n(W:\\Machine\\{timestamp})" as JobFolder
+participant "AI Inference Module\n(ai_processor.py)" as AIModule
+participant "CSV Input\n(AMR\\{timestamp}.csv)" as InputCSV
+participant "Image Batch\nLoader" as ImageLoader
+
+box "AI Models Processing" #LightBlue
+    participant "Anomaly Model\n(Patchcore+EfficientNet)" as AnomalyModel
+    participant "YOLO Paste Model\n(paste.pt)" as YoloPaste
+    participant "SAM Model\n(Segmentation)" as SAMModel
+    participant "YOLO Pad Model\n(pad.pt)" as YoloPad
+end box
+
+participant "Results Processor\n(CSV Generator)" as ResultsProcessor
+participant "Final CSV Output\n(AI\\{timestamp}.csv)" as OutputCSV
+
+== Job Detection Phase ==
+JobFolder -> GoApp : Job folder becomes ready for AI inference
+GoApp -> AIModule : Call AI inference with job folder path ({timestamp})
+AIModule -> InputCSV : Validate corresponding CSV exists (AMR\\{timestamp}.csv)
+AIModule -> AIModule : Extract timestamp and validate job folder
+
+== Image Loading Phase ==
+AIModule -> InputCSV : Read CSV to extract image paths
+InputCSV -> ImageLoader : Load image batch from paths
+ImageLoader -> ImageLoader : Preprocess 4 images per batch
+
+== AI Inference Phase (Parallel + Sequential) ==
+
+note over AnomalyModel, YoloPad : Parallel Processing (Batch Size = 4)
+
+ImageLoader -> AnomalyModel : Batch of 4 images for anomaly detection
+AnomalyModel -> AnomalyModel : Patchcore + EfficientNet-B5 inference (batch=4)
+AnomalyModel -> ResultsProcessor : Return 4 abnormal_scores + ai_defect_names
+
+ImageLoader -> YoloPad : Batch of 4 images for pad detection
+YoloPad -> YoloPad : Detect pad positions (batch=4 inference)
+YoloPad -> ResultsProcessor : Return 4 sets of pad centers + min_distances
+
+note over YoloPaste, SAMModel : Sequential Processing (YOLO Batch=4 -> SAM Sequential)
+
+ImageLoader -> YoloPaste : Batch of 4 images for paste detection
+YoloPaste -> YoloPaste : Detect paste bboxes (batch=4 inference)
+
+loop For each of 4 images with detected paste bbox
+    YoloPaste -> SAMModel : Send image + closest-to-center bbox
+    SAMModel -> SAMModel : SAM segmentation with bbox prompt (sequential)
+    SAMModel -> ResultsProcessor : Return pixel counts (insp_area_ai)
+end
+
+== Results Integration Phase ==
+ResultsProcessor -> ResultsProcessor : Integrate all AI model outputs
+ResultsProcessor -> ResultsProcessor : Calculate derived metrics (pad_area, cover%)
+ResultsProcessor -> ResultsProcessor : Apply defect classification rules
+
+note right of ResultsProcessor
+Priority-based Classification:
+1. volume_defect (insp_vol thresholds)
+2. height_defect (insp_hei > 200)
+3. ai_anomaly_defect (abnormal_score > 0.46)
+4. distance_defect (min_pad_distance < 6.6 AND cover% > 180%)
+5. coverage_defect (cover% > 180%)
+end note
+
+ResultsProcessor -> ResultsProcessor : Set ai_juge = "NG" if defects, "OK" otherwise
+
+== Output Generation Phase ==
+ResultsProcessor -> OutputCSV : Generate primary output (W:\\Machine\\{timestamp}\\AI\\)
+ResultsProcessor -> OutputCSV : Generate backup output (inference_result_path\\YYYYMMDD\\)
+
+== Completion Signal Phase ==
+OutputCSV -> AIModule : Confirm successful CSV generation
+AIModule -> GoApp : Send job completion signal (success/failure)
+GoApp -> GoApp : Process completion status and continue workflow
+
+== Performance Notes ==
+note over AnomalyModel : "~0.8s for batch of 4 images\nThreshold: 0.46"
+note over YoloPaste : "~0.3s for batch of 4 images\nOutputs closest-to-center bbox per image"
+note over SAMModel : "~1.2s per bbox (BOTTLENECK)\nProcesses up to 4 images sequentially"
+note over YoloPad : "~0.3s for batch of 4 images\nCalculate inter-pad distances"
+
+note over AIModule
+Total Processing Time per Job (4 images):
+Base: ~2.8s + (1.2s × total_detected_paste_bboxes)
+Example: 4 images with 1 bbox each = ~7.6s total
+GPU Memory: ~10GB VRAM total
+
+Communication with 02.exe:
+- Input: Job folder path ({timestamp})
+- Output: Completion signal (success/failure)
+end note
+
+@enduml
