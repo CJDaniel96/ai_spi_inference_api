@@ -19,7 +19,7 @@ comp_name = "spi"
 image_size = img_size_dict[comp_name]
 ckpt_root = r"D:/Dre/JQ_Non_ChipRC_Classifier/results/Patchcore/spi/v5"
 output_base_dir = r"D:\Dre\JQ_SPI_02_AI_API\output"
-dataset_dir = r"D:\Dre\JQ_SPI_02_AI_API\data\20250523135357"
+dataset_dir = r"D:\Dre\JQ_SPI_02_AI_API\data\20251028142856"
 normal_dir = os.path.join(output_base_dir, "normal")
 abnormal_dir = os.path.join(output_base_dir, "abnormal")
 

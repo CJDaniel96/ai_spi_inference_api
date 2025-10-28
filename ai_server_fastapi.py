@@ -1,4 +1,5 @@
 import asyncio
+import math
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -105,11 +106,127 @@ async def process_folder(job_folder: str) -> Dict[str, Any]:
         df["img_name"] = build_img_name_column(df)
         for url, col_name in endpoints:
             df = merge_scalar_result(df, results_by_endpoint.get(url, {}), col_name)
+        # Compute derived metrics and defect name
+        df = add_pad_area_and_cover(df)
+        df = add_ai_defect_name(df)
+        df = add_is_pass(df)
         out_path = ai_dir / csv_path.name
         df.to_csv(out_path, index=False)
         saved_files.append(str(out_path))
 
     return {"saved_files": saved_files, "errors": errors, "csv_count": len(csv_files)}
+
+
+# ------------------------
+# Post-merge enrich helpers
+# ------------------------
+
+ANOMALY_THRESHOLD = 0.5
+HIGH_COVER_THRESHOLD = 180.0
+SHORT_DISTANCE_THRESHOLD = 6.6
+LOW_VOL_OFFSET = -10.0
+HIGH_VOL_OFFSET = 20.0
+HIGH_PASTE_HEIGHT_THRESHOLD = 200.0
+
+
+def add_pad_area_and_cover(df: pd.DataFrame) -> pd.DataFrame:
+    """Add pad_area and cover% columns when possible.
+
+    pad_area = pi * Width * Length / 4
+    cover% = paste_pixels * 0.8246 * 100 / pad_area
+    """
+    out = df.copy()
+    # pad_area
+    if "Width" in out.columns and "Length" in out.columns:
+        width = pd.to_numeric(out["Width"], errors="coerce")
+        length = pd.to_numeric(out["Length"], errors="coerce")
+        out["pad_area"] = math.pi * width * length / 4.0
+    # cover%
+    if "paste_pixels" in out.columns and "pad_area" in out.columns:
+        paste_pixels = pd.to_numeric(out["paste_pixels"], errors="coerce")
+        out["cover%"] = paste_pixels * 0.8246 * 100.0 / out["pad_area"]
+    return out
+
+
+def add_ai_defect_name(df: pd.DataFrame) -> pd.DataFrame:
+    """Add ai_defect_name column per row using ordered rules.
+
+    Priority:
+      1) anomaly_score > 0.5 -> "FM/color"
+      2) insp_vol outside dynamic thresholds -> "high vol" / "low vol"
+      3) cover% > 180 -> "high cover"
+      4) 6.6 < min_pad_distance -> "short distance" (as requested)
+      5) insp_height > 200 -> "high paste"
+    Only the first matching condition per row is applied.
+    """
+    out = df.copy()
+    if "ai_defect_name" not in out.columns:
+        out["ai_defect_name"] = ""
+
+    assigned = out["ai_defect_name"].astype(str).str.len() > 0
+
+    # 1) Anomaly threshold
+    if "anomaly_score" in out.columns:
+        anomaly = pd.to_numeric(out["anomaly_score"], errors="coerce")
+        mask = (~assigned) & (anomaly > ANOMALY_THRESHOLD)
+        out.loc[mask, "ai_defect_name"] = "FM/color"
+        assigned = out["ai_defect_name"].astype(str).str.len() > 0
+
+    # 2) insp_vol thresholds using offsets and vol_l_ng, vol_h_ng
+    cols_needed = {"insp_vol", "vol_l_ng", "vol_h_ng"}
+    if cols_needed.issubset(out.columns):
+        insp_vol = pd.to_numeric(out["insp_vol"], errors="coerce")
+        vol_l_ng = pd.to_numeric(out["vol_l_ng"], errors="coerce")
+        vol_h_ng = pd.to_numeric(out["vol_h_ng"], errors="coerce")
+        low_thr = vol_l_ng + LOW_VOL_OFFSET
+        high_thr = vol_h_ng + HIGH_VOL_OFFSET
+
+        mask_high = (~assigned) & (insp_vol > high_thr)
+        out.loc[mask_high, "ai_defect_name"] = "high vol"
+        assigned = out["ai_defect_name"].astype(str).str.len() > 0
+
+        mask_low = (~assigned) & (insp_vol < low_thr)
+        out.loc[mask_low, "ai_defect_name"] = "low vol"
+        assigned = out["ai_defect_name"].astype(str).str.len() > 0
+
+    # 3) high cover
+    if "cover%" in out.columns:
+        cover = pd.to_numeric(out["cover%"], errors="coerce")
+        mask = (~assigned) & (cover > HIGH_COVER_THRESHOLD)
+        out.loc[mask, "ai_defect_name"] = "high cover"
+        assigned = out["ai_defect_name"].astype(str).str.len() > 0
+
+    # 4) short distance (note: condition provided as 6.6 < min_pad_distance)
+    if "min_pad_distance" in out.columns:
+        dist = pd.to_numeric(out["min_pad_distance"], errors="coerce")
+        mask = (~assigned) & (dist > SHORT_DISTANCE_THRESHOLD)
+        out.loc[mask, "ai_defect_name"] = "short distance"
+        assigned = out["ai_defect_name"].astype(str).str.len() > 0
+
+    # 5) high paste based on insp_height
+    if "insp_height" in out.columns:
+        height = pd.to_numeric(out["insp_height"], errors="coerce")
+        mask = (~assigned) & (height > HIGH_PASTE_HEIGHT_THRESHOLD)
+        out.loc[mask, "ai_defect_name"] = "high paste"
+
+    return out
+
+
+def add_is_pass(df: pd.DataFrame) -> pd.DataFrame:
+    """Add/update 'is_pass' column based on ai_defect_name.
+
+    - If ai_defect_name == "" (empty after strip) => is_pass = 22
+    - Else => is_pass = 23
+    """
+    out = df.copy()
+    if "ai_defect_name" not in out.columns:
+        out["ai_defect_name"] = ""
+    # default 22
+    is_pass = pd.Series(22, index=out.index, dtype="Int64")
+    mask_fail = out["ai_defect_name"].astype(str).str.strip() != ""
+    is_pass.loc[mask_fail] = 23
+    out["is_pass"] = is_pass
+    return out
 
 
 @app.post("/process")

@@ -1,337 +1,92 @@
-# AI Inference API - PatchCore Anomaly Detection
+# Four-Service AI Merge Pipeline (FastAPI)
 
-This project implements a FastAPI-based inference service for anomaly detection using PatchCore models. The system is designed to process industrial inspection images and detect anomalies in manufacturing processes.
+This repository provides four FastAPI services that work together to process a job folder, call three AI endpoints in parallel, merge their numeric results into the CSV(s), classify defects, and save a merged CSV into an `AI` subfolder.
 
-## Project Overview
+- Merge server: `ai_server_fastapi.py` on port `5050` (`POST /process`)
+- Model servers (defaults provided as stubs):
+  - `8000` anomaly-score → returns `anomaly_score` per `img_name`
+  - `8001` paste-detection → returns `paste_pixels` per `img_name`
+  - `8002` distance-detection → returns `min_pad_distance` per `img_name`
 
-The AI inference system processes job folders containing images through multiple AI models to detect various types of defects and anomalies. The current implementation focuses on PatchCore anomaly detection with FastAPI serving capabilities.
+Each model endpoint must return JSON: `{ "results": { "<img_name>": <float>, ... } }`, where `img_name = {Array_id-1}_{Pad_no}.jpg`.
 
-## Architecture & Inference Process
+## Quick Start
 
-### Original Complete AI Pipeline (Reference: ai_workflow_diagram.txt)
+1) Create/activate Conda env
+- `conda activate trt`
 
-The complete AI inference workflow involves multiple models working in parallel and sequential processing:
+2) Install dependencies
+- `pip install -r requirements_paste_detection.txt`
 
-```
-Job Detection → Image Loading → AI Inference → Results Integration → Output Generation
-```
+3) Start all services (Windows)
+- Easiest: run `start_fastapi_services.bat`
+  - Activates `trt` and launches all 4 services in separate windows:
+    - Merge: `http://127.0.0.1:5050/process`
+    - Models: `http://127.0.0.1:8000/8001/8002`
 
-#### Phase 1: Job Detection
-- **Input**: Job folder (`W:\Machine\{timestamp}`)
-- **Trigger**: 02.exe Go application detects ready job folders
-- **Validation**: Checks for corresponding CSV file (`AMR\{timestamp}.csv`)
+Manual alternative (4 terminals after `conda activate trt`):
+- `uvicorn ai_server_fastapi:app --host 0.0.0.0 --port 5050`
+- `uvicorn inference_stub:app --host 0.0.0.0 --port 8000`
+- `uvicorn inference_stub:app --host 0.0.0.0 --port 8001`
+- `uvicorn inference_stub:app --host 0.0.0.0 --port 8002`
 
-#### Phase 2: Image Loading
-- **Process**: Loads images in batches of 4 from CSV paths
-- **Preprocessing**: Prepares images for model inference
+You can replace the three stub servers with your real apps (e.g., `paste_detection_server.py`, `distance_detection_server.py`) as long as they return the expected `results` mapping keyed by `img_name`.
 
-#### Phase 3: AI Inference (Multi-Model Processing)
+## Run A Job
 
-**Parallel Processing (Batch Size = 4):**
-1. **Anomaly Detection** (PatchCore + EfficientNet-B5)
-   - Processing time: ~0.8s for batch of 4 images
-   - Threshold: 0.46
-   - Output: `abnormal_scores` + `ai_defect_names`
+1) Prepare a folder with at least one CSV containing `Array_id` and `Pad_no` (used to construct `img_name`). Example:
+- `D:/Dre/JQ_SPI_02_AI_API/data/20250523135357`
 
-2. **Pad Detection** (YOLO Pad Model)
-   - Processing time: ~0.3s for batch of 4 images
-   - Output: Pad centers + minimum inter-pad distances
-
-**Sequential Processing:**
-3. **Paste Detection** (YOLO Paste Model → SAM Segmentation)
-   - YOLO: ~0.3s for batch of 4 images (detects paste bboxes)
-   - SAM: ~1.2s per bbox (BOTTLENECK - sequential processing)
-   - Output: Pixel counts (`insp_area_ai`)
-
-#### Phase 4: Results Integration
-- **Defect Classification** (Priority-based):
-  1. Volume defects (inspection volume thresholds)
-  2. Height defects (inspection height > 200)
-  3. AI anomaly defects (abnormal_score > 0.46)
-  4. Distance defects (min_pad_distance < 6.6 AND coverage > 180%)
-  5. Coverage defects (coverage > 180%)
-- **Final Judgment**: `ai_juge = "NG"` if defects detected, `"OK"` otherwise
-
-#### Phase 5: Output Generation
-- **Primary Output**: `W:\Machine\{timestamp}\AI\{timestamp}.csv`
-- **Backup Output**: `inference_result_path\YYYYMMDD\`
-
-### Performance Metrics (Complete Pipeline)
-- **Total Processing Time**: ~2.8s + (1.2s × total_detected_paste_bboxes)
-- **Example**: 4 images with 1 bbox each = ~7.6s total
-- **GPU Memory**: ~10GB VRAM total
-- **Bottleneck**: SAM segmentation (sequential processing)
-
-## Current Implementation Status
-
-### ✅ Implemented Components
-
-#### 1. PatchCore Inference Engine (`patchcore_inference.py`)
-- **Model Format**: ONNX for optimized inference
-- **GPU Support**: DirectML (Windows) with CPU fallback
-- **Input Processing**: 224x224 image preprocessing
-- **Batch Processing**: Supports multiple image processing
-- **Output**: Anomaly scores and binary classification
-
-#### 2. FastAPI Server (`patchcore_server.py`)
-- **Framework**: FastAPI with async support
-- **Endpoints**:
-  - `GET /health` - Server health check
-  - `POST /inference` - Trigger inference on job folder
-  - `GET /` - API information
-  - `GET /docs` - Auto-generated API documentation
-- **Features**:
-  - Automatic model initialization on startup
-  - Job folder validation
-  - Batch image processing
-  - Statistical result aggregation
-  - Error handling with HTTP status codes
-
-#### 3. Client Trigger (`trigger_inference.py`)
-- **HTTP Client**: Requests-based client for server communication
-- **Features**:
-  - Server health monitoring
-  - Inference triggering with timeout handling
-  - Result saving to CSV
-  - Command-line interface
-
-### 📋 Current Workflow
-
-```
-Client Request → FastAPI Server → PatchCore ONNX Model → Results Processing → JSON Response
-```
-
-1. **Server Startup**: PatchCore model loaded into memory
-2. **Client Request**: Job folder path sent via POST `/inference`
-3. **Image Processing**: Batch processing of images in job folder
-4. **Inference**: ONNX model processes preprocessed images
-5. **Response**: JSON with anomaly scores, statistics, and detailed results
-
-## Installation & Setup
-
-### Prerequisites
-- Python 3.8+
-- ONNX Runtime
-- OpenCV
-- FastAPI
-- Uvicorn
-
-### Installation
-```bash
-pip install fastapi uvicorn onnxruntime opencv-python pandas requests
-```
-
-### Model Setup
-1. Place PatchCore ONNX model in `models/patchcore/` directory
-2. Ensure model file has `.onnx` extension
-
-## Usage
-
-### 1. Start the Server
-```bash
-python patchcore_server.py --host 0.0.0.0 --port 8000 --model-folder models/patchcore
-```
-
-### 2. Check Server Health
-```bash
-curl http://localhost:8000/health
-```
-
-### 3. Trigger Inference (Command Line)
-```bash
-python trigger_inference.py /path/to/job/folder --wait --extensions .jpg .png
-```
-
-### 4. Trigger Inference (API)
-
-On Linux/macOS or Git Bash:
-```bash
-curl -X POST "http://localhost:8000/inference" \
-     -H "Content-Type: application/json" \
-     -d '{"job_folder": "/path/to/job/folder"}'
-```
-
-On Windows PowerShell, either use PowerShell-native or the real curl binary:
-
-PowerShell-native (recommended):
-```powershell
-$body = @{ job_folder = 'D:/path/to/job/folder' } | ConvertTo-Json
-Invoke-RestMethod -Uri 'http://localhost:8000/inference' -Method Post -ContentType 'application/json' -Body $body
-```
-
-Using curl.exe in PowerShell (note: use `curl.exe`, not the `curl` alias, and prefer forward slashes or escape backslashes):
-```powershell
-curl.exe -X POST "http://localhost:8000/inference" -H "Content-Type: application/json" -d "{ \"job_folder\": \"D:/path/to/job/folder\" }"
-# or with backslashes escaped
-curl.exe -X POST "http://localhost:8000/inference" -H "Content-Type: application/json" -d "{ \"job_folder\": \"D:\\path\\to\\job\\folder\" }"
-```
-
-Notes (Windows):
-- `curl` in PowerShell is an alias; use `curl.exe` for classic curl flags.
-- Use forward slashes in JSON paths, or escape backslashes.
-- Bash-style line continuations (`\`) do not work in PowerShell unless using a Bash shell.
-
-### 5. View API Documentation
-Navigate to `http://localhost:8000/docs` for interactive API documentation.
-
-## Run 4 FastAPI Services (Merge + 3 Inference)
-
-This repository also includes a small orchestrator server and three inference services that run together. The merge server reads CSV(s) in a job folder, creates `img_name`, calls the three inference endpoints in parallel, merges the numeric results into the CSV on `img_name`, and saves to an `AI` subfolder.
-
-### Files
-- `ai_server_fastapi.py` — Merge server on port `5050` (`POST /process`)
-- `inference_stub.py` — Inference stub app reused on ports `8000`, `8001`, `8002`
-- `start_fastapi_services.bat` — Windows launcher to activate Conda `trt` and start all 4 services
-
-### Prerequisites
-- Conda environment named `trt` available on your system
-- Install dependencies inside `trt`:
-  - `pip install fastapi uvicorn httpx pandas`
-
-### Start all services (Windows)
-- Recommended: run `start_fastapi_services.bat` (double‑click, or from CMD/PowerShell)
-  - This activates `conda` env `trt` and launches:
-    - Merge server: `http://127.0.0.1:5050/process`
-    - Inference services: `http://127.0.0.1:8000/inference`, `:8001/inference`, `:8002/inference`
-
-### Start manually (alternative)
-- In a terminal where Conda is initialized:
-  - `conda activate trt`
-  - `uvicorn ai_server_fastapi:app --host 0.0.0.0 --port 5050`
-  - In three additional terminals (still in `trt`):
-    - `uvicorn inference_stub:app --host 0.0.0.0 --port 8000`
-    - `uvicorn inference_stub:app --host 0.0.0.0 --port 8001`
-    - `uvicorn inference_stub:app --host 0.0.0.0 --port 8002`
-
-### Call the merge server
-- Endpoint: `POST http://127.0.0.1:5050/process`
-- Body JSON: `{ "job_folder": "D:/Dre/JQ_SPI_02_AI_API/data/20250523135357" }`
-- Example (PowerShell):
+2) Call the merge server
+- PowerShell:
   - `$body = @{ job_folder = 'D:/Dre/JQ_SPI_02_AI_API/data/20250523135357' } | ConvertTo-Json`
   - `Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:5050/process' -ContentType 'application/json' -Body $body`
-- Example (curl.exe):
+- curl.exe:
   - `curl.exe -X POST "http://127.0.0.1:5050/process" -H "Content-Type: application/json" -d "{ \"job_folder\": \"D:/Dre/JQ_SPI_02_AI_API/data/20250523135357\" }"`
 
-### Expected outputs
-- The merge server writes merged CSV(s) into `AI` subfolder in the job folder, preserving original filenames.
-- Adds or fills columns (floats): `anomaly_score`, `paste_pixels`, `min_pad_distance`.
-- If an inference endpoint returns no matching results, the column is still created and filled with NaN.
+3) Output
+- Merged CSV(s) saved to `.../AI/<same_name>.csv`
+- `img_name` is added as `{Array_id-1}_{Pad_no}.jpg`
 
-### Using real inference services
-- Replace `inference_stub:app` in `start_fastapi_services.bat` with your real applications’ module path(s).
-- Ensure each service responds with JSON: `{ "results": { "<img_name>": <float>, ... } }` where `<img_name>` matches `"{Array_id-1}_{Pad_no}.jpg"`.
+## Output Columns
 
-## API Reference
+The merge server writes or updates these columns when present/available:
+- `img_name` → from `Array_id` and `Pad_no`
+- `anomaly_score` → from port 8000
+- `paste_pixels` → from port 8001
+- `min_pad_distance` → from port 8002
+- `pad_area` → `π × Width × Length / 4` (when `Width` and `Length` exist)
+- `cover%` → `paste_pixels × 0.8246 × 100 / pad_area` (when `pad_area` exists)
+- `ai_defect_name` → first matching rule below
+- `is_pass` → `22` if `ai_defect_name` is empty, else `23`
 
-### POST /inference
-**Request Body:**
-```json
-{
-  "job_folder": "/path/to/job/folder",
-  "image_extensions": [".jpg", ".png"]  // optional
-}
-```
+## How ai_defect_name Is Determined (Order Matters)
 
-**Response:**
-```json
-{
-  "status": "success",
-  "message": "Successfully processed 4 images",
-  "total_images": 4,
-  "anomalies_detected": 1,
-  "average_score": 0.3245,
-  "processing_time": 2.1,
-  "results": [
-    {
-      "image_path": "/path/to/image1.jpg",
-      "anomaly_score": 0.234,
-      "anomaly_label": 0,
-      "processing_time": 0.521
-    }
-  ]
-}
-```
+The first matching condition per row wins, then the next row is evaluated:
+- 1) Anomaly: if `anomaly_score > 0.5` → `FM/color`
+- 2) Volume thresholds (requires `insp_vol`, `vol_l_ng`, `vol_h_ng`):
+  - If `insp_vol > vol_h_ng + 20` → `high vol`
+  - Else if `insp_vol < vol_l_ng - 10` → `low vol`
+- 3) Coverage (requires `cover%`):
+  - If `cover% > 180` → `high cover`
+- 4) Distance (requires `min_pad_distance`):
+  - If `min_pad_distance > 6.6` → `short distance`
+- 5) Paste height (requires `insp_height`):
+  - If `insp_height > 200` → `high paste`
 
-## Configuration
+Only the first satisfied rule is applied per row.
 
-### Server Configuration
-- **Host**: Default `127.0.0.1`
-- **Port**: Default `8000`
-- **Model Folder**: Default `models/patchcore`
-- **Workers**: Default `1` (single worker for GPU models)
+## Expected Model Responses
 
-### Model Configuration
-- **Input Size**: 224x224 pixels
-- **Normalization**: ImageNet standard
-- **Providers**: DirectML → CPU fallback
+Each model endpoint must return scalar floats keyed by `img_name`:
+- `8000` anomaly: `{ "results": { "<img_name>": <float> } }`
+- `8001` paste: `{ "results": { "<img_name>": <float> } }`
+- `8002` distance: `{ "results": { "<img_name>": <float> } }`
 
-## Future Development
-
-### 🚧 Planned Components (From Original Design)
-1. **YOLO Models Integration**
-   - Paste detection model (`paste.pt`)
-   - Pad detection model (`pad.pt`)
-
-2. **SAM Segmentation**
-   - Segment Anything Model for precise segmentation
-   - Bbox-prompted segmentation
-
-3. **Results Integration**
-   - Multi-model output fusion
-   - Priority-based defect classification
-   - CSV output generation matching original format
-
-4. **Go Application Integration**
-   - Communication with `02.exe`
-   - Job folder monitoring
-   - Completion signaling
-
-### 📈 Performance Optimizations
-- [ ] GPU memory optimization
-- [ ] Batch processing improvements
-- [ ] Model quantization
-- [ ] Async processing pipeline
-- [ ] Results caching
-
-## Development
-
-### Project Structure
-```
-JQ_SPI_02_AI_API/
-├── models/
-│   └── patchcore/          # PatchCore ONNX models
-├── data/                   # Sample data and test images
-├── doc/                    # Documentation
-├── patchcore_server.py     # FastAPI server
-├── patchcore_inference.py  # Core inference engine
-├── trigger_inference.py    # Client trigger utility
-└── ai_workflow_diagram.txt # Complete system design
-```
-
-### Testing
-```bash
-# Start server in development mode
-python patchcore_server.py --host 127.0.0.1 --port 8000
-
-# Test with sample data
-python trigger_inference.py data/sample_job_folder --wait --extensions .jpg
-```
+The included `inference_stub.py` produces this format for all three ports, so you can test end‑to‑end immediately.
 
 ## Troubleshooting
 
-### Common Issues
-1. **Model Loading Errors**: Ensure ONNX model is in correct folder
-2. **GPU Issues**: Check DirectML installation or use CPU-only mode
-3. **Job Folder Not Found**: Verify folder path and permissions
-4. **Server Not Ready**: Wait for model initialization (check `/health`)
-
-### Logs
-Server logs provide detailed information about:
-- Model loading status
-- Inference timing
-- Error details
-- Request processing
-
-## License
-
-This project is part of the JQ_SPI_02_AI industrial inspection system.
+- Columns empty (NaN): verify model responses use the same `img_name` format (`{Array_id-1}_{Pad_no}.jpg`). A mismatch prevents merges.
+- Missing derived columns: `pad_area` needs `Width` + `Length`; `cover%` needs `pad_area`; some rules require specific columns.
+- is_pass not set as expected: it depends on whether `ai_defect_name` is empty after applying the rules.
