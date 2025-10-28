@@ -174,6 +174,53 @@ Notes (Windows):
 ### 5. View API Documentation
 Navigate to `http://localhost:8000/docs` for interactive API documentation.
 
+## Run 4 FastAPI Services (Merge + 3 Inference)
+
+This repository also includes a small orchestrator server and three inference services that run together. The merge server reads CSV(s) in a job folder, creates `img_name`, calls the three inference endpoints in parallel, merges the numeric results into the CSV on `img_name`, and saves to an `AI` subfolder.
+
+### Files
+- `ai_server_fastapi.py` — Merge server on port `5050` (`POST /process`)
+- `inference_stub.py` — Inference stub app reused on ports `8000`, `8001`, `8002`
+- `start_fastapi_services.bat` — Windows launcher to activate Conda `trt` and start all 4 services
+
+### Prerequisites
+- Conda environment named `trt` available on your system
+- Install dependencies inside `trt`:
+  - `pip install fastapi uvicorn httpx pandas`
+
+### Start all services (Windows)
+- Recommended: run `start_fastapi_services.bat` (double‑click, or from CMD/PowerShell)
+  - This activates `conda` env `trt` and launches:
+    - Merge server: `http://127.0.0.1:5050/process`
+    - Inference services: `http://127.0.0.1:8000/inference`, `:8001/inference`, `:8002/inference`
+
+### Start manually (alternative)
+- In a terminal where Conda is initialized:
+  - `conda activate trt`
+  - `uvicorn ai_server_fastapi:app --host 0.0.0.0 --port 5050`
+  - In three additional terminals (still in `trt`):
+    - `uvicorn inference_stub:app --host 0.0.0.0 --port 8000`
+    - `uvicorn inference_stub:app --host 0.0.0.0 --port 8001`
+    - `uvicorn inference_stub:app --host 0.0.0.0 --port 8002`
+
+### Call the merge server
+- Endpoint: `POST http://127.0.0.1:5050/process`
+- Body JSON: `{ "job_folder": "D:/Dre/JQ_SPI_02_AI_API/data/20250523135357" }`
+- Example (PowerShell):
+  - `$body = @{ job_folder = 'D:/Dre/JQ_SPI_02_AI_API/data/20250523135357' } | ConvertTo-Json`
+  - `Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:5050/process' -ContentType 'application/json' -Body $body`
+- Example (curl.exe):
+  - `curl.exe -X POST "http://127.0.0.1:5050/process" -H "Content-Type: application/json" -d "{ \"job_folder\": \"D:/Dre/JQ_SPI_02_AI_API/data/20250523135357\" }"`
+
+### Expected outputs
+- The merge server writes merged CSV(s) into `AI` subfolder in the job folder, preserving original filenames.
+- Adds or fills columns (floats): `anomaly_score`, `paste_pixels`, `min_pad_distance`.
+- If an inference endpoint returns no matching results, the column is still created and filled with NaN.
+
+### Using real inference services
+- Replace `inference_stub:app` in `start_fastapi_services.bat` with your real applications’ module path(s).
+- Ensure each service responds with JSON: `{ "results": { "<img_name>": <float>, ... } }` where `<img_name>` matches `"{Array_id-1}_{Pad_no}.jpg"`.
+
 ## API Reference
 
 ### POST /inference
