@@ -143,11 +143,33 @@ python trigger_inference.py /path/to/job/folder --wait --extensions .jpg .png
 ```
 
 ### 4. Trigger Inference (API)
+
+On Linux/macOS or Git Bash:
 ```bash
 curl -X POST "http://localhost:8000/inference" \
      -H "Content-Type: application/json" \
      -d '{"job_folder": "/path/to/job/folder"}'
 ```
+
+On Windows PowerShell, either use PowerShell-native or the real curl binary:
+
+PowerShell-native (recommended):
+```powershell
+$body = @{ job_folder = 'D:/path/to/job/folder' } | ConvertTo-Json
+Invoke-RestMethod -Uri 'http://localhost:8000/inference' -Method Post -ContentType 'application/json' -Body $body
+```
+
+Using curl.exe in PowerShell (note: use `curl.exe`, not the `curl` alias, and prefer forward slashes or escape backslashes):
+```powershell
+curl.exe -X POST "http://localhost:8000/inference" -H "Content-Type: application/json" -d "{ \"job_folder\": \"D:/path/to/job/folder\" }"
+# or with backslashes escaped
+curl.exe -X POST "http://localhost:8000/inference" -H "Content-Type: application/json" -d "{ \"job_folder\": \"D:\\path\\to\\job\\folder\" }"
+```
+
+Notes (Windows):
+- `curl` in PowerShell is an alias; use `curl.exe` for classic curl flags.
+- Use forward slashes in JSON paths, or escape backslashes.
+- Bash-style line continuations (`\`) do not work in PowerShell unless using a Bash shell.
 
 ### 5. View API Documentation
 Navigate to `http://localhost:8000/docs` for interactive API documentation.

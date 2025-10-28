@@ -1,0 +1,50 @@
+# Paste Detection Model
+
+## Objective
+Detect and calculate the area of paste closest to the center of each image.
+
+## Architecture
+YOLO Detection → SAM Segmentation
+
+## Implementation Requirements
+
+### 1. FastAPI Service
+- Create an inference service similar to `patchcore_server.py`
+- Provide REST API endpoints for paste detection
+- Use "D:\Dre\JQ_SPI_02_AI_API\trigger_inference.py" to call this API with job folder path
+
+### 2. Job Processing
+- Process all images in a specified job folder
+
+### 3. YOLO Detection Stage
+- Model path: `D:\Dre\JQ_SPI_02_AI_API\models\yolo_detection\paste.pt`
+- Detection logic: Return only the bounding box closest to the image center
+- Output: Single bbox per image
+
+### 4. Data Management
+- Use hash table to store:
+  - Key: Image file path
+  - Value: YOLO detection bbox coordinates
+
+### 5. SAM Segmentation Stage (Mobile SAM)
+- Input: Hash table from YOLO detection results
+- Process: Generate precise pixel-level segmentation for detected paste areas
+- Output: Paste pixel masks for each image
+
+return the total inference time and Paste pixels (number) for each image
+
+How to run??
+
+python trigger_paste_detection.py data/20250523135357 --wait
+python paste_detection_server.py --port 8001
+
+Performance
+0915
+Paste detection inference completed successfully!
+Total images processed: 100
+Total inference time: 5.76 seconds
+Request time: 5.76 seconds
+Images with paste detected: 100/100
+Total paste pixels: 42973
+Average paste pixels per image: 429.7
+Results saved to: paste_detection_results_20250915_151507.csv

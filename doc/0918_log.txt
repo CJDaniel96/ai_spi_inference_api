@@ -1,0 +1,27 @@
+output the csv file shows the file transfer status of each job from content
+
+explain:
+use 20250918163121 as example, the ai inference
+Start processing 20250918163121.csv at 2025-09-18 16:32:09, ProcessEnd=2025-09-18 16:32:10, TotalTime=1.139
+and CSV Created at 2025-09-18 16:31:21, CSV Backup finished 2025-09-18 16:32:10
+ai inference start process when csv created in the job folder 
+
+content:
+Start processing 20250918163121.csv at 2025/09/18 16:32:09
+Processing 20250918163121.csv: TargetFolder=20250918163121, FolderCreated=2025/09/18 16:31:28, CSVCreated=2025/09/18 16:31:21, CSVBackup=2025/09/18 16:32:10, ImageCount=42, ProcessEnd=2025/09/18 16:32:10, TotalTime=1.139
+Start processing 20250918163234.csv at 2025/09/18 16:33:22
+Processing 20250918163234.csv: TargetFolder=20250918163234, FolderCreated=2025/09/18 16:32:42, CSVCreated=2025/09/18 16:32:34, CSVBackup=2025/09/18 16:33:23, ImageCount=43, ProcessEnd=2025/09/18 16:33:23, TotalTime=1.149
+Start processing 20250918163344.csv at 2025/09/18 16:34:31
+Processing 20250918163344.csv: TargetFolder=20250918163344, FolderCreated=2025/09/18 16:33:52, CSVCreated=2025/09/18 16:33:44, CSVBackup=2025/09/18 16:34:32, ImageCount=37, ProcessEnd=2025/09/18 16:34:32, TotalTime=1.132
+Start processing 20250918163455.csv at 2025/09/18 16:35:42
+Processing 20250918163455.csv: TargetFolder=20250918163455, FolderCreated=2025/09/18 16:35:02, CSVCreated=2025/09/18 16:34:55, CSVBackup=2025/09/18 16:35:43, ImageCount=30, ProcessEnd=2025/09/18 16:35:43, TotalTime=1.130
+Start processing 20250918163605.csv at 2025/09/18 16:36:54
+Processing 20250918163605.csv: TargetFolder=20250918163605, FolderCreated=2025/09/18 16:36:13, CSVCreated=2025/09/18 16:36:05, CSVBackup=2025/09/18 16:36:55, ImageCount=41, ProcessEnd=2025/09/18 16:36:55, TotalTime=1.138
+
+output csv content example:
+folder_name(A)	照片數量	csv產生時間(E)	csv到W:Machine時間(F)	csv傳輸花費時間(s)	csv大小(KB)	csv傳輸速度(KB/s)	機台端產出資料時間(s) (E/A)	資料產出+傳輸時間(s) (F/A)	照片傳輸速度(s/img)	AI推論完成時間	AI推論時間(s)
+20250918163121	20	2025/8/28  03:20:58 PM	2025/8/28  03:21:09 PM	11	6.15	0.56	43	54	2.7	2025/8/28  03:21:10 PM	1.187
+20250918163234	9	2025/8/28  03:23:20 PM	2025/8/28  03:23:27 PM	7	2.95	0.42	43	50	5.56	2025/8/28  03:23:28 PM	1.151
+20250918163344	11	2025/8/28  03:41:36 PM	2025/8/28  03:41:44 PM	8	3.54	0.44	43	51	4.64	2025/8/28  03:41:45 PM	1.149
+20250918163455	13	2025/08/28 16:03:07	2025-08-28 16:03:14	7	4.12	0.59	44	51	3.92	2025-08-28 16:03:16	1.157
+20250918163605	16	2025-08-28 16:06:15	2025-08-28 16:06:35	10	4.97	0.5	40	50	3.13	2025-08-28 16:06:36	1.169
