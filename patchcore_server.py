@@ -1,8 +1,8 @@
 import os
 import asyncio
+import math
 from typing import List, Dict, Optional
 from pathlib import Path
-import pandas as pd
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -22,7 +22,8 @@ class InferenceResponse(BaseModel):
     anomalies_detected: int
     average_score: float
     processing_time: float
-    results: List[Dict]
+    # Map: key=image filename (e.g., 0_1426.jpg), value=anomaly_score (float|null if NaN)
+    results: Dict[str, Optional[float]]
 
 
 class PatchCoreServer:
@@ -59,18 +60,41 @@ class PatchCoreServer:
                     "anomalies_detected": 0,
                     "average_score": 0.0,
                     "processing_time": 0.0,
-                    "results": []
+                    "results": {}
                 }
             
-            # Calculate statistics
-            df = pd.DataFrame(results)
-            total_images = len(df)
-            anomalies_detected = int(df['anomaly_label'].sum())
-            average_score = float(df['anomaly_score'].mean())
+            # Calculate statistics without pandas
+            total_images = len(results)
+            anomalies_detected = sum(1 for r in results if bool(r.get('anomaly_label')))
+            # Mean over non-null/non-NaN anomaly scores
+            scores: List[float] = []
+            for r in results:
+                val = r.get('anomaly_score')
+                try:
+                    v = float(val)
+                except (TypeError, ValueError):
+                    v = None
+                if v is not None and not (isinstance(v, float) and math.isnan(v)):
+                    scores.append(v)
+            average_score = float(sum(scores) / len(scores)) if scores else 0.0
             
             # Get processing time from results if available
             processing_time = 0.0
             
+            # Build results map: filename -> anomaly_score (None if NaN)
+            results_map: Dict[str, Optional[float]] = {}
+            for r in results:
+                key = Path(r.get('image_path', r.get('image_name', ''))).name if r.get('image_path') else r.get('image_name', '')
+                val = r.get('anomaly_score')
+                try:
+                    v = float(val) if val is not None else None
+                except (TypeError, ValueError):
+                    v = None
+                # Normalize NaN to None
+                if isinstance(v, float) and math.isnan(v):
+                    v = None
+                results_map[key] = v
+
             return {
                 "status": "success",
                 "message": f"Successfully processed {total_images} images",
@@ -78,7 +102,7 @@ class PatchCoreServer:
                 "anomalies_detected": anomalies_detected,
                 "average_score": average_score,
                 "processing_time": processing_time,
-                "results": results
+                "results": results_map
             }
             
         except Exception as e:

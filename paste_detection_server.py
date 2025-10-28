@@ -16,19 +16,13 @@ class InferenceRequest(BaseModel):
     image_extensions: Optional[List[str]] = None
 
 
-class PasteResult(BaseModel):
-    image_path: str
-    paste_pixels: int
-    bbox: List[float]  # [x1, y1, x2, y2]
-    inference_time: float
-
-
 class InferenceResponse(BaseModel):
     status: str
     message: str
     total_images: int
     total_inference_time: float
-    results: List[PasteResult]
+    # Map: key=image filename with double extension (e.g., 0_1426.jpg.jpg), value=paste_pixels (float or null when NaN)
+    results: Dict[str, Optional[float]]
 
 
 class PasteDetectionServer:
@@ -71,25 +65,30 @@ class PasteDetectionServer:
                     "message": "No images found to process",
                     "total_images": 0,
                     "total_inference_time": total_inference_time,
-                    "results": []
+                    "results": {}
                 }
 
-            # Format results
-            formatted_results = []
+            # Build a convenience map for CSV merging directly as results
+            results_map: Dict[str, Optional[float]] = {}
             for result in results:
-                formatted_results.append({
-                    "image_path": result["image_path"],
-                    "paste_pixels": result["paste_pixels"],
-                    "bbox": result["bbox"],
-                    "inference_time": result["inference_time"]
-                })
+                filename = Path(result["image_path"]).name  # e.g., 0_1426.jpg
+                key = f"{filename}.jpg"  # e.g., 0_1426.jpg.jpg as requested
+                # Convert value to float and map NaN to None for JSON compatibility
+                raw_val = result.get("paste_pixels")
+                try:
+                    val = float(raw_val) if raw_val is not None else None
+                except Exception:
+                    val = None
+                if val is not None and isinstance(val, float) and np.isnan(val):
+                    val = None
+                results_map[key] = val
 
             return {
                 "status": "success",
                 "message": f"Successfully processed {len(results)} images",
                 "total_images": len(results),
                 "total_inference_time": total_inference_time,
-                "results": formatted_results
+                "results": results_map
             }
 
         except Exception as e:
