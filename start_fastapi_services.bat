@@ -1,30 +1,29 @@
 @echo off
-setlocal ENABLEDELAYEDEXPANSION
+setlocal enableextensions
 
-REM Change to the directory of this script so relative imports work
-pushd %~dp0
+REM Change to this script's directory so module imports resolve
+cd /d "%~dp0"
 
-REM Activate Conda environment 'trt'
-call conda activate trt
-if errorlevel 1 (
-  echo Failed to activate Conda environment 'trt'. Ensure conda is initialized in CMD and the env exists.
-  goto :end
-)
+REM Use Python from the specific Conda env path for 'trt'
+set "PYTHON_EXE=C:\Users\Admin\.conda\envs\trt\python.exe"
 
-REM Start the merge server (FastAPI) on port 5050
-start "ai-merge-5050" cmd /c "uvicorn ai_server_fastapi:app --host 0.0.0.0 --port 5050"
+REM Launch Merge Server (5050)
+start "Merge Server 5050" cmd /k "cd /d "%~dp0" && "%PYTHON_EXE%" ai_server_fastapi.py"
 
-REM Start three inference services (stubs) on ports 8000, 8001, 8002
-REM Replace 'inference_stub:app' with your real services if available
-start "inference-8000" cmd /c "uvicorn inference_stub:app --host 0.0.0.0 --port 8000"
-start "inference-8001" cmd /c "uvicorn inference_stub:app --host 0.0.0.0 --port 8001"
-start "inference-8002" cmd /c "uvicorn inference_stub:app --host 0.0.0.0 --port 8002"
+REM Small delay between windows (optional)
+timeout /t 1 >nul 2>nul
 
-echo Launched 4 FastAPI services in separate windows.
-echo - Merge:     http://127.0.0.1:5050/process
-echo - Inference: http://127.0.0.1:8000/inference, :8001, :8002
+REM Launch Patchcore Server (8000)
+start "Patchcore Server 8000" cmd /k "cd /d "%~dp0" && "%PYTHON_EXE%" patchcore_server.py --host 0.0.0.0 --port 8000"
 
-:end
-popd
+timeout /t 1 >nul 2>nul
+
+REM Launch Paste Detection Server (8001)
+start "Paste Server 8001" cmd /k "cd /d "%~dp0" && "%PYTHON_EXE%" paste_detection_server.py --host 0.0.0.0 --port 8001"
+
+timeout /t 1 >nul 2>nul
+
+REM Launch Distance Detection Server (8002)
+start "Distance Server 8002" cmd /k "cd /d "%~dp0" && "%PYTHON_EXE%" distance_detection_server.py --host 0.0.0.0 --port 8002"
+
 endlocal
-

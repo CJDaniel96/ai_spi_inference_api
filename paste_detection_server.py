@@ -21,7 +21,8 @@ class InferenceResponse(BaseModel):
     message: str
     total_images: int
     total_inference_time: float
-    # Map: key=image filename with double extension (e.g., 0_1426.jpg.jpg), value=paste_pixels (float or null when NaN)
+    # Map: key=normalized image key (e.g., 0_1426.jpg), value=paste_pixels (float or null when NaN)
+    # Note: keys are normalized to `<stem>.jpg` regardless of actual file extension
     results: Dict[str, Optional[float]]
 
 
@@ -71,8 +72,16 @@ class PasteDetectionServer:
             # Build a convenience map for CSV merging directly as results
             results_map: Dict[str, Optional[float]] = {}
             for result in results:
-                filename = Path(result["image_path"]).name  # e.g., 0_1426.jpg
-                key = f"{filename}.jpg"  # e.g., 0_1426.jpg.jpg as requested
+                filename = Path(result["image_path"]).name  # e.g., 0_1426.jpg or 0_1426.png
+                stem = Path(filename).stem  # e.g., 0_1426 or (if previously doubled) 0_1426.jpg
+                # If stem itself has an image extension (from previous double-appending), strip once more
+                lower_stem = stem.lower()
+                for ext in (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"):
+                    if lower_stem.endswith(ext):
+                        stem = Path(stem).stem
+                        break
+                # Normalize key to `<stem>.jpg` to match merge server's img_name convention
+                key = f"{stem}.jpg"
                 # Convert value to float and map NaN to None for JSON compatibility
                 raw_val = result.get("paste_pixels")
                 try:

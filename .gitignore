@@ -163,19 +163,7 @@ models/**/*.pkl
 models/**/*.joblib
 
 # Data files
-data/images/
-data/processed/
-data/raw/
-data/temp/
-*.jpg
-*.jpeg
-*.png
-*.bmp
-*.tiff
-*.tif
-*.safetensors
-*.engine
-*.onnx
+data/
 
 # Local configuration
 config.local.json

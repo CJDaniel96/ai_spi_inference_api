@@ -1,5 +1,6 @@
 import asyncio
 import math
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -7,6 +8,7 @@ import pandas as pd
 import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+from datetime import datetime, timezone, timedelta
 
 
 app = FastAPI(title="AI Merge Server", version="1.0.0")
@@ -25,17 +27,67 @@ def build_img_name_column(df: pd.DataFrame) -> pd.Series:
     return array_minus_one.astype(str) + "_" + pad_str + ".jpg"
 
 
-async def post_job(client: httpx.AsyncClient, url: str, job_folder: str, timeout: int = 300) -> Tuple[str, Dict[str, Any], str]:
+async def post_job(
+    client: httpx.AsyncClient, url: str, job_folder: str, timeout: int = 300
+) -> Tuple[str, Dict[str, Any], str, Dict[str, Any]]:
+    """Call a model endpoint and capture timings/metadata.
+
+    Returns: (url, results_map, error_str, meta)
+      - results_map: dict of img_name -> float
+      - meta: {
+          'request_ms': float,
+          'inference_ms': Optional[float],   # parsed from response if available
+          'model_version': Optional[str],
+          'device': Optional[str],
+        }
+    """
+    start = time.perf_counter()
     try:
         resp = await client.post(url, json={"job_folder": job_folder}, timeout=timeout)
         resp.raise_for_status()
         data = resp.json()
+        end = time.perf_counter()
         results = data.get("results", {})
         if not isinstance(results, dict):
-            return url, {}, f"Unexpected results type from {url}: {type(results)}"
-        return url, results, ""
+            return url, {}, f"Unexpected results type from {url}: {type(results)}", {
+                "request_ms": (end - start) * 1000.0
+            }
+
+        # Try to extract optional inference/metadata from common keys if provided by the model server
+        inference_ms = None
+        model_version = None
+        device = None
+        if isinstance(data, dict):
+            inference_ms = (
+                data.get("inference_ms")
+                or (isinstance(data.get("metrics"), dict) and data.get("metrics", {}).get("inference_ms"))
+                or (isinstance(data.get("timings"), dict) and data.get("timings", {}).get("inference_ms"))
+            )
+            model_version = (
+                data.get("model_version")
+                or data.get("model_ver")
+                or data.get("version")
+            )
+            device = data.get("device")
+
+        return url, results, "", {
+            "request_ms": (end - start) * 1000.0,
+            "inference_ms": inference_ms,
+            "model_version": model_version,
+            "device": device,
+        }
     except Exception as exc:  # noqa: BLE001
-        return url, {}, f"Request to {url} failed: {exc}"
+        end = time.perf_counter()
+        return url, {}, f"Request to {url} failed: {exc}", {"request_ms": (end - start) * 1000.0}
+
+def _now_tz8_iso() -> str:
+    tz8 = timezone(timedelta(hours=8))
+    return datetime.now(tz8).isoformat()
+
+def _count_images(job_folder: Path) -> int:
+    # Count image files recursively with common extensions
+    exts = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif"}
+    return sum(1 for p in job_folder.rglob("*") if p.is_file() and p.suffix.lower() in exts)
 
 
 def merge_scalar_result(df: pd.DataFrame, results: Dict[str, Any], column_name: str) -> pd.DataFrame:
@@ -87,14 +139,20 @@ async def process_folder(job_folder: str) -> Dict[str, Any]:
     ]
 
     results_by_endpoint: Dict[str, Dict[str, Any]] = {}
+    metrics_by_endpoint: Dict[str, Dict[str, Any]] = {}
     errors: List[str] = []
+
+    # Job-level timing start (around model calls through to file writes)
+    request_start_at = _now_tz8_iso()
+    job_start = time.perf_counter()
 
     async with httpx.AsyncClient() as client:
         tasks = [post_job(client, url, job_folder) for url, _ in endpoints]
-        for url, res, err in await asyncio.gather(*tasks):
+        for url, res, err, meta in await asyncio.gather(*tasks):
             if err:
                 errors.append(err)
             results_by_endpoint[url] = res
+            metrics_by_endpoint[url] = meta
 
     ai_dir = folder / "AI"
     ai_dir.mkdir(parents=True, exist_ok=True)
@@ -114,6 +172,63 @@ async def process_folder(job_folder: str) -> Dict[str, Any]:
         df.to_csv(out_path, index=False)
         saved_files.append(str(out_path))
 
+    # Job-level timing end
+    job_end = time.perf_counter()
+    request_end_at = _now_tz8_iso()
+
+    # Derive per-model metrics mapped by target column
+    url_to_name = {endpoints[0][0]: "anomaly", endpoints[1][0]: "paste", endpoints[2][0]: "distance"}
+
+    def get_metric(prefix: str, key: str) -> float:
+        for url, _col in endpoints:
+            if url_to_name.get(url) == prefix:
+                meta = metrics_by_endpoint.get(url, {})
+                val = meta.get(key)
+                if val is None:
+                    return float("nan")
+                try:
+                    return float(val)
+                except Exception:
+                    return float("nan")
+        return float("nan")
+
+    anomaly_request_ms = get_metric("anomaly", "request_ms")
+    paste_request_ms = get_metric("paste", "request_ms")
+    distance_request_ms = get_metric("distance", "request_ms")
+    # Removed per-endpoint inference_ms metrics from logging per request
+
+    compute_total_ms = sum(
+        v for v in [anomaly_request_ms, paste_request_ms, distance_request_ms] if not pd.isna(v)
+    )
+    request_latency_ms = (job_end - job_start) * 1000.0
+
+    # Count images present in folder (jpg/jpeg)
+    img_numbers = _count_images(folder)
+
+    # Append or create job-level log CSV in repository-level log folder
+    log_row = {
+        "job_folder": str(folder),
+        "img_numbers": int(img_numbers),
+        "request_start_at": request_start_at,
+        "request_end_at": request_end_at,
+        "anomaly_request_ms": anomaly_request_ms,
+        "paste_request_ms": paste_request_ms,
+        "distance_request_ms": distance_request_ms,
+        # inference_ms fields removed from log row
+        "compute_total_ms": compute_total_ms,
+        "request_latency_ms": request_latency_ms,
+        "logged_at": _now_tz8_iso(),
+    }
+    log_df = pd.DataFrame([log_row])
+    script_dir = Path(__file__).resolve().parent
+    log_dir = script_dir / "log"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "log.csv"
+    if log_path.exists():
+        log_df.to_csv(log_path, mode="a", header=False, index=False)
+    else:
+        log_df.to_csv(log_path, index=False)
+
     return {"saved_files": saved_files, "errors": errors, "csv_count": len(csv_files)}
 
 
@@ -121,7 +236,7 @@ async def process_folder(job_folder: str) -> Dict[str, Any]:
 # Post-merge enrich helpers
 # ------------------------
 
-ANOMALY_THRESHOLD = 0.5
+ANOMALY_THRESHOLD = 0.45
 HIGH_COVER_THRESHOLD = 180.0
 SHORT_DISTANCE_THRESHOLD = 6.6
 LOW_VOL_OFFSET = -10.0
