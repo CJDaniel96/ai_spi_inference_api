@@ -59,7 +59,7 @@ This repository provides four FastAPI services that work together to process a j
 ## Quick Start
 
 1) Activate env and install deps
-- `conda activate trt`
+- `conda activate spi_env`
 - `pip install -r requirements_paste_detection.txt`
 
 2) Start all services (Windows)

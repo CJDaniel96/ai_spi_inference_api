@@ -161,6 +161,7 @@ models/**/*.bin
 models/**/*.h5
 models/**/*.pkl
 models/**/*.joblib
+models/**/*.safetensors
 
 # Data files
 data/
@@ -168,3 +169,7 @@ data/
 # Local configuration
 config.local.json
 .env.local
+
+demo_html/
+results/
+doc/

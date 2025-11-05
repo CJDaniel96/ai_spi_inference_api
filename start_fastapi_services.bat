@@ -4,8 +4,8 @@ setlocal enableextensions
 REM Change to this script's directory so module imports resolve
 cd /d "%~dp0"
 
-REM Use Python from the specific Conda env path for 'trt'
-set "PYTHON_EXE=C:\Users\Admin\.conda\envs\trt\python.exe"
+REM Use Python from the specific Conda env path for 'spi_env'
+set "PYTHON_EXE=C:\Users\Admin\.conda\envs\spi_env\python.exe"
 
 REM Launch Merge Server (5050)
 start "Merge Server 5050" cmd /k "cd /d "%~dp0" && "%PYTHON_EXE%" ai_server_fastapi.py"

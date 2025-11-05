@@ -1,5 +1,17 @@
+"""FastAPI server that orchestrates model calls, merges results into CSVs,
+and computes derived metrics/labels for SPI jobs.
+
+- Accepts a folder with CSVs/images
+- Calls configured model endpoints concurrently
+- Merges scalar results back into each CSV and writes to
+  `<external_output_root>/<job_folder_name>/AI/*.csv`
+- Logs per-request timing/metadata
+"""
+
 import asyncio
+import json
 import math
+import os
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -15,16 +27,73 @@ app = FastAPI(title="AI Merge Server", version="1.0.0")
 
 
 class JobRequest(BaseModel):
+    """Request body carrying the absolute/relative path of a job folder.
+
+    The job folder is expected to contain one or more CSV files (and images)
+    that will be enriched and written to an `AI/` subfolder.
+    """
+
     job_folder: str
 
 
 def build_img_name_column(df: pd.DataFrame) -> pd.Series:
+    """Build image filename as "{Array_id-1}_{Pad_no}.jpg" for each row.
+
+    Requires columns `Array_id` and `Pad_no`. Raises ValueError if missing.
+    """
     if "Array_id" not in df.columns or "Pad_no" not in df.columns:
         missing = [c for c in ("Array_id", "Pad_no") if c not in df.columns]
         raise ValueError(f"CSV missing required columns: {missing}")
     array_minus_one = pd.to_numeric(df["Array_id"], errors="coerce").astype("Int64") - 1
     pad_str = df["Pad_no"].astype(str)
     return array_minus_one.astype(str) + "_" + pad_str + ".jpg"
+
+
+class RuleConfig(BaseModel):
+    """Thresholds, offsets, and output root used by processing.
+
+    - anomaly_threshold: score above which rows are labeled "FM/color"
+    - high_cover_threshold: percent threshold for "high cover"
+    - short_distance_threshold: distance threshold for "short distance"
+    - low_vol_offset/high_vol_offset: dynamic insp_vol thresholds
+    - high_paste_height_threshold: insp_height threshold for "high paste"
+    - external_output_root: base folder for enriched CSVs (e.g. "E:/external")
+    """
+
+    anomaly_threshold: float
+    high_cover_threshold: float
+    short_distance_threshold: float
+    low_vol_offset: float
+    high_vol_offset: float
+    high_paste_height_threshold: float
+    external_output_root: str = "E:/external"
+
+
+_RULES: RuleConfig | None = None
+
+
+def _load_rules_from_file(path: Path) -> RuleConfig:
+    """Load `RuleConfig` from a JSON file at `path`."""
+    with path.open("r", encoding="utf-8") as f:
+        data = json.load(f)
+    return RuleConfig(**data)
+
+
+def get_rules() -> RuleConfig:
+    """Return memoized rules, reading once from env or default config.
+
+    Uses env var `AI_RULES_PATH` when set; otherwise reads `config/ai_server.json`.
+    """
+    global _RULES
+    if _RULES is not None:
+        return _RULES
+    # Path can be overridden via env var AI_RULES_PATH
+    env_path = os.getenv("AI_RULES_PATH")
+    cfg_path = Path(env_path) if env_path else Path("config/ai_server.json")
+    if not cfg_path.exists():
+        raise FileNotFoundError(f"Rules config not found: {cfg_path}")
+    _RULES = _load_rules_from_file(cfg_path)
+    return _RULES
 
 
 async def post_job(
@@ -81,10 +150,12 @@ async def post_job(
         return url, {}, f"Request to {url} failed: {exc}", {"request_ms": (end - start) * 1000.0}
 
 def _now_tz8_iso() -> str:
+    """Return current time in UTC+8 as an ISO 8601 string."""
     tz8 = timezone(timedelta(hours=8))
     return datetime.now(tz8).isoformat()
 
 def _count_images(job_folder: Path) -> int:
+    """Recursively count images under `job_folder` with common extensions."""
     # Count image files recursively with common extensions
     exts = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif"}
     return sum(1 for p in job_folder.rglob("*") if p.is_file() and p.suffix.lower() in exts)
@@ -123,6 +194,15 @@ def merge_scalar_result(df: pd.DataFrame, results: Dict[str, Any], column_name: 
 
 
 async def process_folder(job_folder: str) -> Dict[str, Any]:
+    """End-to-end pipeline for a job folder.
+
+    - Validates folder and finds CSVs
+    - Calls all model endpoints concurrently and collects results/metrics
+    - Merges scalar results into each CSV and computes derived columns
+    - Writes enriched CSVs to `<external_output_root>/<job_folder_name>/AI/`
+      and appends a request log row
+    Returns a dict with saved file paths, error messages, and CSV count.
+    """
     folder = Path(job_folder)
     if not folder.exists() or not folder.is_dir():
         raise FileNotFoundError(f"Folder not found or not a directory: {job_folder}")
@@ -154,7 +234,9 @@ async def process_folder(job_folder: str) -> Dict[str, Any]:
             results_by_endpoint[url] = res
             metrics_by_endpoint[url] = meta
 
-    ai_dir = folder / "AI"
+    # Output enriched CSVs under configured external root: <root>/<job_name>/AI
+    rules = get_rules()
+    ai_dir = Path(rules.external_output_root) / folder.name / "AI"
     ai_dir.mkdir(parents=True, exist_ok=True)
 
     saved_files: List[str] = []
@@ -236,14 +318,6 @@ async def process_folder(job_folder: str) -> Dict[str, Any]:
 # Post-merge enrich helpers
 # ------------------------
 
-ANOMALY_THRESHOLD = 0.45
-HIGH_COVER_THRESHOLD = 180.0
-SHORT_DISTANCE_THRESHOLD = 6.6
-LOW_VOL_OFFSET = -10.0
-HIGH_VOL_OFFSET = 20.0
-HIGH_PASTE_HEIGHT_THRESHOLD = 200.0
-
-
 def add_pad_area_and_cover(df: pd.DataFrame) -> pd.DataFrame:
     """Add pad_area and cover% columns when possible.
 
@@ -280,10 +354,12 @@ def add_ai_defect_name(df: pd.DataFrame) -> pd.DataFrame:
 
     assigned = out["ai_defect_name"].astype(str).str.len() > 0
 
+    rules = get_rules()
+
     # 1) Anomaly threshold
     if "anomaly_score" in out.columns:
         anomaly = pd.to_numeric(out["anomaly_score"], errors="coerce")
-        mask = (~assigned) & (anomaly > ANOMALY_THRESHOLD)
+        mask = (~assigned) & (anomaly > rules.anomaly_threshold)
         out.loc[mask, "ai_defect_name"] = "FM/color"
         assigned = out["ai_defect_name"].astype(str).str.len() > 0
 
@@ -293,8 +369,8 @@ def add_ai_defect_name(df: pd.DataFrame) -> pd.DataFrame:
         insp_vol = pd.to_numeric(out["insp_vol"], errors="coerce")
         vol_l_ng = pd.to_numeric(out["vol_l_ng"], errors="coerce")
         vol_h_ng = pd.to_numeric(out["vol_h_ng"], errors="coerce")
-        low_thr = vol_l_ng + LOW_VOL_OFFSET
-        high_thr = vol_h_ng + HIGH_VOL_OFFSET
+        low_thr = vol_l_ng + rules.low_vol_offset
+        high_thr = vol_h_ng + rules.high_vol_offset
 
         mask_high = (~assigned) & (insp_vol > high_thr)
         out.loc[mask_high, "ai_defect_name"] = "high vol"
@@ -307,21 +383,21 @@ def add_ai_defect_name(df: pd.DataFrame) -> pd.DataFrame:
     # 3) high cover
     if "cover%" in out.columns:
         cover = pd.to_numeric(out["cover%"], errors="coerce")
-        mask = (~assigned) & (cover > HIGH_COVER_THRESHOLD)
+        mask = (~assigned) & (cover > rules.high_cover_threshold)
         out.loc[mask, "ai_defect_name"] = "high cover"
         assigned = out["ai_defect_name"].astype(str).str.len() > 0
 
     # 4) short distance (note: condition provided as 6.6 < min_pad_distance)
     if "min_pad_distance" in out.columns:
         dist = pd.to_numeric(out["min_pad_distance"], errors="coerce")
-        mask = (~assigned) & (dist > SHORT_DISTANCE_THRESHOLD)
+        mask = (~assigned) & (dist > rules.short_distance_threshold)
         out.loc[mask, "ai_defect_name"] = "short distance"
         assigned = out["ai_defect_name"].astype(str).str.len() > 0
 
     # 5) high paste based on insp_height
     if "insp_height" in out.columns:
         height = pd.to_numeric(out["insp_height"], errors="coerce")
-        mask = (~assigned) & (height > HIGH_PASTE_HEIGHT_THRESHOLD)
+        mask = (~assigned) & (height > rules.high_paste_height_threshold)
         out.loc[mask, "ai_defect_name"] = "high paste"
 
     return out
@@ -346,7 +422,10 @@ def add_is_pass(df: pd.DataFrame) -> pd.DataFrame:
 
 @app.post("/process")
 async def process_route(req: JobRequest):
+    """HTTP endpoint to trigger processing for a given job folder."""
     try:
+        # Ensure rules are loaded before processing
+        _ = get_rules()
         result = await process_folder(req.job_folder)
         return {"status": "ok", **result}
     except FileNotFoundError as e:
