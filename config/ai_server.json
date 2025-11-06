@@ -5,5 +5,6 @@
   "low_vol_offset": -10.0,
   "high_vol_offset": 20.0,
   "high_paste_height_threshold": 200.0,
-  "external_output_root": "E:/external"
+  "external_output_root": "D:/Dre/JQ_SPI_02_AI_API/data",
+  "backup_output_root": "D:/Dre/JQ_SPI_02_AI_API/backup"
 }

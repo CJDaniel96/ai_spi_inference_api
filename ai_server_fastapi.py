@@ -50,7 +50,7 @@ def build_img_name_column(df: pd.DataFrame) -> pd.Series:
 
 
 class RuleConfig(BaseModel):
-    """Thresholds, offsets, and output root used by processing.
+    """Thresholds, offsets, and output roots used by processing.
 
     - anomaly_threshold: score above which rows are labeled "FM/color"
     - high_cover_threshold: percent threshold for "high cover"
@@ -58,6 +58,7 @@ class RuleConfig(BaseModel):
     - low_vol_offset/high_vol_offset: dynamic insp_vol thresholds
     - high_paste_height_threshold: insp_height threshold for "high paste"
     - external_output_root: base folder for enriched CSVs (e.g. "E:/external")
+    - backup_output_root: secondary base folder for enriched CSVs
     """
 
     anomaly_threshold: float
@@ -66,7 +67,8 @@ class RuleConfig(BaseModel):
     low_vol_offset: float
     high_vol_offset: float
     high_paste_height_threshold: float
-    external_output_root: str = "E:/external"
+    external_output_root: str
+    backup_output_root: str
 
 
 _RULES: RuleConfig | None = None
@@ -238,6 +240,9 @@ async def process_folder(job_folder: str) -> Dict[str, Any]:
     rules = get_rules()
     ai_dir = Path(rules.external_output_root) / folder.name / "AI"
     ai_dir.mkdir(parents=True, exist_ok=True)
+    # Also create backup directory
+    backup_dir = Path(rules.backup_output_root) / folder.name / "AI"
+    backup_dir.mkdir(parents=True, exist_ok=True)
 
     saved_files: List[str] = []
     for csv_path in csv_files:
@@ -251,8 +256,13 @@ async def process_folder(job_folder: str) -> Dict[str, Any]:
         df = add_ai_defect_name(df)
         df = add_is_pass(df)
         out_path = ai_dir / csv_path.name
+        backup_path = backup_dir / csv_path.name
+
+        # Save to primary and backup locations
         df.to_csv(out_path, index=False)
+        df.to_csv(backup_path, index=False)
         saved_files.append(str(out_path))
+        saved_files.append(str(backup_path))
 
     # Job-level timing end
     job_end = time.perf_counter()
