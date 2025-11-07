@@ -562,6 +562,10 @@ def add_is_pass(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+@app.get("/health")
+async def health():
+    return {"status": "healthy", "time": _now_tz8_iso()}
+
 @app.post("/process")
 async def process_route(req: JobRequest):
     """HTTP endpoint to trigger processing for a given job folder."""

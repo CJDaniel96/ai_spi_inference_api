@@ -104,6 +104,49 @@ def http_post_with_curl(url: str, payload: dict, timeout_sec: int = 30) -> tuple
         return -1, str(e)
 
 
+def http_get_status_with_curl(url: str, timeout_sec: int = 5) -> tuple[int, str]:
+    """Use curl.exe to GET and return HTTP status code and stderr.
+
+    Returns (status_code, err). On failure, status_code is -1.
+    """
+    cmd = [
+        "curl.exe",
+        "-s",
+        "-o", "NUL",
+        "-w", "%{http_code}",
+        "-X", "GET",
+        url,
+    ]
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_sec)
+        stdout = (res.stdout or "").strip()
+        status = int(stdout) if stdout.isdigit() else -1
+        return status, res.stderr.strip() if res.stderr else ""
+    except subprocess.TimeoutExpired:
+        return -1, "timeout"
+    except FileNotFoundError:
+        return -1, "curl.exe not found"
+    except Exception as e:
+        return -1, str(e)
+
+
+def log_health_checks(logger: logging.Logger) -> None:
+    """Check four service health endpoints and log their status codes."""
+    endpoints = [
+        ("http://localhost:8000/health", "anomaly_score"),
+        ("http://127.0.0.1:8001/health", "paste_pixels"),
+        ("http://127.0.0.1:8002/health", "min_pad_distance"),
+        ("http://127.0.0.1:5050/health", "5050"),
+    ]
+    for url, name in endpoints:
+        status, err = http_get_status_with_curl(url)
+        if 200 <= status <= 299:
+            logger.info(f"Health OK [{name}] {url} -> {status}")
+        else:
+            detail = f" ({err})" if err else ""
+            logger.warning(f"Health FAIL [{name}] {url} -> {status}{detail}")
+
+
 def main() -> int:
     root_dir = Path(__file__).resolve().parent
     config_path = root_dir / "config" / "ai_server.json"
@@ -154,6 +197,9 @@ def main() -> int:
 
             job_folder_payload = str(job_dir).replace("\\", "/")
             payload = {"job_folder": job_folder_payload}
+
+            # Log health of dependent services prior to posting the job
+            log_health_checks(logger)
 
             logger.info(f"Processing job {today}/{job_id} ...")
             status, err = http_post_with_curl(process_api_url, payload)
