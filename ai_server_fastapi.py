@@ -9,6 +9,8 @@ and computes derived metrics/labels for SPI jobs.
 """
 
 import asyncio
+import logging
+from logging.handlers import RotatingFileHandler
 import json
 import math
 import os
@@ -18,9 +20,11 @@ from typing import Any, Dict, List, Tuple
 
 import pandas as pd
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from datetime import datetime, timezone, timedelta
+import uuid
 
 
 app = FastAPI(title="AI Merge Server", version="1.0.0")
@@ -34,6 +38,52 @@ class JobRequest(BaseModel):
     """
 
     job_folder: str
+
+
+def get_system_logger() -> logging.Logger:
+    """Configure and return the 'system' logger writing to log/system.
+
+    Uses a rotating file handler to avoid unbounded growth (5 MB x 3).
+    """
+    logger = logging.getLogger("system")
+    if logger.handlers:
+        return logger
+    logger.setLevel(logging.INFO)
+
+    script_dir = Path(__file__).resolve().parent
+    log_dir = script_dir / "log"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "system"  # no extension as requested
+
+    handler = RotatingFileHandler(log_path, maxBytes=5 * 1024 * 1024, backupCount=3)
+    handler.setLevel(logging.INFO)
+    formatter = logging.Formatter(
+        fmt="%(asctime)s %(levelname)s %(name)s %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S%z",
+    )
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+
+    # Also log to stderr for visibility when running in foreground
+    stream = logging.StreamHandler()
+    stream.setLevel(logging.INFO)
+    stream.setFormatter(formatter)
+    logger.addHandler(stream)
+    return logger
+
+
+# Global exception handler to capture unexpected errors and persist them in system log
+@app.exception_handler(Exception)
+async def _unhandled_exception_logger(request: Request, exc: Exception):  # noqa: ANN001
+    log = get_system_logger()
+    # Log full traceback for unexpected errors
+    log.exception(
+        "event=unhandled.error path=%s method=%s err=%s",
+        request.url.path,
+        request.method,
+        str(exc),
+    )
+    return JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
 
 
 def build_img_name_column(df: pd.DataFrame) -> pd.Series:
@@ -99,7 +149,14 @@ def get_rules() -> RuleConfig:
 
 
 async def post_job(
-    client: httpx.AsyncClient, url: str, job_folder: str, timeout: int = 300
+    client: httpx.AsyncClient,
+    url: str,
+    job_folder: str,
+    *,
+    timeout: int = 300,
+    logger: logging.Logger | None = None,
+    req_id: str | None = None,
+    service: str | None = None,
 ) -> Tuple[str, Dict[str, Any], str, Dict[str, Any]]:
     """Call a model endpoint and capture timings/metadata.
 
@@ -112,7 +169,15 @@ async def post_job(
           'device': Optional[str],
         }
     """
+    log = logger or get_system_logger()
     start = time.perf_counter()
+    if service:
+        log.info(
+            "event=inference.start req_id=%s service=%s url=%s",
+            req_id or "-",
+            service,
+            url,
+        )
     try:
         resp = await client.post(url, json={"job_folder": job_folder}, timeout=timeout)
         resp.raise_for_status()
@@ -120,9 +185,17 @@ async def post_job(
         end = time.perf_counter()
         results = data.get("results", {})
         if not isinstance(results, dict):
-            return url, {}, f"Unexpected results type from {url}: {type(results)}", {
-                "request_ms": (end - start) * 1000.0
-            }
+            err_msg = f"Unexpected results type from {url}: {type(results)}"
+            if service:
+                log.error(
+                    "event=inference.error req_id=%s service=%s url=%s err=%s request_ms=%.3f",
+                    req_id or "-",
+                    service,
+                    url,
+                    err_msg,
+                    (end - start) * 1000.0,
+                )
+            return url, {}, err_msg, {"request_ms": (end - start) * 1000.0}
 
         # Try to extract optional inference/metadata from common keys if provided by the model server
         inference_ms = None
@@ -141,6 +214,23 @@ async def post_job(
             )
             device = data.get("device")
 
+        # Prepare small sample for logging
+        try:
+            sample_items = list(results.items())[:3]
+        except Exception:
+            sample_items = []
+
+        if service:
+            log.info(
+                "event=inference.done req_id=%s service=%s url=%s request_ms=%.3f result_count=%d sample=%s",
+                req_id or "-",
+                service,
+                url,
+                (end - start) * 1000.0,
+                len(results) if isinstance(results, dict) else -1,
+                repr(sample_items),
+            )
+
         return url, results, "", {
             "request_ms": (end - start) * 1000.0,
             "inference_ms": inference_ms,
@@ -149,6 +239,15 @@ async def post_job(
         }
     except Exception as exc:  # noqa: BLE001
         end = time.perf_counter()
+        if service:
+            log.error(
+                "event=inference.error req_id=%s service=%s url=%s err=%s request_ms=%.3f",
+                req_id or "-",
+                service,
+                url,
+                str(exc),
+                (end - start) * 1000.0,
+            )
         return url, {}, f"Request to {url} failed: {exc}", {"request_ms": (end - start) * 1000.0}
 
 def _now_tz8_iso() -> str:
@@ -195,7 +294,7 @@ def merge_scalar_result(df: pd.DataFrame, results: Dict[str, Any], column_name: 
     return merged
 
 
-async def process_folder(job_folder: str) -> Dict[str, Any]:
+async def process_folder(job_folder: str, *, req_id: str | None = None) -> Dict[str, Any]:
     """End-to-end pipeline for a job folder.
 
     - Validates folder and finds CSVs
@@ -228,8 +327,31 @@ async def process_folder(job_folder: str) -> Dict[str, Any]:
     request_start_at = _now_tz8_iso()
     job_start = time.perf_counter()
 
+    log = get_system_logger()
+    # Count images early for logging
+    img_numbers = _count_images(folder)
+    log.info(
+        "event=process.pipeline.start req_id=%s job_folder=%s csv_count=%d images=%d",
+        req_id or "-",
+        str(folder),
+        len(csv_files),
+        img_numbers,
+    )
+
+    url_to_name = {endpoints[0][0]: "anomaly", endpoints[1][0]: "paste", endpoints[2][0]: "distance"}
+
     async with httpx.AsyncClient() as client:
-        tasks = [post_job(client, url, job_folder) for url, _ in endpoints]
+        tasks = [
+            post_job(
+                client,
+                url,
+                job_folder,
+                logger=log,
+                req_id=req_id,
+                service=url_to_name.get(url, url),
+            )
+            for url, _ in endpoints
+        ]
         for url, res, err, meta in await asyncio.gather(*tasks):
             if err:
                 errors.append(err)
@@ -259,8 +381,8 @@ async def process_folder(job_folder: str) -> Dict[str, Any]:
         backup_path = backup_dir / csv_path.name
 
         # Save to primary and backup locations
-        df.to_csv(out_path, index=False)
-        df.to_csv(backup_path, index=False)
+        # df.to_csv(out_path, index=False)
+        # df.to_csv(backup_path, index=False)
         saved_files.append(str(out_path))
         saved_files.append(str(backup_path))
 
@@ -294,8 +416,7 @@ async def process_folder(job_folder: str) -> Dict[str, Any]:
     )
     request_latency_ms = (job_end - job_start) * 1000.0
 
-    # Count images present in folder (jpg/jpeg)
-    img_numbers = _count_images(folder)
+    # img_numbers computed earlier
 
     # Append or create job-level log CSV in repository-level log folder
     log_row = {
@@ -320,6 +441,21 @@ async def process_folder(job_folder: str) -> Dict[str, Any]:
         log_df.to_csv(log_path, mode="a", header=False, index=False)
     else:
         log_df.to_csv(log_path, index=False)
+
+    log.info(
+        "event=process.summary req_id=%s job_folder=%s csv_count=%d images=%d anomaly_ms=%.3f paste_ms=%.3f distance_ms=%.3f compute_total_ms=%.3f request_latency_ms=%.3f saved_files=%d errors=%d",
+        req_id or "-",
+        str(folder),
+        len(csv_files),
+        img_numbers,
+        anomaly_request_ms,
+        paste_request_ms,
+        distance_request_ms,
+        compute_total_ms,
+        request_latency_ms,
+        len(saved_files),
+        len(errors),
+    )
 
     return {"saved_files": saved_files, "errors": errors, "csv_count": len(csv_files)}
 
@@ -434,21 +570,48 @@ def add_is_pass(df: pd.DataFrame) -> pd.DataFrame:
 async def process_route(req: JobRequest):
     """HTTP endpoint to trigger processing for a given job folder."""
     try:
+        log = get_system_logger()
+        req_id = uuid.uuid4().hex
+        log.info(
+            "event=process.start req_id=%s job_folder=%s",
+            req_id,
+            req.job_folder,
+        )
         # Ensure rules are loaded before processing
         _ = get_rules()
-        result = await process_folder(req.job_folder)
+        result = await process_folder(req.job_folder, req_id=req_id)
+        log.info(
+            "event=process.end req_id=%s status=ok",
+            req_id,
+        )
         return {"status": "ok", **result}
     except FileNotFoundError as e:
+        get_system_logger().error(
+            "event=process.error req_id=%s status=400 err=%s",
+            locals().get("req_id", "-"),
+            str(e),
+        )
         raise HTTPException(status_code=400, detail=str(e))
     except ValueError as e:
+        get_system_logger().error(
+            "event=process.error req_id=%s status=400 err=%s",
+            locals().get("req_id", "-"),
+            str(e),
+        )
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:  # noqa: BLE001
+        # Log unexpected errors with full traceback for post-mortem analysis
+        get_system_logger().exception(
+            "event=process.error req_id=%s status=500 err=%s",
+            locals().get("req_id", "-"),
+            str(e),
+        )
         raise HTTPException(status_code=500, detail=str(e))
 
 
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("ai_server_fastapi:app", host="0.0.0.0", port=5050, reload=False)
+    uvicorn.run("ai_server_fastapi:app", host="0.0.0.0", port=5050, reload=True)
 
 # curl.exe -X POST "http://127.0.0.1:5050/process" -H "Content-Type: application/json" -d "{ \"job_folder\": \"D:/Dre/JQ_SPI_02_AI_API/data/20251028142856\" }"
