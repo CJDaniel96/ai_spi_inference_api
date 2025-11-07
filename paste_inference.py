@@ -43,7 +43,7 @@ class PasteDetectionInference:
         # Load Mobile SAM model
         try:
             # Download Mobile SAM model if not exists
-            sam_checkpoint = r"D:\Dre\JQ_SPI_02_AI_API\models\sam_segmentation\mobile_sam.pt"
+            sam_checkpoint = "models/sam_segmentation/mobile_sam.pt"
             if not os.path.exists(sam_checkpoint):
                 print("Downloading Mobile SAM model...")
                 import urllib.request

@@ -34,7 +34,7 @@ class PatchCoreInference:
             # Try DirectML first for Windows GPU acceleration
             self.session = ort.InferenceSession(
                 str(model_path), 
-                providers=['AzureExecutionProvider']
+                providers=['CUDAExecutionProvider']
             )
             print("ONNX model loaded successfully with DirectML support")
         except Exception as e:
@@ -203,7 +203,7 @@ def run_inference(job_folder: str, model_folder: str = "models/patchcore") -> pd
 
 if __name__ == "__main__":
     # Example usage
-    job_folder = "data/20250523135357"  # Update this path as needed
+    job_folder = "data/20251028143000"  # Update this path as needed
     
     try:
         df = run_inference(job_folder)
@@ -217,9 +217,9 @@ if __name__ == "__main__":
         print(df.head())
         
         # Optionally save results
-        output_file = "inference_results.csv"
-        df.to_csv(output_file, index=False)
-        print(f"\nResults saved to: {output_file}")
+        # output_file = "inference_results.csv"
+        # df.to_csv(output_file, index=False)
+        # print(f"\nResults saved to: {output_file}")
         
     except Exception as e:
         print(f"Error running inference: {e}")

@@ -1,36 +1,3 @@
-"""
-Distance Detection Server
-
-Purpose
-- Exposes a simple FastAPI service that runs two Ultralytics YOLO models:
-  - Center model (models/distance/center.pt) to locate the board/image center point.
-  - Pad model (models/distance/pad.pt) to detect pads and compute centers.
-- For each image in a job folder, returns:
-  - pad centers, min pairwise pad distance, detected center point,
-  - min distance from center point to nearest pad,
-  - and a CSV‑friendly results map keyed by filename.
-
-Usage
-- Install deps: ultralytics, fastapi, uvicorn, pydantic, numpy, torch, (optional) opencv-python.
-- Start server:
-  python distance_detection_server.py --host 127.0.0.1 --port 8002 \
-    --center-model models/distance/center.pt --pad-model models/distance/pad.pt
-
-API
-- GET /health: { status, model_ready, error }
-- POST /inference: body { "job_folder": "/path/to/folder", "image_extensions": [".jpg", ".png"] }
-  - Response includes results { "image.jpg": <float|null>, ... }.
-
-Examples (PowerShell)
-- $body = @{ job_folder = 'D:/path/to/job/folder' } | ConvertTo-Json
-- Invoke-RestMethod -Uri 'http://127.0.0.1:8002/inference' -Method Post -ContentType 'application/json' -Body $body
-- curl.exe -X POST "http://127.0.0.1:8002/inference" -H "Content-Type: application/json" -d "{ \"job_folder\": \"D:/path/to/job/folder\" }"
-
-Notes
-- Use forward slashes (D:/path/...) or escape backslashes in JSON on Windows.
-- Keep --workers 1 for GPU stability.
-"""
-
 import time
 from pathlib import Path
 from typing import List, Optional, Dict, Any
@@ -40,19 +7,9 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import uvicorn
 
-try:
-    import torch
-    from ultralytics import YOLO
-except Exception as e:  # pragma: no cover
-    YOLO = None  # type: ignore
-    torch = None  # type: ignore
-
-# OpenCV is used to get image size for a safe center-point fallback
-try:
-    import cv2  # type: ignore
-except Exception:  # pragma: no cover
-    cv2 = None  # type: ignore
-
+import torch
+from ultralytics import YOLO
+import cv2  # type: ignore
 
 class InferenceRequest(BaseModel):
     job_folder: str
@@ -73,12 +30,20 @@ class DistanceDetectionInference:
         self,
         center_model_path: str = "models/distance/center.pt",
         pad_model_path: str = "models/distance/pad.pt",
+        conf_threshold: float = 0.6,
+        closeness_threshold: float = 2.0,
+        iou_threshold: float = 0.5,
     ) -> None:
         self.center_model_path = center_model_path
         self.pad_model_path = pad_model_path
         self.center_model = None
         self.pad_model = None
         self.is_loaded = False
+        # Thresholds aligned with test/center_paste_dis_img_infer.py
+        self.conf_threshold = float(conf_threshold)
+        self.closeness_threshold = float(closeness_threshold)
+        # Skip pad boxes that overlap the selected center box with IoU >= this threshold
+        self.iou_threshold = float(iou_threshold)
 
     def load(self) -> None:
         if self.is_loaded:
@@ -120,64 +85,177 @@ class DistanceDetectionInference:
                     min_d = d
         return min_d
 
+    def _choose_center_box_closest_to_image_center(self, boxes_xyxy: np.ndarray, confs: Optional[np.ndarray], img_w: int, img_h: int) -> Optional[np.ndarray]:
+        if boxes_xyxy is None or boxes_xyxy.shape[0] == 0:
+            return None
+        # Apply confidence filtering if available
+        if confs is not None:
+            mask = confs >= self.conf_threshold
+            if not mask.any():
+                return None
+            boxes_xyxy = boxes_xyxy[mask]
+        # Select the detection whose bbox center is closest to image center
+        img_cx, img_cy = img_w / 2.0, img_h / 2.0
+        centers = self._centers_from_xyxy(boxes_xyxy)
+        dists = np.abs(centers[:, 0] - img_cx) + np.abs(centers[:, 1] - img_cy)
+        best = int(np.argmin(dists))
+        return boxes_xyxy[best:best+1, :]
+
+    def _edge_distance(self, box1: np.ndarray, box2: np.ndarray) -> float:
+        x1_min, y1_min, x1_max, y1_max = box1
+        x2_min, y2_min, x2_max, y2_max = box2
+        dx = max(0.0, x1_min - x2_max, x2_min - x1_max)
+        dy = max(0.0, y1_min - y2_max, y2_min - y1_max)
+        return float(np.hypot(dx, dy))
+
+    def _iou(self, box1: np.ndarray, box2: np.ndarray) -> float:
+        x1_min, y1_min, x1_max, y1_max = box1
+        x2_min, y2_min, x2_max, y2_max = box2
+        inter_x1 = max(x1_min, x2_min)
+        inter_y1 = max(y1_min, y2_min)
+        inter_x2 = min(x1_max, x2_max)
+        inter_y2 = min(y1_max, y2_max)
+        inter_w = max(0.0, inter_x2 - inter_x1)
+        inter_h = max(0.0, inter_y2 - inter_y1)
+        inter_area = inter_w * inter_h
+        area1 = max(0.0, x1_max - x1_min) * max(0.0, y1_max - y1_min)
+        area2 = max(0.0, x2_max - x2_min) * max(0.0, y2_max - y2_min)
+        union = area1 + area2 - inter_area
+        if union <= 0.0:
+            return 0.0
+        return float(inter_area / union)
+
+    @staticmethod
+    def calculate_distance(box1, box2):
+        """Calculates the distance between the closest borders of two bounding boxes.
+        Mirrors test/center_paste_dis_img_infer.py logic.
+        """
+        x1_min, y1_min, x1_max, y1_max = box1
+        x2_min, y2_min, x2_max, y2_max = box2
+
+        # Calculate horizontal and vertical gaps (0 when overlapping on that axis)
+        dx = max(0.0, x1_min - x2_max, x2_min - x1_max)
+        dy = max(0.0, y1_min - y2_max, y2_min - y1_max)
+
+        # Determine points (not used by API, but keep parity with test logic)
+        if dx > dy:  # Horizontal distance is greater
+            overlap_y_min = max(y1_min, y2_min)
+            overlap_y_max = min(y1_max, y2_max)
+
+            if overlap_y_min < overlap_y_max:
+                y_coord = (overlap_y_min + overlap_y_max) / 2.0
+            else:
+                y_coord = (y1_min + y1_max + y2_min + y2_max) / 4.0
+
+            if x1_min > x2_max:
+                start_point = (int(x1_min), int(y_coord))
+                end_point = (int(x2_max), int(y_coord))
+            else:
+                start_point = (int(x1_max), int(y_coord))
+                end_point = (int(x2_min), int(y_coord))
+        else:  # Vertical distance is greater
+            overlap_x_min = max(x1_min, x2_min)
+            overlap_x_max = min(x1_max, x2_max)
+
+            if overlap_x_min < overlap_x_max:
+                x_coord = (overlap_x_min + overlap_x_max) / 2.0
+            else:
+                x_coord = (x1_min + x1_max + x2_min + x2_max) / 4.0
+
+            if y1_min > y2_max:
+                start_point = (int(x_coord), int(y1_min))
+                end_point = (int(x_coord), int(y2_max))
+            else:
+                start_point = (int(x_coord), int(y1_max))
+                end_point = (int(x_coord), int(y2_min))
+
+        return dx, dy, start_point, end_point
+
     def process_image(self, image_path: Path) -> Dict[str, Any]:
-        if not self.is_loaded or self.center_model is None or self.pad_model is None:
-            raise RuntimeError("Models not loaded. Call load() first.")
-
         start = time.time()
-
-        # Detect center point (take highest-confidence detection's bbox center). If none, fallback to image center.
-        center_results = self.center_model(str(image_path), verbose=False)
-        center_boxes = center_results[0].boxes
-        center_point = None
-        if center_boxes is not None and center_boxes.xyxy is not None and center_boxes.xyxy.shape[0] > 0:
-            # Choose the box with max confidence
-            conf = center_boxes.conf.cpu().numpy() if getattr(center_boxes, "conf", None) is not None else None
-            idx = int(conf.argmax()) if conf is not None and conf.size > 0 else 0
-            xyxy_c = center_boxes.xyxy.cpu().numpy()[idx:idx+1, :]
-            center_point = self._centers_from_xyxy(xyxy_c)[0]
-        else:
-            # Fallback: image center if OpenCV is available; otherwise [0, 0]
-            if cv2 is not None:
-                img = cv2.imread(str(image_path))
-                if img is not None:
-                    h, w = img.shape[:2]
-                    center_point = np.array([w / 2.0, h / 2.0], dtype=float)
-            if center_point is None:
-                center_point = np.array([0.0, 0.0], dtype=float)
-
-        # Detect pads and compute their centers
-        pad_results = self.pad_model(str(image_path), verbose=False)
-        pad_boxes = pad_results[0].boxes
-        if pad_boxes is None or pad_boxes.xyxy is None or pad_boxes.xyxy.shape[0] == 0:
+        img = cv2.imread(str(image_path))
+        if img is None:
             return {
                 "image_path": str(image_path),
                 "image_name": image_path.name,
                 "num_pads": 0,
                 "min_pad_distance": None,
                 "pad_centers": [],
-                "center_point": center_point.astype(float).tolist(),
+                "center_point": None,
                 "min_center_to_pad_distance": None,
                 "inference_time": time.time() - start,
             }
 
-        xyxy = pad_boxes.xyxy.cpu().numpy()
-        centers = self._centers_from_xyxy(xyxy)
-        min_pair = self._min_pairwise_distance(centers)
+        img_h, img_w = img.shape[:2]
+        img_center_x, img_center_y = img_w / 2.0, img_h / 2.0
 
-        # Distance from detected center to nearest pad center
-        d_center = None
-        if centers.shape[0] > 0:
-            d_center = float(np.min(np.hypot(centers[:, 0] - center_point[0], centers[:, 1] - center_point[1])))
+        # Run center model
+        try:
+            center_results = self.center_model(img, conf=self.conf_threshold)
+            c_boxes_tensor = center_results[0].boxes if center_results and center_results[0] is not None else None
+            center_boxes = (
+                c_boxes_tensor.xyxy.cpu().numpy()
+                if (c_boxes_tensor is not None and getattr(c_boxes_tensor, "xyxy", None) is not None)
+                else np.zeros((0, 4), dtype=float)
+            )
+        except Exception as e:
+            print("Failed to run center model:", e)
+            center_boxes = np.zeros((0, 4), dtype=float)
+
+        if center_boxes.shape[0] == 0:
+            return {
+                "image_path": str(image_path),
+                "image_name": image_path.name,
+                "num_pads": 0,
+                "min_pad_distance": None,
+                "pad_centers": [],
+                "center_point": None,
+                "min_center_to_pad_distance": None,
+                "inference_time": time.time() - start,
+            }
+
+        # Choose the center bbox closest to the image center (L1 distance)
+        def _center_dist(box):
+            return abs((box[0] + box[2]) / 2.0 - img_center_x) + abs((box[1] + box[3]) / 2.0 - img_center_y)
+
+        center_box = min(center_boxes, key=_center_dist)
+
+        # Run pad model
+        try:
+            pad_results = self.pad_model(img, conf=self.conf_threshold)
+            p_boxes_tensor = pad_results[0].boxes if pad_results and pad_results[0] is not None else None
+            pad_boxes = (
+                p_boxes_tensor.xyxy.cpu().numpy()
+                if (p_boxes_tensor is not None and getattr(p_boxes_tensor, "xyxy", None) is not None)
+                else np.zeros((0, 4), dtype=float)
+            )
+        except Exception as e:
+            print("Failed to run pad model:", e)
+            pad_boxes = np.zeros((0, 4), dtype=float)
+
+        # Compute distances from center bbox to each pad bbox (edge-to-edge),
+        # only keep non-overlapping and above closeness threshold
+        distances: List[float] = []
+        for box in pad_boxes:
+            dx, dy, _, _ = DistanceDetectionInference.calculate_distance(center_box, box)
+            d = float(np.hypot(dx, dy))
+            if (dx > 0.0 or dy > 0.0) and d >= self.closeness_threshold:
+                distances.append(d)
+
+        min_center_to_pad_distance: Optional[float] = float(min(distances)) if distances else None
+
+        pad_centers = self._centers_from_xyxy(pad_boxes) if pad_boxes.shape[0] > 0 else np.zeros((0, 2), dtype=float)
+        center_point = [float((center_box[0] + center_box[2]) / 2.0), float((center_box[1] + center_box[3]) / 2.0)]
 
         return {
             "image_path": str(image_path),
             "image_name": image_path.name,
-            "num_pads": int(centers.shape[0]),
-            "min_pad_distance": None if min_pair is None else float(min_pair),
-            "pad_centers": centers.astype(float).tolist(),
-            "center_point": center_point.astype(float).tolist(),
-            "min_center_to_pad_distance": d_center,
+            "num_pads": int(pad_boxes.shape[0]),
+            # Pairwise pad-to-pad min distance not required by API; leave None to avoid confusion
+            "min_pad_distance": None,
+            "pad_centers": pad_centers.astype(float).tolist(),
+            "center_point": center_point,
+            "min_center_to_pad_distance": min_center_to_pad_distance,
             "inference_time": time.time() - start,
         }
 
@@ -285,16 +363,22 @@ if __name__ == "__main__":  # pragma: no cover
     parser.add_argument("--port", type=int, default=8002, help="Port to bind")
     parser.add_argument("--center-model", default="models/distance/center.pt", help="Path to center model")
     parser.add_argument("--pad-model", default="models/distance/pad.pt", help="Path to pad model")
+    parser.add_argument("--conf-threshold", type=float, default=0.6, help="Confidence threshold for YOLO detections")
+    parser.add_argument("--closeness-threshold", type=float, default=2.0, help="Minimum edge distance to consider (px)")
+    parser.add_argument("--iou-threshold", type=float, default=0.5, help="IoU threshold to skip pad boxes overlapping the center bbox")
     parser.add_argument("--workers", type=int, default=1, help="Number of worker processes")
     args = parser.parse_args()
 
     server_engine.center_model_path = args.center_model
     server_engine.pad_model_path = args.pad_model
+    server_engine.conf_threshold = float(args.conf_threshold)
+    server_engine.closeness_threshold = float(args.closeness_threshold)
+    server_engine.iou_threshold = float(args.iou_threshold)
 
     uvicorn.run(
         "distance_detection_server:app",
         host=args.host,
         port=args.port,
         workers=args.workers,
-        reload=False,
+        reload=True,
     )

@@ -136,12 +136,7 @@ def get_rules() -> RuleConfig:
 
     Uses env var `AI_RULES_PATH` when set; otherwise reads `config/ai_server.json`.
     """
-    global _RULES
-    if _RULES is not None:
-        return _RULES
-    # Path can be overridden via env var AI_RULES_PATH
-    env_path = os.getenv("AI_RULES_PATH")
-    cfg_path = Path(env_path) if env_path else Path("config/ai_server.json")
+    cfg_path = Path("config/ai_server.json")
     if not cfg_path.exists():
         raise FileNotFoundError(f"Rules config not found: {cfg_path}")
     _RULES = _load_rules_from_file(cfg_path)
@@ -381,8 +376,8 @@ async def process_folder(job_folder: str, *, req_id: str | None = None) -> Dict[
         backup_path = backup_dir / csv_path.name
 
         # Save to primary and backup locations
-        # df.to_csv(out_path, index=False)
-        # df.to_csv(backup_path, index=False)
+        df.to_csv(out_path, index=False)
+        df.to_csv(backup_path, index=False)
         saved_files.append(str(out_path))
         saved_files.append(str(backup_path))
 
@@ -490,7 +485,7 @@ def add_ai_defect_name(df: pd.DataFrame) -> pd.DataFrame:
       1) anomaly_score > 0.5 -> "FM/color"
       2) insp_vol outside dynamic thresholds -> "high vol" / "low vol"
       3) cover% > 180 -> "high cover"
-      4) 6.6 < min_pad_distance -> "short distance" (as requested)
+      4) 6.6 > min_pad_distance -> "short distance" (as requested)
       5) insp_height > 200 -> "high paste"
     Only the first matching condition per row is applied.
     """
@@ -533,10 +528,11 @@ def add_ai_defect_name(df: pd.DataFrame) -> pd.DataFrame:
         out.loc[mask, "ai_defect_name"] = "high cover"
         assigned = out["ai_defect_name"].astype(str).str.len() > 0
 
+    print(out.head())
     # 4) short distance (note: condition provided as 6.6 < min_pad_distance)
     if "min_pad_distance" in out.columns:
         dist = pd.to_numeric(out["min_pad_distance"], errors="coerce")
-        mask = (~assigned) & (dist > rules.short_distance_threshold)
+        mask = (~assigned) & (dist < rules.short_distance_threshold)
         out.loc[mask, "ai_defect_name"] = "short distance"
         assigned = out["ai_defect_name"].astype(str).str.len() > 0
 
