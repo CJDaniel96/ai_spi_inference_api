@@ -16,7 +16,7 @@ import math
 import os
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 import httpx
@@ -121,7 +121,7 @@ class RuleConfig(BaseModel):
     backup_output_root: str
 
 
-_RULES: RuleConfig | None = None
+_RULES: Optional[RuleConfig] = None
 
 
 def _load_rules_from_file(path: Path) -> RuleConfig:
@@ -149,9 +149,9 @@ async def post_job(
     job_folder: str,
     *,
     timeout: int = 300,
-    logger: logging.Logger | None = None,
-    req_id: str | None = None,
-    service: str | None = None,
+    logger: Optional[logging.Logger] = None,
+    req_id: Optional[str] = None,
+    service: Optional[str] = None,
 ) -> Tuple[str, Dict[str, Any], str, Dict[str, Any]]:
     """Call a model endpoint and capture timings/metadata.
 
@@ -289,7 +289,7 @@ def merge_scalar_result(df: pd.DataFrame, results: Dict[str, Any], column_name: 
     return merged
 
 
-async def process_folder(job_folder: str, *, req_id: str | None = None) -> Dict[str, Any]:
+async def process_folder(job_folder: str, *, req_id: Optional[str] = None) -> Dict[str, Any]:
     """End-to-end pipeline for a job folder.
 
     - Validates folder and finds CSVs

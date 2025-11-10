@@ -1,28 +1,25 @@
-# --extra-index-url https://download.pytorch.org/whl/cu121
-# pip install --extra-index-url https://download.pytorch.org/whl/cu121 torch==2.5.1+cu121
-# torchvision==0.20.1+cu121
-# Core web framework and server
+# To install PyTorch with CUDA 11.7, run the following command:
+# pip install torch==1.13.1+cu117 torchvision==0.14.1+cu117 --extra-index-url https://download.pytorch.org/whl/cu117
+# Core web framework and server prd python 3.9
 fastapi==0.115.12
 uvicorn==0.34.1
 httpx==0.28.1
 pydantic==2.11.3
 
 # Data and numerics
-pandas==2.2.3
-numpy==2.2.4
+pandas==2.1.4
+numpy==1.26.4
 
 # Computer vision and ML
 opencv-python==4.11.0.86
-matplotlib==3.10.1
-torch==2.5.1
+matplotlib==3.8.4
 ultralytics==8.3.187
 
 # Anomaly detection (used by PatchCore PyTorch scripts)
-anomalib==2.0.0
+anomalib==0.7.0
 
 # ONNX Runtime providers (Windows DirectML and generic CPU)
-onnxruntime==1.22.1
-onnxruntime-directml==1.22.0
+onnxruntime-gpu==1.14.1 # For NVIDIA GPU support via CUDA
 
 # Mobile SAM (segmentation helper)
-mobile-sam @ git+https://github.com/ChaoningZhang/MobileSAM.git
+# mobile-sam @ git+https://github.com/ChaoningZhang/MobileSAM.git
