@@ -5,10 +5,11 @@
   "low_vol_offset": -10.0,
   "high_vol_offset": 20.0,
   "high_paste_height_threshold": 200.0,
-  "external_output_root": "D:/Dre/JQ_SPI_02_AI_API/data",
+  "external_output_root": "D:/spi_add_log/data",
   "backup_output_root": "D:/Dre/JQ_SPI_02_AI_API/backup",
-  "watch_root": "D:/Dre/JQ_SPI_02_AI_API/data",
+  "watch_root": "D:/spi_ai/output/01/sfcTemp",
   "process_api_url": "http://127.0.0.1:5050/process",
+  "processed_registry_path": "log/processed.json",
   "rescan_interval_ms": 1000,
-  "processed_registry_path": "config/processed.json"
+  "folder_images_num_threshold": 100
 }

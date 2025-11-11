@@ -119,6 +119,8 @@ class RuleConfig(BaseModel):
     high_paste_height_threshold: float
     external_output_root: str
     backup_output_root: str
+    # Guardrails
+    folder_images_num_threshold: int
 
 
 _RULES: Optional[RuleConfig] = None
@@ -256,7 +258,6 @@ def _count_images(job_folder: Path) -> int:
     exts = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif"}
     return sum(1 for p in job_folder.rglob("*") if p.is_file() and p.suffix.lower() in exts)
 
-
 def merge_scalar_result(df: pd.DataFrame, results: Dict[str, Any], column_name: str) -> pd.DataFrame:
     """Merge scalar float results into df under the specified column name.
 
@@ -323,7 +324,8 @@ async def process_folder(job_folder: str, *, req_id: Optional[str] = None) -> Di
     job_start = time.perf_counter()
 
     log = get_system_logger()
-    # Count images early for logging
+    rules = get_rules()
+
     img_numbers = _count_images(folder)
     log.info(
         "event=process.pipeline.start req_id=%s job_folder=%s csv_count=%d images=%d",
@@ -332,6 +334,62 @@ async def process_folder(job_folder: str, *, req_id: Optional[str] = None) -> Di
         len(csv_files),
         img_numbers,
     )
+
+    # Guard: skip inference if image count exceeds threshold
+    try:
+        threshold = int(rules.folder_images_num_threshold)
+    except Exception:
+        threshold = None
+
+    if threshold is not None and img_numbers > threshold:
+        job_end = time.perf_counter()
+        request_end_at = _now_tz8_iso()
+
+        anomaly_request_ms = 0.0
+        paste_request_ms = 0.0
+        distance_request_ms = 0.0
+        compute_total_ms = 0.0
+        request_latency_ms = (job_end - job_start) * 1000.0
+
+        log_row = {
+            "job_folder": str(folder),
+            "img_numbers": int(img_numbers),
+            "request_start_at": request_start_at,
+            "request_end_at": request_end_at,
+            "anomaly_request_ms": anomaly_request_ms,
+            "paste_request_ms": paste_request_ms,
+            "distance_request_ms": distance_request_ms,
+            "compute_total_ms": compute_total_ms,
+            "request_latency_ms": request_latency_ms,
+            "logged_at": _now_tz8_iso(),
+        }
+        log_df = pd.DataFrame([log_row])
+        script_dir = Path(__file__).resolve().parent
+        log_dir = script_dir / "log"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / "log.csv"
+        if log_path.exists():
+            log_df.to_csv(log_path, mode="a", header=False, index=False)
+        else:
+            log_df.to_csv(log_path, index=False)
+
+        log.info(
+            "event=process.skip req_id=%s job_folder=%s reason=images_exceed_threshold images=%d threshold=%s request_latency_ms=%.3f",
+            req_id or "-",
+            str(folder),
+            img_numbers,
+            str(threshold),
+            request_latency_ms,
+        )
+        return {
+            "status": "finished scanning",
+            "skipped": True,
+            "reason": "images_exceed_threshold",
+            "img_numbers": img_numbers,
+            "csv_count": len(csv_files),
+            "saved_files": [],
+            "errors": [],
+        }
 
     url_to_name = {endpoints[0][0]: "anomaly", endpoints[1][0]: "paste", endpoints[2][0]: "distance"}
 
@@ -354,7 +412,6 @@ async def process_folder(job_folder: str, *, req_id: Optional[str] = None) -> Di
             metrics_by_endpoint[url] = meta
 
     # Output enriched CSVs under configured external root: <root>/<job_name>/AI
-    rules = get_rules()
     ai_dir = Path(rules.external_output_root) / folder.name / "AI"
     ai_dir.mkdir(parents=True, exist_ok=True)
     # Also create backup directory
@@ -584,6 +641,9 @@ async def process_route(req: JobRequest):
             "event=process.end req_id=%s status=ok",
             req_id,
         )
+        # If the processing already provided a status (e.g., finished scanning), pass it through
+        if isinstance(result, dict) and "status" in result:
+            return result
         return {"status": "ok", **result}
     except FileNotFoundError as e:
         get_system_logger().error(

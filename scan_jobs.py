@@ -7,6 +7,7 @@ import subprocess
 import logging
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
+from typing import Optional
 
 
 def setup_logging(base_dir: Path) -> logging.Logger:
@@ -33,7 +34,7 @@ def setup_logging(base_dir: Path) -> logging.Logger:
     return logger
 
 
-def load_config(config_path: Path, logger: logging.Logger | None = None) -> dict:
+def load_config(config_path: Path, logger: Optional[logging.Logger] = None) -> dict:
     try:
         with config_path.open("r", encoding="utf-8") as f:
             cfg = json.load(f)
@@ -56,7 +57,7 @@ def load_config(config_path: Path, logger: logging.Logger | None = None) -> dict
     return cfg
 
 
-def load_registry(registry_path: Path, logger: logging.Logger | None = None) -> dict:
+def load_registry(registry_path: Path, logger: Optional[logging.Logger] = None) -> dict:
     if not registry_path.exists():
         return {}
     try:
