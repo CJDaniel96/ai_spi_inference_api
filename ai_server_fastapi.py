@@ -373,6 +373,27 @@ async def process_folder(job_folder: str, *, req_id: Optional[str] = None) -> Di
         else:
             log_df.to_csv(log_path, index=False)
 
+        # Also write CSVs to primary and backup with only is_pass=23
+        saved_files: List[str] = []
+        ai_dir = Path(rules.external_output_root) / folder.name / "AI"
+        ai_dir.mkdir(parents=True, exist_ok=True)
+        backup_dir = Path(rules.backup_output_root) / folder.name / "AI"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        for csv_path in csv_files:
+            df = pd.read_csv(csv_path)
+            df = df.copy()
+            # Overwrite/assign is_pass = 23 for all rows
+            try:
+                df["is_pass"] = pd.Series(23, index=df.index, dtype="Int64")
+            except Exception:
+                df["is_pass"] = 23
+            out_path = ai_dir / csv_path.name
+            backup_path = backup_dir / csv_path.name
+            df.to_csv(out_path, index=False)
+            df.to_csv(backup_path, index=False)
+            saved_files.append(str(out_path))
+            saved_files.append(str(backup_path))
+
         log.info(
             "event=process.skip req_id=%s job_folder=%s reason=images_exceed_threshold images=%d threshold=%s request_latency_ms=%.3f",
             req_id or "-",
@@ -387,7 +408,7 @@ async def process_folder(job_folder: str, *, req_id: Optional[str] = None) -> Di
             "reason": "images_exceed_threshold",
             "img_numbers": img_numbers,
             "csv_count": len(csv_files),
-            "saved_files": [],
+            "saved_files": saved_files,
             "errors": [],
         }
 

@@ -162,6 +162,7 @@ models/**/*.h5
 models/**/*.pkl
 models/**/*.joblib
 models/**/*.safetensors
+models/**/*.engine
 
 # Data files
 data/
@@ -173,3 +174,7 @@ config.local.json
 demo_html/
 results/
 doc/
+
+tensorrt/image
+tensorrt/int8_dataset
+tensorrt/output
