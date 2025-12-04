@@ -232,7 +232,7 @@ class DistanceDetectionInference:
                 if (dx > 0.0 or dy > 0.0) and d >= self.closeness_threshold: 
                     distances.append(d) 
  
-            min_center_to_pad_distance: Optional[float] = float(min(distances)) if distances else None 
+            min_center_to_pad_distance: Optional[float] = float(f"{min(distances):.2f}") if distances else None 
  
             pad_centers = self._centers_from_xyxy(pad_boxes) if pad_boxes.shape[0] > 0 else np.zeros((0, 2), dtype=float) 
             center_point = [float((center_box[0] + center_box[2]) / 2.0), float((center_box[1] + center_box[3]) / 2.0)] 

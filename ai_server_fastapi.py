@@ -311,7 +311,7 @@ async def process_folder(job_folder: str, *, req_id: Optional[str] = None) -> Di
     # Map each model endpoint to its target float column name
     endpoints: List[Tuple[str, str]] = [
         ("http://localhost:8000/inference", "anomaly_score"),
-        ("http://127.0.0.1:8001/inference", "paste_pixels"),
+        # ("http://127.0.0.1:8001/inference", "paste_pixels"),
         ("http://127.0.0.1:8002/inference", "min_pad_distance"),
     ]
 
@@ -412,7 +412,8 @@ async def process_folder(job_folder: str, *, req_id: Optional[str] = None) -> Di
             "errors": [],
         }
 
-    url_to_name = {endpoints[0][0]: "anomaly", endpoints[1][0]: "paste", endpoints[2][0]: "distance"}
+    # url_to_name = {endpoints[0][0]: "anomaly", endpoints[1][0]: "paste", endpoints[2][0]: "distance"}
+    url_to_name = {endpoints[0][0]: "anomaly", endpoints[1][0]: "distance"}
 
     async with httpx.AsyncClient() as client:
         tasks = [
@@ -447,7 +448,7 @@ async def process_folder(job_folder: str, *, req_id: Optional[str] = None) -> Di
         for url, col_name in endpoints:
             df = merge_scalar_result(df, results_by_endpoint.get(url, {}), col_name)
         # Compute derived metrics and defect name
-        df = add_pad_area_and_cover(df)
+        # df = add_pad_area_and_cover(df)
         df = add_ai_defect_name(df)
         df = add_is_pass(df)
         out_path = ai_dir / csv_path.name
@@ -464,7 +465,8 @@ async def process_folder(job_folder: str, *, req_id: Optional[str] = None) -> Di
     request_end_at = _now_tz8_iso()
 
     # Derive per-model metrics mapped by target column
-    url_to_name = {endpoints[0][0]: "anomaly", endpoints[1][0]: "paste", endpoints[2][0]: "distance"}
+    # url_to_name = {endpoints[0][0]: "anomaly", endpoints[1][0]: "paste", endpoints[2][0]: "distance"}
+    url_to_name = {endpoints[0][0]: "anomaly", endpoints[1][0]: "distance"}
 
     def get_metric(prefix: str, key: str) -> float:
         for url, _col in endpoints:

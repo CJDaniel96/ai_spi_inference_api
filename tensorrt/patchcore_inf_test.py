@@ -7,7 +7,7 @@ import pycuda.autoinit
 # --- Configuration ---
 BATCH_SIZE = 8  # Set target batch size
 ENGINE_FILE_PATH = r"D:\Dre\JQ_SPI_02_AI_API\models\patchcore\model_fp16.engine"
-IMAGE_PATH = r"D:\Dre\JQ_SPI_02_AI_API\data\20250523135357\7_258.jpg"
+IMAGE_PATH = r"D:\Dre\JQ_SPI_02_AI_API\data\20250523135357\7_259.jpg"
 
 # --- Helper Classes ---
 class HostDeviceMem(object):

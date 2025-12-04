@@ -11,5 +11,5 @@
   "process_api_url": "http://127.0.0.1:5050/process",
   "processed_registry_path": "log/processed.json",
   "rescan_interval_ms": 500,
-  "folder_images_num_threshold": 100
+  "folder_images_num_threshold": 500
 }
