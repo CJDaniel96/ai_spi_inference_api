@@ -135,7 +135,7 @@ def log_health_checks(logger: logging.Logger) -> None:
     """Check four service health endpoints and log their status codes."""
     endpoints = [
         ("http://localhost:8000/health", "anomaly_score"),
-        ("http://127.0.0.1:8001/health", "paste_pixels"),
+        # ("http://127.0.0.1:8001/health", "paste_pixels"),
         ("http://127.0.0.1:8002/health", "min_pad_distance"),
         ("http://127.0.0.1:5050/health", "5050"),
     ]

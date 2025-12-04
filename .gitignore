@@ -163,6 +163,9 @@ models/**/*.pkl
 models/**/*.joblib
 models/**/*.safetensors
 models/**/*.engine
+*.cache
+*.ckpt
+*.zip
 
 # Data files
 data/
