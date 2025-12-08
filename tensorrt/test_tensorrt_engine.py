@@ -17,14 +17,14 @@ import time
 # CONFIGURATION - Modify these variables
 # ============================================================================
 
-# Path to your TensorRT engine file (.engine)
-ENGINE_PATH = r"D:\Dre\JQ_SPI_02_AI_API\models\tensorrt\pad.engine"
+# Path to your TensorRT engine file (.engine) - relative to project root
+ENGINE_PATH = os.path.join("models", "tensorrt", "center.engine")
 
 # Directory containing test images
-IMAGE_DIR = r"D:\Dre\JQ_SPI_02_AI_API\tensorrt\image"
+IMAGE_DIR = os.path.join("tensorrt", "image")
 
 # Output directory for images with predictions
-OUTPUT_DIR = r"D:\Dre\JQ_SPI_02_AI_API\tensorrt\output"
+OUTPUT_DIR = os.path.join("tensorrt", "output")
 
 # Confidence threshold for detections
 CONF_THRESHOLD = 0.25

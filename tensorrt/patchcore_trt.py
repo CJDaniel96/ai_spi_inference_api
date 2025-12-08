@@ -10,14 +10,14 @@ import pycuda.autoinit
 # 設定區 (Configuration)
 # ==========================================
 # Options: 'fp32', 'fp16', 'int8'
-PRECISION_MODE = 'fp32' 
+PRECISION_MODE = 'fp16' 
 
-ONNX_FILE_PATH = r'D:\Dre\JQ_SPI_02_AI_API\models\patchcore\model.onnx\weights\onnx\model.onnx'
+ONNX_FILE_PATH = os.path.join('models', 'patchcore', 'model.onnx', 'weights', 'onnx', 'model.onnx')
 # Base path for engine (suffix will be added automatically, e.g., model_fp16.engine)
-ENGINE_BASE_PATH = r'D:\Dre\JQ_SPI_02_AI_API\models\patchcore\model' 
+ENGINE_BASE_PATH = os.path.join('models', 'patchcore', 'model')
 
-CALIBRATION_IMG_DIR = r'D:\Dre\JQ_SPI_02_AI_API\tensorrt\int8_dataset'
-CACHE_FILE = r'calibration.cache'
+CALIBRATION_IMG_DIR = os.path.join('tensorrt', 'int8_dataset')
+CACHE_FILE = 'calibration.cache'
 
 INPUT_SHAPE = (3, 256, 256)  # (Channels, Height, Width)
 BATCH_SIZE = 8               # Target Batch Size

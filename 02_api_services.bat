@@ -26,4 +26,9 @@ timeout /t 1 >nul 2>nul
 REM Launch Distance Detection Server (8002)
 start "SPI_02_Distance_8002" cmd /k "cd /d "%~dp0" && "%PYTHON_EXE%" distance_detection_api_trt.py --host 0.0.0.0 --port 8002"
 
+timeout /t 1 >nul 2>nul
+
+REM Scan Jobs
+start "SPI_02_Scan" cmd /k "cd /d "%~dp0" && "%PYTHON_EXE%" scan_jobs.py"
+
 endlocal

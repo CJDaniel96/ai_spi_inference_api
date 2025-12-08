@@ -3,11 +3,12 @@ import numpy as np
 import cv2
 import pycuda.driver as cuda
 import pycuda.autoinit
+import os
 
 # --- Configuration ---
 BATCH_SIZE = 8  # Set target batch size
-ENGINE_FILE_PATH = r"D:\Dre\JQ_SPI_02_AI_API\models\patchcore\model_fp16.engine"
-IMAGE_PATH = r"D:\Dre\JQ_SPI_02_AI_API\data\20250523135357\7_259.jpg"
+ENGINE_FILE_PATH = os.path.join("models", "patchcore", "model_fp16.engine")
+IMAGE_PATH = os.path.join("data", "20250523135357", "7_259.jpg")
 
 # --- Helper Classes ---
 class HostDeviceMem(object):

@@ -2,8 +2,8 @@ import tensorrt as trt
 import os
 
 # Define file paths
-onnx_file_path = r'D:\Dre\JQ_SPI_02_AI_API\models\patchcore\model.onnx\weights\onnx\model.onnx'
-engine_file_path = r'D:\Dre\JQ_SPI_02_AI_API\models\patchcore\spi.engine'
+onnx_file_path = os.path.join('models', 'patchcore', 'model.onnx', 'weights', 'onnx', 'model.onnx')
+engine_file_path = os.path.join('models', 'patchcore', 'spi.engine')
 
 # Define builder, network, and parser
 TRT_LOGGER = trt.Logger(trt.Logger.WARNING)

@@ -2,6 +2,7 @@ from anomalib.models import Patchcore
 from anomalib.post_processing import PostProcessor
 import torch
 import warnings
+import os
 warnings.filterwarnings("ignore")
 
 post_processor = PostProcessor(
@@ -15,6 +16,6 @@ model = Patchcore(
     coreset_sampling_ratio=0.1,
 )
 
-model.load_state_dict(torch.load(r"D:\Dre\JQ_SPI_02_AI_API\models\patchcore\model.ckpt")["state_dict"])
+model.load_state_dict(torch.load(os.path.join("models", "patchcore", "model.ckpt"))["state_dict"])
 
-model.to_onnx(r'D:\Dre\JQ_SPI_02_AI_API\models\patchcore\model.onnx')
+model.to_onnx(os.path.join("models", "patchcore", "model.onnx"))

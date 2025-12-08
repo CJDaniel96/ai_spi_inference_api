@@ -2,13 +2,13 @@
 # This YAML file defines the calibration dataset for TensorRT INT8 quantization
 #
 # Instructions:
-# 1. Place calibration images in D:\Dre\JQ_SPI_02_AI_API\tensorrt\int8_dataset
+# 1. Place calibration images in tensorrt\int8_dataset (relative to project root)
 # 2. Use representative images from your actual use case (recommended: 100-1000 images)
 # 3. Update 'nc' (number of classes) and 'names' to match your model
 # 4. Run convert_yolo11m_to_tensorrt.py with QUANTIZATION='int8'
 
 # Dataset path
-path: D:\Dre\JQ_SPI_02_AI_API\tensorrt\int8_dataset  # root directory
+path: tensorrt/int8_dataset  # root directory (relative path)
 
 # Train/val/test splits (for calibration, we only need one split)
 train: .  # use all images in int8_dataset folder

@@ -15,11 +15,11 @@ from pathlib import Path
 # CONFIGURATION - Modify these variables
 # ============================================================================
 
-# Path to your fine-tuned YOLO11m model (.pt file)
-MODEL_PATH = r"D:\Dre\JQ_SPI_02_AI_API\models\distance\pad.pt"
+# Path to your fine-tuned YOLO11m model (.pt file) - relative to project root
+MODEL_PATH = os.path.join("models", "distance", "pad.pt")
 
 # Output directory for the TensorRT engine (None = same directory as model)
-OUTPUT_DIR = r'D:\Dre\JQ_SPI_02_AI_API\models\tensorrt'
+OUTPUT_DIR = os.path.join("models", "tensorrt")
 
 # Batch size for TensorRT engine
 BATCH_SIZE = 8
@@ -31,7 +31,7 @@ QUANTIZATION = 'int8'  # Options: 'fp32', 'fp16', 'int8'
 WORKSPACE_GB = 4
 
 # INT8 calibration dataset YAML (only used when QUANTIZATION='int8')
-INT8_CALIBRATION_YAML = r"D:\Dre\JQ_SPI_02_AI_API\tensorrt\int8_calibration.yaml"
+INT8_CALIBRATION_YAML = os.path.join("tensorrt", "int8_calibration.yaml")
 
 # Dynamic batch size (True = dynamic, False = fixed batch size)
 # Note: For INT8 quantization, dynamic batch may cause issues. Use False for stable export.
