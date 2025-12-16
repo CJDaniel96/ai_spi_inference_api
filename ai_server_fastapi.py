@@ -379,18 +379,22 @@ async def process_folder(job_folder: str, *, req_id: Optional[str] = None) -> Di
         ai_dir.mkdir(parents=True, exist_ok=True)
         backup_dir = Path(rules.backup_output_root) / folder.name / "AI"
         backup_dir.mkdir(parents=True, exist_ok=True)
+        
         for csv_path in csv_files:
-            df = pd.read_csv(csv_path)
-            df = df.copy()
-            # Overwrite/assign is_pass = 23 for all rows
-            try:
-                df["is_pass"] = pd.Series(23, index=df.index, dtype="Int64")
-            except Exception:
-                df["is_pass"] = 23
+            # === MODIFICATION START: Read as string to preserve format ===
+            df_out = pd.read_csv(csv_path, dtype=str, keep_default_na=False)
+            
+            # Overwrite/assign is_pass = "23" for all rows (as string)
+            df_out["is_pass"] = "23"
+            
             out_path = ai_dir / csv_path.name
             backup_path = backup_dir / csv_path.name
-            df.to_csv(out_path, index=False)
-            df.to_csv(backup_path, index=False)
+            
+            # Save the string-formatted dataframe
+            df_out.to_csv(out_path, index=False)
+            df_out.to_csv(backup_path, index=False)
+            # === MODIFICATION END ===
+            
             saved_files.append(str(out_path))
             saved_files.append(str(backup_path))
 
@@ -442,21 +446,37 @@ async def process_folder(job_folder: str, *, req_id: Optional[str] = None) -> Di
 
     saved_files: List[str] = []
     for csv_path in csv_files:
+        # 1. Processing Phase: Read normally for calculation
         df = pd.read_csv(csv_path)
-        df = df.copy()
-        df["img_name"] = build_img_name_column(df)
+        df_processing = df.copy() # Use this for logic
+        
+        df_processing["img_name"] = build_img_name_column(df_processing)
         for url, col_name in endpoints:
-            df = merge_scalar_result(df, results_by_endpoint.get(url, {}), col_name)
+            df_processing = merge_scalar_result(df_processing, results_by_endpoint.get(url, {}), col_name)
+        
         # Compute derived metrics and defect name
-        # df = add_pad_area_and_cover(df)
-        df = add_ai_defect_name(df)
-        df = add_is_pass(df)
+        # df_processing = add_pad_area_and_cover(df_processing)
+        df_processing = add_ai_defect_name(df_processing)
+        df_processing = add_is_pass(df_processing)
+        
+        print("detect result: ", df_processing.head())
+        
+        # === MODIFICATION START: Formatting & Saving Phase ===
+        # 2. Output Phase: Read again as string to preserve numeric formatting (e.g. "50.000")
+        df_final = pd.read_csv(csv_path, dtype=str, keep_default_na=False)
+        
+        # 3. Update ONLY is_pass column using the calculated values
+        # Ensure values are cast to string to match the dataframe's dtype
+        df_final["is_pass"] = df_processing["is_pass"].astype(str)
+        
         out_path = ai_dir / csv_path.name
         backup_path = backup_dir / csv_path.name
-
+        
         # Save to primary and backup locations
-        df.to_csv(out_path, index=False)
-        df.to_csv(backup_path, index=False)
+        df_final.to_csv(out_path, index=False)
+        df_final.to_csv(backup_path, index=False)
+        # === MODIFICATION END ===
+        
         saved_files.append(str(out_path))
         saved_files.append(str(backup_path))
 
@@ -534,7 +554,6 @@ async def process_folder(job_folder: str, *, req_id: Optional[str] = None) -> Di
 
     return {"saved_files": saved_files, "errors": errors, "csv_count": len(csv_files)}
 
-
 # ------------------------
 # Post-merge enrich helpers
 # ------------------------
@@ -608,7 +627,6 @@ def add_ai_defect_name(df: pd.DataFrame) -> pd.DataFrame:
         out.loc[mask, "ai_defect_name"] = "high cover"
         assigned = out["ai_defect_name"].astype(str).str.len() > 0
 
-    print(out.head())
     # 4) short distance (note: condition provided as 6.6 < min_pad_distance)
     if "min_pad_distance" in out.columns:
         dist = pd.to_numeric(out["min_pad_distance"], errors="coerce")

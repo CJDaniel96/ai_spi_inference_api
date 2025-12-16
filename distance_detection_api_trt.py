@@ -153,10 +153,28 @@ class DistanceDetectionInference:
             return [results_map[str(p)] for p in batch_paths]
 
         # 2. Run Inference
+        original_batch_len = len(batch_imgs)
+        REQUIRED_BATCH_SIZE = 8  # Matches your error message (max model size)
+        
+        # Create a temporary list for inference
+        inference_imgs = batch_imgs[:]
+        
+        # If we have fewer images than the model needs, pad with black images
+        if original_batch_len < REQUIRED_BATCH_SIZE:
+            pad_count = REQUIRED_BATCH_SIZE - original_batch_len
+            # Create a black dummy image of the same shape as the first image
+            dummy_img = np.zeros_like(batch_imgs[0])
+            inference_imgs.extend([dummy_img] * pad_count)
+            
         try:
-            # batch inference
-            center_results_list = self.center_model(batch_imgs, conf=self.conf_threshold, verbose=False)
-            pad_results_list = self.pad_model(batch_imgs, conf=self.conf_threshold, verbose=False)
+            # Run inference on the full (padded) batch of 8
+            # Note: We pass inference_imgs, which is always length 8 here
+            center_results_full = self.center_model(inference_imgs, conf=self.conf_threshold, verbose=False)
+            pad_results_full = self.pad_model(inference_imgs, conf=self.conf_threshold, verbose=False)
+            
+            # Slice the results back to the original size (remove dummy results)
+            center_results_list = center_results_full[:original_batch_len]
+            pad_results_list = pad_results_full[:original_batch_len]
         except Exception as e:
             print(f"Batch inference failed: {e}")
             # Mark all as failed if inference crashes
@@ -371,7 +389,7 @@ if __name__ == "__main__":  # pragma: no cover
     server_engine.iou_threshold = float(args.iou_threshold) 
  
     uvicorn.run( 
-        "distance_detection_server:app", 
+        "distance_detection_api_trt:app", 
         host=args.host, 
         port=args.port, 
         workers=args.workers, 
