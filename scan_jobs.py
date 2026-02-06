@@ -200,7 +200,7 @@ def main() -> int:
             payload = {"job_folder": job_folder_payload}
 
             # Log health of dependent services prior to posting the job
-            log_health_checks(logger)
+            # log_health_checks(logger)
 
             logger.info(f"Processing job {today}/{job_id} ...")
             status, err = http_post_with_curl(process_api_url, payload)

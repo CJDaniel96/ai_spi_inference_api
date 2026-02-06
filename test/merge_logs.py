@@ -62,7 +62,7 @@ def merge_log_files(left_file: str, right_file: str, output_file: str):
     if 'CSVCreated' in merged_df.columns:
         print("Filtering rows where CSVCreated is after '2025-11-14 09:30:00'...")
         # Perform the filter. Rows with NaT in CSVCreated will be dropped.
-        filter_date = pd.to_datetime('2025-11-14 09:30:00')
+        filter_date = pd.to_datetime('2026-01-14 09:30:00')
         merged_df = merged_df[merged_df['CSVCreated'] > filter_date].copy()
 
     # Calculate '02_scan_time_ms'
@@ -130,12 +130,13 @@ def merge_log_files(left_file: str, right_file: str, output_file: str):
         'ProcessEnd': '01_end_at',
         'request_start_at': '02_request_start_at',
         'request_end_at': '02_request_end_at',
+        'csv_transfer': 'CSV傳輸花費時間'
     }
     merged_df.rename(columns=column_rename_map, inplace=True)
 
     # Define the final order based on the new column names
     final_column_order = [
-        'jobfolder', '影像數量', '01花費時間(s)', '02花費時間(s)',
+        'jobfolder', '影像數量', '01花費時間(s)', 'CSV傳輸花費時間', '02花費時間(s)',
         '02掃檔花費時間(s)', '01&02花費時間(s)', '異常偵測花費時間(s)',
         '錫膏計算花費時間(s)', '錫膏距離計算花費時間(s)', '01_start_at',
         '01_end_at', '02_request_start_at', '02_request_end_at'
@@ -153,4 +154,4 @@ def merge_log_files(left_file: str, right_file: str, output_file: str):
 if __name__ == "__main__":
     # Assuming the script is run from the project root directory
     # The script is in /test, so data is in ../data
-    merge_log_files('../data/log_analysis_results.csv', '../data/log_02.csv', '../data/log_analysis_report_tw.csv')
+    merge_log_files('log_data/log_analysis_results.csv', 'log_data/02.csv', 'log_data/log_analysis_report_tw.csv')

@@ -15,7 +15,6 @@ class InferenceRequest(BaseModel):
     job_folder: str 
     image_extensions: Optional[List[str]] = None 
  
- 
 class InferenceResponse(BaseModel): 
     status: str 
     message: str 
@@ -23,7 +22,6 @@ class InferenceResponse(BaseModel):
     total_inference_time: float 
     # Map: key=image filename (e.g., 0_1426.jpg), value=min_center_to_pad_distance (float|null if not found/NaN) 
     results: Dict[str, Optional[float]] 
- 
  
 class DistanceDetectionInference: 
     def __init__( 
@@ -66,7 +64,22 @@ class DistanceDetectionInference:
             # For .engine files, they are typically already compiled for the GPU.
             # But calling .to("cuda") generally ensures the YOLO wrapper is aware.
             pass
+
+        # --- WARM UP START ---
+        print("Warming up models...")
+        try:
+            # Create a dummy batch of 8 black images (640x640 is standard YOLO input size)
+            # We use a batch of 8 because your processing logic implies a fixed/max batch requirement.
+            dummy_batch = [np.zeros((640, 640, 3), dtype=np.uint8) for _ in range(8)]
             
+            # Run a dummy inference (verbose=False keeps logs clean)
+            self.center_model(dummy_batch, conf=self.conf_threshold, verbose=False)
+            self.pad_model(dummy_batch, conf=self.conf_threshold, verbose=False)
+            print("Warm-up complete.")
+        except Exception as e:
+            print(f"Warning: Model warm-up failed (startup will continue): {e}")
+        # --- WARM UP END ---
+     
         self.is_loaded = True 
  
     def _centers_from_xyxy(self, xyxy: np.ndarray) -> np.ndarray: 

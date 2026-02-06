@@ -471,15 +471,20 @@ async def process_folder(job_folder: str, *, req_id: Optional[str] = None) -> Di
         
         out_path = ai_dir / csv_path.name
         backup_path = backup_dir / csv_path.name
+
+        processed_name = f"{csv_path.stem}_processed{csv_path.suffix}"
+        processing_backup_path = backup_dir / processed_name        
         
         # Save to primary and backup locations
         df_final.to_csv(out_path, index=False)
         df_final.to_csv(backup_path, index=False)
+        df_processing.to_csv(processing_backup_path, index=False)
         # === MODIFICATION END ===
         
         saved_files.append(str(out_path))
         saved_files.append(str(backup_path))
-
+        saved_files.append(str(processing_backup_path))
+        
     # Job-level timing end
     job_end = time.perf_counter()
     request_end_at = _now_tz8_iso()
