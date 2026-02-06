@@ -326,6 +326,13 @@ async def process_folder(job_folder: str, *, req_id: Optional[str] = None) -> Di
     log = get_system_logger()
     rules = get_rules()
 
+    # Initialize counts for logging
+    total_pass = 0
+    total_fail = 0
+    total_anomaly = 0
+    total_distance = 0
+    total_me_thres = 0
+
     img_numbers = _count_images(folder)
     log.info(
         "event=process.pipeline.start req_id=%s job_folder=%s csv_count=%d images=%d",
@@ -351,28 +358,6 @@ async def process_folder(job_folder: str, *, req_id: Optional[str] = None) -> Di
         compute_total_ms = 0.0
         request_latency_ms = (job_end - job_start) * 1000.0
 
-        log_row = {
-            "job_folder": str(folder),
-            "img_numbers": int(img_numbers),
-            "request_start_at": request_start_at,
-            "request_end_at": request_end_at,
-            "anomaly_request_ms": anomaly_request_ms,
-            "paste_request_ms": paste_request_ms,
-            "distance_request_ms": distance_request_ms,
-            "compute_total_ms": compute_total_ms,
-            "request_latency_ms": request_latency_ms,
-            "logged_at": _now_tz8_iso(),
-        }
-        log_df = pd.DataFrame([log_row])
-        script_dir = Path(__file__).resolve().parent
-        log_dir = script_dir / "log"
-        log_dir.mkdir(parents=True, exist_ok=True)
-        log_path = log_dir / "log.csv"
-        if log_path.exists():
-            log_df.to_csv(log_path, mode="a", header=False, index=False)
-        else:
-            log_df.to_csv(log_path, index=False)
-
         # Also write CSVs to primary and backup with only is_pass=23
         saved_files: List[str] = []
         ai_dir = Path(rules.external_output_root) / folder.name / "AI"
@@ -387,6 +372,9 @@ async def process_folder(job_folder: str, *, req_id: Optional[str] = None) -> Di
             # Overwrite/assign is_pass = "23" for all rows (as string)
             df_out["is_pass"] = "23"
             
+            # Count as fail since we skipped inference and assigned 23
+            total_fail += len(df_out)
+            
             out_path = ai_dir / csv_path.name
             backup_path = backup_dir / csv_path.name
             
@@ -397,6 +385,33 @@ async def process_folder(job_folder: str, *, req_id: Optional[str] = None) -> Di
             
             saved_files.append(str(out_path))
             saved_files.append(str(backup_path))
+
+        log_row = {
+            "job_folder": str(folder),
+            "img_numbers": int(img_numbers),
+            "request_start_at": request_start_at,
+            "request_end_at": request_end_at,
+            "anomaly_request_ms": anomaly_request_ms,
+            "paste_request_ms": paste_request_ms,
+            "distance_request_ms": distance_request_ms,
+            "compute_total_ms": compute_total_ms,
+            "request_latency_ms": request_latency_ms,
+            "pass_count": total_pass,
+            "fail_count": total_fail,
+            "anomaly_count": total_anomaly,
+            "distance_count": total_distance,
+            "me_thres_count": total_me_thres,
+            "logged_at": _now_tz8_iso(),
+        }
+        log_df = pd.DataFrame([log_row])
+        script_dir = Path(__file__).resolve().parent
+        log_dir = script_dir / "log"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / "log.csv"
+        if log_path.exists():
+            log_df.to_csv(log_path, mode="a", header=False, index=False)
+        else:
+            log_df.to_csv(log_path, index=False)
 
         log.info(
             "event=process.skip req_id=%s job_folder=%s reason=images_exceed_threshold images=%d threshold=%s request_latency_ms=%.3f",
@@ -458,6 +473,15 @@ async def process_folder(job_folder: str, *, req_id: Optional[str] = None) -> Di
         # df_processing = add_pad_area_and_cover(df_processing)
         df_processing = add_ai_defect_name(df_processing)
         df_processing = add_is_pass(df_processing)
+
+        # Accumulate counts
+        total_pass += int((df_processing["is_pass"] == 22).sum())
+        total_fail += int((df_processing["is_pass"] == 23).sum())
+        if "ai_defect_name" in df_processing.columns:
+            total_anomaly += int((df_processing["ai_defect_name"] == "FM/color").sum())
+            total_distance += int((df_processing["ai_defect_name"] == "short distance").sum())
+            paste_defects = ["high vol", "low vol", "high cover", "high paste"]
+            total_me_thres += int(df_processing["ai_defect_name"].isin(paste_defects).sum())
         
         print("detect result: ", df_processing.head())
         
@@ -530,6 +554,11 @@ async def process_folder(job_folder: str, *, req_id: Optional[str] = None) -> Di
         # inference_ms fields removed from log row
         "compute_total_ms": compute_total_ms,
         "request_latency_ms": request_latency_ms,
+        "pass_count": total_pass,
+        "fail_count": total_fail,
+        "anomaly_count": total_anomaly,
+        "distance_count": total_distance,
+        "me_thres_count": total_me_thres,
         "logged_at": _now_tz8_iso(),
     }
     log_df = pd.DataFrame([log_row])
@@ -718,6 +747,6 @@ async def process_route(req: JobRequest):
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("ai_server_fastapi:app", host="0.0.0.0", port=5050, reload=True)
+    uvicorn.run("ai_server_fastapi:app", host="0.0.0.0", port=5050)
 
 # curl.exe -X POST "http://127.0.0.1:5050/process" -H "Content-Type: application/json" -d "{ \"job_folder\": \"D:/Dre/JQ_SPI_02_AI_API/data/20251028142856\" }"
