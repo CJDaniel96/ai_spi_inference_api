@@ -1,5 +1,5 @@
 {
-  "anomaly_threshold": 0.45,
+  "anomaly_threshold": 0.9,
   "high_cover_threshold": 180.0,
   "short_distance_threshold": 6.8,
   "low_vol_offset": -10.0,

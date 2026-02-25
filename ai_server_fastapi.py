@@ -323,6 +323,12 @@ async def process_folder(job_folder: str, *, req_id: Optional[str] = None) -> Di
     request_start_at = _now_tz8_iso()
     job_start = time.perf_counter()
 
+    # Use current year/month for output directory structure
+    tz8 = timezone(timedelta(hours=8))
+    now = datetime.now(tz8)
+    year_str = now.strftime("%Y")
+    month_str = now.strftime("%m")
+
     log = get_system_logger()
     rules = get_rules()
 
@@ -362,7 +368,7 @@ async def process_folder(job_folder: str, *, req_id: Optional[str] = None) -> Di
         saved_files: List[str] = []
         ai_dir = Path(rules.external_output_root) / folder.name / "AI"
         ai_dir.mkdir(parents=True, exist_ok=True)
-        backup_dir = Path(rules.backup_output_root) / folder.name / "AI"
+        backup_dir = Path(rules.backup_output_root) / year_str / month_str / folder.name
         backup_dir.mkdir(parents=True, exist_ok=True)
         
         for csv_path in csv_files:
@@ -452,11 +458,10 @@ async def process_folder(job_folder: str, *, req_id: Optional[str] = None) -> Di
             results_by_endpoint[url] = res
             metrics_by_endpoint[url] = meta
 
-    # Output enriched CSVs under configured external root: <root>/<job_name>/AI
     ai_dir = Path(rules.external_output_root) / folder.name / "AI"
     ai_dir.mkdir(parents=True, exist_ok=True)
     # Also create backup directory
-    backup_dir = Path(rules.backup_output_root) / folder.name / "AI"
+    backup_dir = Path(rules.backup_output_root) / year_str / month_str / folder.name 
     backup_dir.mkdir(parents=True, exist_ok=True)
 
     saved_files: List[str] = []

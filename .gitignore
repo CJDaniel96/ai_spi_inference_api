@@ -181,3 +181,6 @@ doc/
 tensorrt/image
 tensorrt/int8_dataset
 tensorrt/output
+
+test/log_data
+test/*.png
