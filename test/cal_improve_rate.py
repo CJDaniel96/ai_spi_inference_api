@@ -1,11 +1,9 @@
 import os
+import sys
+import argparse
 import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime
-
-# Mode Selection
-# MODE = "default"        # Original: Excludes "_processed", calculates Pass/Fail Improvement Rate
-MODE = "read_processed" # New: Includes only "_processed", calculates Defect Type %
 
 def plot_improvement_data(result_df, mode, target_defects=None):
     """
@@ -17,7 +15,7 @@ def plot_improvement_data(result_df, mode, target_defects=None):
     # Manual layout is often simpler for quick dual-axis.
     fig = go.Figure()
 
-    if mode == "default":
+    if mode == "improve_rate":
         # Create text labels: Round to 1 decimal place and add '%'
         label_text = result_df['Improve Rate %'].round(1).astype(str) + '%'
 
@@ -51,7 +49,7 @@ def plot_improvement_data(result_df, mode, target_defects=None):
             xaxis_title="Date"
         )
         
-    elif mode == "read_processed":
+    elif mode == "defect_analysis":
         # --- Stacked Bars (Job Row Counts) ---
         fig.add_trace(go.Bar(
             x=result_df['Date'],
@@ -136,7 +134,7 @@ def plot_improvement_data(result_df, mode, target_defects=None):
     # Show interactive chart
     fig.show()
 
-def process_consolidated_log(file_path, start_cutoff_dt, mode="default", target_defects=None):
+def process_consolidated_log(file_path, start_cutoff_dt, mode="improve_rate", target_defects=None):
     """
     Processes the consolidated log.csv format.
     """
@@ -169,7 +167,7 @@ def process_consolidated_log(file_path, start_cutoff_dt, mode="default", target_
 
         df['Date'] = df['logged_at_dt'].dt.strftime("%Y/%m/%d")
         
-        if mode == "default":
+        if mode == "improve_rate":
             daily = df.groupby('Date').agg({
                 'pass_count': 'sum',
                 'fail_count': 'sum'
@@ -178,7 +176,7 @@ def process_consolidated_log(file_path, start_cutoff_dt, mode="default", target_
             daily['Total'] = daily['Pass Count'] + daily['Fail Count']
             return daily
         
-        elif mode == "read_processed":
+        elif mode == "defect_analysis":
             # Map img_numbers to Over/Within Thres job row counts
             df['is_over'] = df['img_numbers'] > 60
             
@@ -192,9 +190,11 @@ def process_consolidated_log(file_path, start_cutoff_dt, mode="default", target_
                     'Total': total,
                     'Over_Thres': over_thres,
                     'Within_Thres': within_thres,
-                    'anomaly': x['anomaly_count'].sum(),
-                    'short distance': x['distance_count'].sum(),
-                    'me_thres': x['me_thres_count'].sum()
+                    'FM/color': x['anomaly_count'].sum(),
+                    'low vol': x['low_vol_count'].sum(),
+                    'high vol': x['high_vol_count'].sum(),
+                    'high paste': x['high_paste_count'].sum(),
+                    'short distance': x['distance_count'].sum()                
                 }
                 
                 if target_defects:
@@ -209,7 +209,7 @@ def process_consolidated_log(file_path, start_cutoff_dt, mode="default", target_
         print(f"Error processing consolidated log: {e}")
         return pd.DataFrame()
 
-def calculate_and_plot_improvement():
+def calculate_and_plot_improvement(mode):
     # --- Configuration ---
     root_directory = r"D:\Dre\JQ_SPI_02_AI_API\log\csv"
     
@@ -225,16 +225,16 @@ def calculate_and_plot_improvement():
     CODE_PASS = 22
     CODE_FAIL = 23
     
-    # Target Defects for "read_processed" mode
+    # Target Defects for "defect_analysis" mode
     # Added 'anomaly' and 'me_thres' to match new log.csv format
-    TARGET_DEFECTS = ["low vol", "high vol", "FM/color", "short distance", "high paste", "anomaly", "me_thres"]
+    TARGET_DEFECTS = ["low vol", "high vol", "FM/color", "short distance", "high paste"]
 
     # Dictionary to store aggregated data: 
-    # default: { "YYYY-MM-DD": {'pass': 0, 'fail': 0} }
-    # read_processed: { "YYYY-MM-DD": {'total': 0, 'low vol': 0, ...} }
+    # improve_rate: { "YYYY-MM-DD": {'pass': 0, 'fail': 0} }
+    # defect_analysis: { "YYYY-MM-DD": {'total': 0, 'low vol': 0, ...} }
     daily_stats = {}
 
-    print(f"Mode: {MODE}")
+    print(f"Mode: {mode}")
     print(f"Searching in: {root_directory}")
     print(f"Filtering files after: {start_cutoff_dt}")
     print("-" * 60)
@@ -247,10 +247,10 @@ def calculate_and_plot_improvement():
             if file.lower().endswith(".csv"):
                 
                 # --- Mode-based File Filtering ---
-                if MODE == "default":
+                if mode == "improve_rate":
                     if "_processed" in file:
                         continue
-                elif MODE == "read_processed":
+                elif mode == "defect_analysis":
                     # If it's a raw file, only include if the _processed version doesn't exist
                     if "_processed" not in file:
                         processed_file = file.replace(".csv", "_processed.csv")
@@ -284,7 +284,7 @@ def calculate_and_plot_improvement():
                         df = pd.read_csv(file_path, skipinitialspace=True)
                     except FileNotFoundError:
                         # Fallback to non-processed file if _processed is missing
-                        if MODE == "read_processed" and "_processed" in file:
+                        if mode == "defect_analysis" and "_processed" in file:
                             file_path = file_path.replace("_processed.csv", ".csv")
                             df = pd.read_csv(file_path, skipinitialspace=True)
                         else:
@@ -295,7 +295,7 @@ def calculate_and_plot_improvement():
                     # Aggregate by Date (for the chart X-axis)
                     date_key = file_timestamp.strftime("%Y/%m/%d")
 
-                    if MODE == "default":
+                    if mode == "improve_rate":
                         if 'is_pass' not in df.columns:
                             continue
 
@@ -308,7 +308,7 @@ def calculate_and_plot_improvement():
                         daily_stats[date_key]['pass'] += pass_count
                         daily_stats[date_key]['fail'] += fail_count
 
-                    elif MODE == "read_processed":
+                    elif mode == "defect_analysis":
                         if date_key not in daily_stats:
                              daily_stats[date_key] = {
                                  'total': 0,
@@ -341,7 +341,7 @@ def calculate_and_plot_improvement():
     
     # Convert daily_stats to DataFrame
     results_list = []
-    if MODE == "default":
+    if mode == "improve_rate":
         for date_str, counts in daily_stats.items():
             results_list.append({
                 "Date": date_str,
@@ -349,7 +349,7 @@ def calculate_and_plot_improvement():
                 "Fail Count": counts['fail'],
                 "Total": counts['pass'] + counts['fail']
             })
-    elif MODE == "read_processed":
+    elif mode == "defect_analysis":
         for date_str, counts in daily_stats.items():
             row = {
                 "Date": date_str,
@@ -366,19 +366,19 @@ def calculate_and_plot_improvement():
 
     # --- Process Consolidated Log ---
     log_csv_path = r"D:\Dre\JQ_SPI_02_AI_API\test\log_data\log2_new.csv"
-    result_df_new = process_consolidated_log(log_csv_path, log_transition_dt, MODE, TARGET_DEFECTS)
+    result_df_new = process_consolidated_log(log_csv_path, log_transition_dt, mode, TARGET_DEFECTS)
     # print(result_df_new)
     # --- Combine and Finalize Rates ---
     if not result_df_new.empty:
         result_df = pd.concat([result_df_old, result_df_new], ignore_index=True)
         # Group by Date to merge if there's overlap
-        if MODE == "default":
+        if mode == "improve_rate":
             result_df = result_df.groupby('Date').agg({
                 'Pass Count': 'sum',
                 'Fail Count': 'sum',
                 'Total': 'sum'
             }).reset_index()
-        elif MODE == "read_processed":
+        elif mode == "defect_analysis":
             agg_dict = {'Total': 'sum', 'Over_Thres': 'sum', 'Within_Thres': 'sum'}
             for d in TARGET_DEFECTS:
                 agg_dict[d] = 'sum'
@@ -391,9 +391,9 @@ def calculate_and_plot_improvement():
         return
 
     # Calculate Rates
-    if MODE == "default":
+    if mode == "improve_rate":
         result_df['Improve Rate %'] = (result_df['Pass Count'] / result_df['Total'] * 100).fillna(0)
-    elif MODE == "read_processed":
+    elif mode == "defect_analysis":
         for d in TARGET_DEFECTS:
             result_df[d] = (result_df[d] / result_df['Total'] * 100).fillna(0)
 
@@ -404,17 +404,21 @@ def calculate_and_plot_improvement():
     print("=== Daily Statistics ===")
     text_df = result_df.copy()
     
-    if MODE == "default":
+    if mode == "improve_rate":
         text_df['Improve Rate %'] = text_df['Improve Rate %'].round(2)
         print(text_df[['Date', 'Pass Count', 'Fail Count', 'Improve Rate %']].to_string(index=False))
-    elif MODE == "read_processed":
+    elif mode == "defect_analysis":
         cols_to_show = ['Date', 'Within_Thres', 'Over_Thres'] + TARGET_DEFECTS
         for d in TARGET_DEFECTS:
             text_df[d] = text_df[d].round(2)
         print(text_df[cols_to_show].to_string(index=False))
 
     # --- Plotly Chart ---
-    plot_improvement_data(result_df, MODE, TARGET_DEFECTS)
+    plot_improvement_data(result_df, mode, TARGET_DEFECTS)
 
 if __name__ == "__main__":
-    calculate_and_plot_improvement()
+    parser = argparse.ArgumentParser(description="Calculate SPI+AI Improvement Rate or Defect Analysis")
+    parser.add_argument("--mode", choices=["improve_rate", "defect_analysis"], default="improve_rate", help="Operation mode")
+    args = parser.parse_args()
+    
+    calculate_and_plot_improvement(args.mode)

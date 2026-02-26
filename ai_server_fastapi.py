@@ -337,7 +337,11 @@ async def process_folder(job_folder: str, *, req_id: Optional[str] = None) -> Di
     total_fail = 0
     total_anomaly = 0
     total_distance = 0
-    total_me_thres = 0
+    # total_me_thres = 0
+    total_low_vol = 0
+    total_high_vol = 0
+    total_high_cover = 0
+    total_high_paste = 0
 
     img_numbers = _count_images(folder)
     log.info(
@@ -406,7 +410,11 @@ async def process_folder(job_folder: str, *, req_id: Optional[str] = None) -> Di
             "fail_count": total_fail,
             "anomaly_count": total_anomaly,
             "distance_count": total_distance,
-            "me_thres_count": total_me_thres,
+            # "me_thres_count": total_me_thres,
+            "low_vol_count": total_low_vol,
+            "high_vol_count": total_high_vol,
+            "high_cover_count": total_high_cover,
+            "high_paste_count": total_high_paste,
             "logged_at": _now_tz8_iso(),
         }
         log_df = pd.DataFrame([log_row])
@@ -485,8 +493,15 @@ async def process_folder(job_folder: str, *, req_id: Optional[str] = None) -> Di
         if "ai_defect_name" in df_processing.columns:
             total_anomaly += int((df_processing["ai_defect_name"] == "FM/color").sum())
             total_distance += int((df_processing["ai_defect_name"] == "short distance").sum())
-            paste_defects = ["high vol", "low vol", "high cover", "high paste"]
-            total_me_thres += int(df_processing["ai_defect_name"].isin(paste_defects).sum())
+            
+            # Individual counts
+            total_low_vol += int((df_processing["ai_defect_name"] == "low vol").sum())
+            total_high_vol += int((df_processing["ai_defect_name"] == "high vol").sum())
+            total_high_cover += int((df_processing["ai_defect_name"] == "high cover").sum())
+            total_high_paste += int((df_processing["ai_defect_name"] == "high paste").sum())
+
+            # paste_defects = ["high vol", "low vol", "high cover", "high paste"]
+            # total_me_thres += int(df_processing["ai_defect_name"].isin(paste_defects).sum())
         
         print("detect result: ", df_processing.head())
         
@@ -563,7 +578,11 @@ async def process_folder(job_folder: str, *, req_id: Optional[str] = None) -> Di
         "fail_count": total_fail,
         "anomaly_count": total_anomaly,
         "distance_count": total_distance,
-        "me_thres_count": total_me_thres,
+        # "me_thres_count": total_me_thres,
+        "low_vol_count": total_low_vol,
+        "high_vol_count": total_high_vol,
+        "high_cover_count": total_high_cover,
+        "high_paste_count": total_high_paste,
         "logged_at": _now_tz8_iso(),
     }
     log_df = pd.DataFrame([log_row])
