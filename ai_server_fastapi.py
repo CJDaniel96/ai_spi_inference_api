@@ -376,25 +376,36 @@ async def process_folder(job_folder: str, *, req_id: Optional[str] = None) -> Di
         backup_dir.mkdir(parents=True, exist_ok=True)
         
         for csv_path in csv_files:
-            # === MODIFICATION START: Read as string to preserve format ===
-            df_out = pd.read_csv(csv_path, dtype=str, keep_default_na=False)
+            # 1. Output Phase: Read as string to preserve numeric formatting
+            df_final = pd.read_csv(csv_path, dtype=str, keep_default_na=False)
+            df_final["is_pass"] = "23"
             
-            # Overwrite/assign is_pass = "23" for all rows (as string)
-            df_out["is_pass"] = "23"
-            
-            # Count as fail since we skipped inference and assigned 23
-            total_fail += len(df_out)
+            total_fail += len(df_final)
             
             out_path = ai_dir / csv_path.name
             backup_path = backup_dir / csv_path.name
             
-            # Save the string-formatted dataframe
-            df_out.to_csv(out_path, index=False)
-            df_out.to_csv(backup_path, index=False)
-            # === MODIFICATION END ===
+            df_final.to_csv(out_path, index=False)
+            df_final.to_csv(backup_path, index=False)
             
             saved_files.append(str(out_path))
             saved_files.append(str(backup_path))
+
+            # 2. Processed Phase: Generate *_processed.csv with full AI schema (all NA/Empty)
+            df_processing = pd.read_csv(csv_path)
+            df_processing["img_name"] = build_img_name_column(df_processing)
+            
+            # Initialize AI columns from endpoints with NA
+            for _, col_name in endpoints:
+                df_processing[col_name] = pd.Series([pd.NA] * len(df_processing), dtype="Float64")
+            
+            df_processing["ai_defect_name"] = ""
+            df_processing["is_pass"] = 23
+            
+            processed_name = f"{csv_path.stem}_processed{csv_path.suffix}"
+            processing_backup_path = backup_dir / processed_name
+            df_processing.to_csv(processing_backup_path, index=False)
+            saved_files.append(str(processing_backup_path))
 
         log_row = {
             "job_folder": str(folder),

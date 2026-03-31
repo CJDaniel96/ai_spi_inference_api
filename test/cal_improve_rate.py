@@ -365,7 +365,7 @@ def calculate_and_plot_improvement(mode):
     result_df_old = pd.DataFrame(results_list)
 
     # --- Process Consolidated Log ---
-    log_csv_path = r"D:\Dre\JQ_SPI_02_AI_API\test\log_data\log2_new.csv"
+    log_csv_path = r"D:\Dre\JQ_SPI_02_AI_API\test\log_data\log_0313.csv"
     result_df_new = process_consolidated_log(log_csv_path, log_transition_dt, mode, TARGET_DEFECTS)
     # print(result_df_new)
     # --- Combine and Finalize Rates ---
