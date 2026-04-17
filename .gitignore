@@ -184,3 +184,7 @@ tensorrt/output
 
 test/log_data
 test/*.png
+
+backup/
+test/valid_data
+*.gz
