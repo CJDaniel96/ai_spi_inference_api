@@ -1,0 +1,38 @@
+# =============================================================================
+# requirements-cuda.txt  —  Windows / Linux + NVIDIA CUDA  (legacy / deployment)
+# =============================================================================
+# pyproject.toml is the CANONICAL dependency source (use `uv sync`).
+# This pinned file is a convenience mirror for non-uv `pip` installs and for
+# reproducible CI / deployment images. Keep it in sync with pyproject.toml.
+#
+# Recommended install (Windows / Linux, inside an activated venv):
+#   1) Install the CUDA build of PyTorch FIRST, from the PyTorch index:
+#        uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+#   2) Then install everything else:
+#        uv pip install -r requirements-cuda.txt
+#
+# torch / torchvision are intentionally NOT listed below so that the CUDA wheels
+# installed in step (1) are not overwritten by CPU wheels from PyPI.
+# -----------------------------------------------------------------------------
+
+# --- base (cross-platform) ---
+fastapi==0.115.12
+uvicorn==0.34.1
+httpx==0.28.1
+pydantic==2.11.3
+pandas==2.1.4
+numpy==1.26.4
+opencv-python==4.11.0.86
+matplotlib==3.8.4
+ultralytics==8.3.187
+anomalib==0.7.0
+
+# --- CUDA-only (Windows / Linux; NOT installed on macOS) ---
+onnxruntime-gpu==1.19.0   # NVIDIA GPU support via CUDA 12.x
+pycuda==2024.1
+
+# --- TensorRT (imported by patchcore_inf_trt.py) ---
+# TODO: TensorRT was NOT pinned in the legacy requirements.txt; it is installed
+# out-of-band from NVIDIA to match the deployed CUDA toolkit / driver version.
+# Pin the exact build that matches your CUDA install, e.g.:
+#   tensorrt==10.0.1

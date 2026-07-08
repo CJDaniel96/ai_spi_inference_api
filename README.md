@@ -8,6 +8,157 @@ This repository provides four FastAPI services that work together to process a j
   - `8001` Paste detection — returns `paste_pixels`
   - `8002` Distance detection — returns `min_center_to_pad_distance`
 
+## Environment Management with uv
+
+This project uses [`uv`](https://docs.astral.sh/uv/) to manage the Python
+environment and dependencies. `pyproject.toml` is the **canonical** dependency
+source; the `requirements-*.txt` files are pinned mirrors kept for legacy /
+non-uv deployment (see below).
+
+Three platforms are supported:
+
+| Platform          | PyTorch build                | Extras installed        |
+| ----------------- | ---------------------------- | ----------------------- |
+| Windows + CUDA    | CUDA wheels (PyTorch index)  | `cuda` (+ `dev`)        |
+| Linux + CUDA      | CUDA wheels (PyTorch index)  | `cuda` (+ `dev`)        |
+| macOS (CPU / MPS) | PyPI wheels (CPU / Apple MPS)| `mac` (+ `dev`)         |
+
+> **Python version:** `>=3.10,<3.12` (3.10 or 3.11). Some pinned dependencies do
+> not yet support 3.12, so do not use 3.12.
+
+### Prerequisite: install uv
+
+```bash
+# macOS / Linux
+curl -LsSf https://astral.sh/uv/install.sh | sh
+# Windows (PowerShell)
+powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
+
+uv --version
+```
+
+### Dependency organisation
+
+- **base** (`[project].dependencies`): cross-platform packages (fastapi,
+  uvicorn, httpx, pydantic, pandas, numpy, opencv-python, matplotlib,
+  ultralytics, anomalib, torch, torchvision).
+- **`cuda` extra**: Windows/Linux CUDA-only packages — `onnxruntime-gpu`,
+  `pycuda` (markered so they are never resolved/installed on macOS).
+  TensorRT is installed out-of-band; see the CUDA notes below.
+- **`mac` extra**: `onnxruntime` (CPU build) — no CUDA-only packages.
+- **`dev` group**: `pytest`, `ruff`, `mypy`.
+- **`analytics` extra** (optional): `plotly`, `xlsxwriter` for the analytics
+  scripts under `test/`.
+- **`paste` extra** (optional): MobileSAM (git dependency) for the paste
+  detection server (port 8001).
+
+### Windows + CUDA
+
+```powershell
+uv venv --python 3.10
+.venv\Scripts\activate
+
+# 1) Install the CUDA build of PyTorch from the PyTorch index (do this FIRST):
+uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+
+# 2a) Reproducible / legacy path (recommended for deployment):
+uv pip install -r requirements-cuda.txt
+uv pip install -r requirements-dev.txt
+
+# 2b) …or the pyproject-driven path:
+uv sync --extra cuda --group dev
+```
+
+> `uv sync` installs the default PyPI build of torch, which on **Windows is
+> CPU-only**. On Windows always run step (1) (the PyTorch CUDA index) so the
+> CUDA wheels are in place; `uv sync` will then keep them.
+
+### Linux + CUDA
+
+```bash
+uv venv --python 3.10
+source .venv/bin/activate
+
+# On Linux the default PyPI torch already bundles CUDA. To pin a specific
+# CUDA version, install from the PyTorch index first:
+uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+
+# Reproducible / legacy path:
+uv pip install -r requirements-cuda.txt
+uv pip install -r requirements-dev.txt
+
+# …or the pyproject-driven path:
+uv sync --extra cuda --group dev
+```
+
+### macOS (CPU / Apple Silicon)
+
+macOS does **not** install any CUDA-only dependency (`pycuda`,
+`onnxruntime-gpu`, `tensorrt`).
+
+```bash
+uv venv --python 3.10
+source .venv/bin/activate
+
+# pyproject-driven path (recommended):
+uv sync --extra mac --group dev
+
+# …or the reproducible / legacy path:
+uv pip install -r requirements-mac.txt
+uv pip install -r requirements-dev.txt
+```
+
+torch / torchvision come from PyPI (CPU + Apple Silicon MPS) — no index needed.
+
+### CUDA / PyTorch notes
+
+- **PyTorch index URL** is only needed for CUDA wheels on Windows/Linux; it is
+  deliberately kept out of the universal dependency set. Pick the CUDA build
+  that matches your driver, e.g. `cu121` or `cu124`.
+- **TensorRT** is imported by `patchcore_inf_trt.py` but is installed
+  out-of-band from NVIDIA to match your CUDA toolkit — pin it in
+  `requirements-cuda.txt` for your deployment (see the TODO in that file).
+- **Legacy discrepancy (TODO):** `setup.bat` installs `torch 1.13.1+cu117`
+  while `requirements.txt` comments target `cu121` and `onnxruntime-gpu==1.19.0`
+  needs CUDA 12.x. Standardise on one CUDA toolchain before production rollout.
+
+### Common uv commands
+
+```bash
+uv sync                              # install base deps into .venv
+uv sync --group dev                  # base + dev tooling
+uv sync --extra cuda --group dev     # Windows/Linux CUDA + dev
+uv sync --extra mac --group dev      # macOS + dev
+
+uv run python ai_server_fastapi.py   # legacy entry point (merge server, 5050)
+# uv run python -m app.main          # future entry point (after refactor)
+
+uv run pytest
+uv run ruff check .
+uv run ruff format .
+uv run python scripts/check_env.py   # verify the environment
+```
+
+### requirements-*.txt (legacy / deployment)
+
+`pyproject.toml` is the source of truth. These pinned files mirror it for
+non-uv `pip` installs and reproducible CI/deployment images:
+
+- `requirements-cuda.txt` — base + CUDA-only packages (Windows/Linux)
+- `requirements-mac.txt` — base + CPU onnxruntime (macOS)
+- `requirements-dev.txt` — dev tooling (pytest / ruff / mypy)
+- `requirements.txt` — original legacy conda list (kept as-is)
+
+Keep them in sync with `pyproject.toml`; do not let them diverge long-term.
+
+### uv.lock
+
+`uv.lock` is currently **git-ignored**. A single universal lockfile cannot
+faithfully capture the CUDA build of torch or the TensorRT bindings (both
+installed out-of-band), so reproducible installs use the pinned
+`requirements-*.txt` files instead. Revisit committing `uv.lock` once the team
+standardises on one CUDA toolchain and brings torch fully under uv.
+
 ## How To Use The API
 
 - Start services (Windows): run `start_fastapi_services.bat`.

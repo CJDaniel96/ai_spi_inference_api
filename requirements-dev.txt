@@ -1,0 +1,10 @@
+# =============================================================================
+# requirements-dev.txt  —  development tooling  (legacy / deployment)
+# =============================================================================
+# Mirror of [dependency-groups].dev in pyproject.toml.
+# Preferred: `uv sync --group dev`. This file is for non-uv `pip` installs:
+#   uv pip install -r requirements-dev.txt
+# -----------------------------------------------------------------------------
+pytest>=8.0
+ruff>=0.6.0
+mypy>=1.10

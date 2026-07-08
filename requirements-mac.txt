@@ -1,0 +1,28 @@
+# =============================================================================
+# requirements-mac.txt  —  macOS (CPU / Apple Silicon)  (legacy / deployment)
+# =============================================================================
+# pyproject.toml is the CANONICAL dependency source (use `uv sync --extra mac`).
+# This pinned file is a convenience mirror for non-uv `pip` installs.
+# No CUDA-only packages (no pycuda / onnxruntime-gpu / tensorrt).
+#
+# Install (macOS, inside an activated venv):
+#   uv pip install -r requirements-mac.txt
+# torch / torchvision come from PyPI (CPU + Apple Silicon MPS) — no index needed.
+# -----------------------------------------------------------------------------
+
+# --- base (cross-platform) ---
+fastapi==0.115.12
+uvicorn==0.34.1
+httpx==0.28.1
+pydantic==2.11.3
+pandas==2.1.4
+numpy==1.26.4
+opencv-python==4.11.0.86
+matplotlib==3.8.4
+ultralytics==8.3.187
+anomalib==0.7.0
+torch>=1.13.1
+torchvision>=0.14.1
+
+# --- macOS ONNX Runtime (CPU build; never onnxruntime-gpu) ---
+onnxruntime==1.19.0

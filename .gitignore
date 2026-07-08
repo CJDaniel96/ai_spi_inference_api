@@ -188,3 +188,32 @@ test/*.png
 backup/
 test/valid_data
 *.gz
+
+# ---------------------------------------------------------------------------
+# uv / Python environment & dependency management
+# ---------------------------------------------------------------------------
+.venv/
+# uv.lock is intentionally ignored for now: the CUDA build of torch and the
+# TensorRT bindings are installed out-of-band (see README), so the lockfile
+# cannot faithfully represent a GPU deployment. Reproducible installs use the
+# pinned requirements-*.txt files instead. Revisit committing this once the
+# team standardises on a single CUDA toolchain. (See UV setup report.)
+uv.lock
+
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+log/
+backup/
+data/
+
+# Data / model / artifact files — never commit these to the repo.
+*.csv
+*.engine
+*.onnx
+*.pt
+*.pth
+*.ckpt
+*.zip

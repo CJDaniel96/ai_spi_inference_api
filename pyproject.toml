@@ -1,0 +1,147 @@
+[project]
+name = "ai-spi-inference-api"
+version = "0.1.0"
+description = "FastAPI-based SPI AI inference API server"
+readme = "README.md"
+requires-python = ">=3.10,<3.12"
+
+# ---------------------------------------------------------------------------
+# Cross-platform (base) dependencies.
+# These are needed on Windows + CUDA, Linux + CUDA and macOS alike.
+# Pins mirror the legacy requirements.txt so runtime behaviour is unchanged.
+#
+# NOTE on PyTorch: `torch` / `torchvision` are cross-platform requirements
+# (ultralytics, anomalib, distance_detection and paste_inference all import
+# torch). They are intentionally left index-neutral here so `uv sync` works on
+# every OS. To install a *CUDA* build on Windows/Linux, use the PyTorch index
+# URL documented in the README (uv pip install torch torchvision
+# --index-url https://download.pytorch.org/whl/cu121) — the platform-specific
+# index is kept out of the universal dependency set on purpose.
+# ---------------------------------------------------------------------------
+dependencies = [
+    # Web framework / server
+    "fastapi==0.115.12",
+    "uvicorn==0.34.1",
+    "httpx==0.28.1",
+    "pydantic==2.11.3",
+    # Data processing
+    "pandas==2.1.4",
+    "numpy==1.26.4",
+    # Computer vision
+    "opencv-python==4.11.0.86",
+    "matplotlib==3.8.4",
+    # AI / ML (torch build selected per-platform; see README)
+    "ultralytics==8.3.187",
+    "anomalib==0.7.0",
+    "torch>=1.13.1",
+    "torchvision>=0.14.1",
+]
+
+[project.optional-dependencies]
+# --- Windows / Linux NVIDIA CUDA GPU inference ---------------------------
+# These packages are CUDA-only. The `sys_platform != 'darwin'` markers make
+# them resolve to *nothing* on macOS, so `uv sync`/`uv lock` never tries to
+# build pycuda on a Mac. Install with: uv sync --extra cuda
+# (or the reproducible `uv pip install -r requirements-cuda.txt`).
+#
+# TensorRT is imported by patchcore_inf_trt.py but was NOT pinned in the legacy
+# requirements.txt (it is installed out-of-band from NVIDIA to match the local
+# CUDA/driver version). It is therefore kept in requirements-cuda.txt with a
+# TODO rather than force-pinned here. See README "Windows / Linux CUDA".
+cuda = [
+    "onnxruntime-gpu==1.19.0; sys_platform != 'darwin'",
+    "pycuda==2024.1; sys_platform != 'darwin'",
+]
+
+# --- macOS / CPU-only development ----------------------------------------
+# CPU build of onnxruntime (never onnxruntime-gpu). Safe on Apple Silicon.
+mac = [
+    "onnxruntime==1.19.0",
+]
+
+# --- Optional: analytics / reporting scripts under test/ -----------------
+# Used by test/cal_improve_rate.py and test/save_images_to_excel.py, driven by
+# improve_rate.bat. Not part of the core inference services.
+# TODO: confirm these analytics utilities are still in use.
+analytics = [
+    "plotly>=5.20.0",
+    "xlsxwriter>=3.2.0",
+]
+
+# --- Optional: paste-detection server (port 8001) ------------------------
+# paste_inference.py imports MobileSAM, which is only available as a git
+# dependency. Kept opt-in because git sources complicate universal locking and
+# the 8001 service is currently disabled in 02_api_services.bat.
+# TODO: confirm whether the paste-detection service is still required.
+paste = [
+    "mobile-sam",
+]
+
+# PEP 735 dependency group for development tooling.
+# Install with: uv sync --group dev   (or: uv pip install -r requirements-dev.txt)
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6.0",
+    "mypy>=1.10",
+]
+
+[tool.uv]
+# This is a flat-script application, not an importable package: the services
+# are launched as `python ai_server_fastapi.py` from the repo root. Tell uv not
+# to try to build/install the project itself, only to manage the environment.
+package = false
+
+[tool.uv.sources]
+# MobileSAM ships no PyPI wheel; pull it from git only when the `paste` extra
+# is requested.
+mobile-sam = { git = "https://github.com/ChaoningZhang/MobileSAM.git" }
+
+# ---------------------------------------------------------------------------
+# Tooling configuration
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+# Only the newly-added, maintained surface is linted for now. Legacy business
+# logic and experimental scripts are excluded so this phase does not touch
+# their formatting/behaviour (tracked as technical debt in the setup report).
+extend-exclude = [
+    "archive",
+    "tensorrt",
+    "fan_out",
+    "test",
+    "demo_html",
+    "doc",
+    "ai_server_fastapi.py",
+    "distance_detection_api_trt.py",
+    "paste_detection_server.py",
+    "paste_inference.py",
+    "patchcore_api_trt.py",
+    "patchcore_inf_trt.py",
+    "scan_jobs.py",
+    "rearrange_backups.py",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+# Legacy modules are not type-checked in this phase.
+exclude = [
+    "archive/",
+    "tensorrt/",
+    "fan_out/",
+    "test/",
+    "demo_html/",
+    "doc/",
+]
+
+[tool.pytest.ini_options]
+# Real unit tests live in tests/. The legacy scripts under test/ are NOT pytest
+# tests (they run inference on import) and are deliberately not collected.
+testpaths = ["tests"]
+addopts = "-ra"
+norecursedirs = ["test", "archive", "tensorrt", "fan_out", "demo_html", "doc", ".venv"]
