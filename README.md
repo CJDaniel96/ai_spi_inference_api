@@ -8,6 +8,15 @@ This repository provides four FastAPI services that work together to process a j
   - `8001` Paste detection — returns `paste_pixels`
   - `8002` Distance detection — returns `min_center_to_pad_distance`
 
+## Entry Points
+
+- Legacy entry point (stable): `python ai_server_fastapi.py`
+  - Serves `/process` and `/health` on port `5050`.
+- New experimental entry point (modular architecture, Phase 2 skeleton): `python -m app.main`
+  - Same `/process` and `/health` contract on port `5050`. Run from the repository root.
+
+The new `app/` package is a layered modular-monolith skeleton (`api` / `application` / `domain` / `infrastructure` / `core`). Its `/process` route currently delegates to the legacy `process_folder` implementation while the logic is migrated incrementally, so behavior is unchanged.
+
 ## Environment Management with uv
 
 This project uses [`uv`](https://docs.astral.sh/uv/) to manage the Python
