@@ -8,7 +8,7 @@ functional while logic is migrated into the domain and infrastructure layers.
 from __future__ import annotations
 
 import uuid
-from typing import Any, Dict
+from typing import Any
 
 from app.api.schemas.requests import ProcessJobRequest
 from app.core.logging import get_logger
@@ -21,7 +21,7 @@ class ProcessJobUseCase:
         """Initialize the use case with a namespaced logger."""
         self._logger = get_logger("process_job")
 
-    async def execute(self, request: ProcessJobRequest) -> Dict[str, Any]:
+    async def execute(self, request: ProcessJobRequest) -> dict[str, Any]:
         """Run the processing pipeline for the given request.
 
         Args:

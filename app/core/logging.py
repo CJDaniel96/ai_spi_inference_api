@@ -11,7 +11,6 @@ from __future__ import annotations
 import logging
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Optional
 
 _LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"
 _DATE_FORMAT = "%Y-%m-%dT%H:%M:%S%z"
@@ -31,7 +30,7 @@ def default_log_dir() -> Path:
 
 
 def setup_logging(
-    log_dir: Optional[Path] = None,
+    log_dir: Path | None = None,
     *,
     level: int = logging.INFO,
 ) -> logging.Logger:
@@ -74,7 +73,7 @@ def setup_logging(
     return logger
 
 
-def get_logger(name: Optional[str] = None) -> logging.Logger:
+def get_logger(name: str | None = None) -> logging.Logger:
     """Return a logger under the application namespace.
 
     Args:

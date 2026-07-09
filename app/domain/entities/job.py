@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List
 
 
 @dataclass
@@ -18,7 +17,7 @@ class Job:
     """
 
     job_folder: Path
-    csv_files: List[Path] = field(default_factory=list)
+    csv_files: list[Path] = field(default_factory=list)
     image_count: int = 0
 
     # TODO(phase-3): Construct via FileSystemJobRepository during migration.

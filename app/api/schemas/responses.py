@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import List, Optional
-
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -32,9 +30,9 @@ class ProcessJobResponse(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     status: str
-    saved_files: List[str] = Field(default_factory=list)
-    errors: List[str] = Field(default_factory=list)
+    saved_files: list[str] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
     csv_count: int = 0
-    skipped: Optional[bool] = None
-    reason: Optional[str] = None
-    img_numbers: Optional[int] = None
+    skipped: bool | None = None
+    reason: str | None = None
+    img_numbers: int | None = None

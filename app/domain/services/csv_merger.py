@@ -19,8 +19,8 @@ class CsvMerger:
 
     def merge(
         self,
-        df: "pd.DataFrame",
-        result: "InferenceResult",
-    ) -> "pd.DataFrame":
+        df: pd.DataFrame,
+        result: InferenceResult,
+    ) -> pd.DataFrame:
         """Return ``df`` with the result's scalar column merged in by image name."""
         raise NotImplementedError("Migrated in a later phase.")

@@ -1,15 +1,57 @@
 {
-  "anomaly_threshold": 0.9,
-  "high_cover_threshold": 180.0,
-  "short_distance_threshold": 6.8,
-  "low_vol_offset": -10.0,
-  "high_vol_offset": 20.0,
-  "high_paste_height_threshold": 200.0,
-  "external_output_root": "D:/Dre/JQ_SPI_02_AI_API/data",
-  "backup_output_root": "D:/Dre/JQ_SPI_02_AI_API/backup",
+  "server": {
+    "host": "0.0.0.0",
+    "port": 5050
+  },
+  "paths": {
+    "external_output_root": "D:/Dre/JQ_SPI_02_AI_API/data",
+    "backup_output_root": "D:/Dre/JQ_SPI_02_AI_API/backup"
+  },
+  "processing": {
+    "folder_images_num_threshold": 500,
+    "image_extensions": [".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif"]
+  },
+  "model_clients": [
+    {
+      "name": "anomaly",
+      "enabled": true,
+      "url": "http://127.0.0.1:8000/inference",
+      "target_column": "anomaly_score",
+      "timeout_seconds": 300
+    },
+    {
+      "name": "paste",
+      "enabled": false,
+      "url": "http://127.0.0.1:8001/inference",
+      "target_column": "paste_pixels",
+      "timeout_seconds": 300
+    },
+    {
+      "name": "distance",
+      "enabled": true,
+      "url": "http://127.0.0.1:8002/inference",
+      "target_column": "min_pad_distance",
+      "timeout_seconds": 300
+    }
+  ],
+  "defect_rules": {
+    "anomaly_threshold": 0.9,
+    "high_cover_threshold": 180.0,
+    "short_distance_threshold": 6.8,
+    "low_vol_offset": -10.0,
+    "high_vol_offset": 20.0,
+    "high_paste_height_threshold": 200.0
+  },
+  "output": {
+    "primary_csv_mode": "is_pass_only"
+  },
+  "logging": {
+    "log_dir": "log",
+    "system_log_file": "system",
+    "request_log_file": "log.csv"
+  },
   "watch_root": "D:/spi_ai/output/01/sfcTemp",
   "process_api_url": "http://127.0.0.1:5050/process",
   "processed_registry_path": "log/processed.json",
-  "rescan_interval_ms": 500,
-  "folder_images_num_threshold": 500
+  "rescan_interval_ms": 500
 }

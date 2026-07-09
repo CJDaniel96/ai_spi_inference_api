@@ -144,4 +144,7 @@ exclude = [
 # tests (they run inference on import) and are deliberately not collected.
 testpaths = ["tests"]
 addopts = "-ra"
+# Put the repo root on sys.path so tests can `import app` (and the legacy
+# top-level modules) regardless of how pytest is invoked.
+pythonpath = ["."]
 norecursedirs = ["test", "archive", "tensorrt", "fan_out", "demo_html", "doc", ".venv"]

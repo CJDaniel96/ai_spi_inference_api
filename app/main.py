@@ -35,7 +35,9 @@ def create_app() -> FastAPI:
     @application.exception_handler(AppError)
     async def _app_error_handler(request: Request, exc: AppError) -> JSONResponse:
         """Convert application errors into JSON responses."""
-        return JSONResponse(status_code=exc.status_code, content={"detail": exc.message})
+        return JSONResponse(
+            status_code=exc.status_code, content={"detail": exc.message}
+        )
 
     return application
 

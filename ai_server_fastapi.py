@@ -11,7 +11,6 @@ and computes derived metrics/labels for SPI jobs.
 import asyncio
 import logging
 from logging.handlers import RotatingFileHandler
-import json
 import math
 import os
 import time
@@ -25,6 +24,9 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from datetime import datetime, timezone, timedelta
 import uuid
+
+from app.core.config import get_config as get_app_config
+from app.core.config import to_legacy_rule_mapping
 
 
 app = FastAPI(title="AI Merge Server", version="1.0.0")
@@ -123,26 +125,14 @@ class RuleConfig(BaseModel):
     folder_images_num_threshold: int
 
 
-_RULES: Optional[RuleConfig] = None
-
-
-def _load_rules_from_file(path: Path) -> RuleConfig:
-    """Load `RuleConfig` from a JSON file at `path`."""
-    with path.open("r", encoding="utf-8") as f:
-        data = json.load(f)
-    return RuleConfig(**data)
-
-
 def get_rules() -> RuleConfig:
-    """Return memoized rules, reading once from env or default config.
+    """Return the processing thresholds and output roots.
 
-    Uses env var `AI_RULES_PATH` when set; otherwise reads `config/ai_server.json`.
+    Adapts the nested application config (`app/core/config.py`) into the legacy
+    flat `RuleConfig` shape so existing call sites keep working unchanged.
+    Config loading, validation, and caching now live in `app.core.config`.
     """
-    cfg_path = Path("config/ai_server.json")
-    if not cfg_path.exists():
-        raise FileNotFoundError(f"Rules config not found: {cfg_path}")
-    _RULES = _load_rules_from_file(cfg_path)
-    return _RULES
+    return RuleConfig(**to_legacy_rule_mapping(get_app_config()))
 
 
 async def post_job(
@@ -308,12 +298,16 @@ async def process_folder(job_folder: str, *, req_id: Optional[str] = None) -> Di
     if not csv_files:
         raise FileNotFoundError(f"No CSV files found in folder: {job_folder}")
 
-    # Map each model endpoint to its target float column name
+    # Model endpoints are driven by config (enabled clients only), not hard-coded.
+    enabled_clients = get_app_config().enabled_model_clients()
     endpoints: List[Tuple[str, str]] = [
-        ("http://localhost:8000/inference", "anomaly_score"),
-        # ("http://127.0.0.1:8001/inference", "paste_pixels"),
-        ("http://127.0.0.1:8002/inference", "min_pad_distance"),
+        (client.url, client.target_column) for client in enabled_clients
     ]
+    # Map each endpoint URL to its logical name and per-client request timeout.
+    url_to_name: Dict[str, str] = {client.url: client.name for client in enabled_clients}
+    url_to_timeout: Dict[str, int] = {
+        client.url: client.timeout_seconds for client in enabled_clients
+    }
 
     results_by_endpoint: Dict[str, Dict[str, Any]] = {}
     metrics_by_endpoint: Dict[str, Dict[str, Any]] = {}
@@ -456,15 +450,13 @@ async def process_folder(job_folder: str, *, req_id: Optional[str] = None) -> Di
             "errors": [],
         }
 
-    # url_to_name = {endpoints[0][0]: "anomaly", endpoints[1][0]: "paste", endpoints[2][0]: "distance"}
-    url_to_name = {endpoints[0][0]: "anomaly", endpoints[1][0]: "distance"}
-
     async with httpx.AsyncClient() as client:
         tasks = [
             post_job(
                 client,
                 url,
                 job_folder,
+                timeout=url_to_timeout.get(url, 300),
                 logger=log,
                 req_id=req_id,
                 service=url_to_name.get(url, url),
@@ -544,10 +536,7 @@ async def process_folder(job_folder: str, *, req_id: Optional[str] = None) -> Di
     job_end = time.perf_counter()
     request_end_at = _now_tz8_iso()
 
-    # Derive per-model metrics mapped by target column
-    # url_to_name = {endpoints[0][0]: "anomaly", endpoints[1][0]: "paste", endpoints[2][0]: "distance"}
-    url_to_name = {endpoints[0][0]: "anomaly", endpoints[1][0]: "distance"}
-
+    # Derive per-model metrics mapped by client name (url_to_name is config-derived).
     def get_metric(prefix: str, key: str) -> float:
         for url, _col in endpoints:
             if url_to_name.get(url) == prefix:

@@ -8,8 +8,6 @@ during later phases stays backward compatible.
 
 from __future__ import annotations
 
-from typing import Optional
-
 
 class AppError(Exception):
     """Base class for all application errors.
@@ -21,7 +19,7 @@ class AppError(Exception):
 
     status_code: int = 500
 
-    def __init__(self, message: str, *, status_code: Optional[int] = None) -> None:
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
         """Initialize the error.
 
         Args:

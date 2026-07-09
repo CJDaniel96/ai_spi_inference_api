@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, Optional
 
 
 @dataclass
@@ -19,7 +18,7 @@ class InferenceResult:
 
     service: str
     column: str
-    values: Dict[str, Optional[float]] = field(default_factory=dict)
+    values: dict[str, float | None] = field(default_factory=dict)
     error: str = ""
 
     # TODO(phase-2/3): Produced by HttpModelClient; consumed by CsvMerger.

@@ -17,6 +17,70 @@ This repository provides four FastAPI services that work together to process a j
 
 The new `app/` package is a layered modular-monolith skeleton (`api` / `application` / `domain` / `infrastructure` / `core`). Its `/process` route currently delegates to the legacy `process_folder` implementation while the logic is migrated incrementally, so behavior is unchanged.
 
+## Configuration
+
+All runtime settings live in a single JSON file, validated on load by the Pydantic
+models in [`app/core/config.py`](app/core/config.py). Nothing below (thresholds,
+model endpoints, output paths) is hard-coded in Python.
+
+- **File location:** `config/ai_server.json` (repository root). Override with the
+  `AI_CONFIG_PATH` environment variable to point at a different file.
+- **Schema:** nested sections — `server`, `paths`, `processing`, `model_clients`,
+  `defect_rules`, `output`, `logging`. The scanner keys (`watch_root`,
+  `process_api_url`, `processed_registry_path`, `rescan_interval_ms`) remain at the
+  top level because the legacy `scan_jobs.py` reads them directly.
+
+### Model clients (add / disable an endpoint)
+
+Model endpoints are **not** hard-coded — the merge server calls only the enabled
+entries in the `model_clients` array. Each client has:
+
+| Field | Meaning |
+| --- | --- |
+| `name` | Logical name (also used as the metrics prefix in `log.csv`). |
+| `enabled` | `true` to call it, `false` to skip it entirely. |
+| `url` | The model's `POST /inference` endpoint. |
+| `target_column` | CSV column the returned scalar is merged into. |
+| `timeout_seconds` | Per-request HTTP timeout. |
+
+- **Disable a client:** set its `"enabled": false`. It is then excluded from the
+  parallel inference calls (its `target_column` is left empty / `NaN`).
+- **Add a client:** append a new object with a unique `name`, its `url`,
+  `target_column`, and `timeout_seconds`, then set `"enabled": true`. No code
+  change is required.
+
+### Adjusting thresholds
+
+Edit the values under `defect_rules`:
+
+- `anomaly_threshold` — `anomaly_score >` this → `FM/color` (currently `0.9`).
+- `high_vol_offset` / `low_vol_offset` — added to `vol_h_ng` / `vol_l_ng` for the
+  `high vol` / `low vol` bands.
+- `high_cover_threshold` — `cover% >` this → `high cover`.
+- `short_distance_threshold` — `min_pad_distance <` this → `short distance`
+  (currently `6.8`).
+- `high_paste_height_threshold` — `insp_height >` this → `high paste`.
+
+### Output paths
+
+Set under `paths`:
+
+- `external_output_root` — primary output root; enriched CSVs are written to
+  `<external_output_root>/<job>/AI/`.
+- `backup_output_root` — backup root; CSVs and `*_processed.csv` are written under
+  `<backup_output_root>/YYYY/MM/<job>/`.
+
+`processing.folder_images_num_threshold` guards oversized jobs, and
+`output.primary_csv_mode` (`is_pass_only`) documents the primary-CSV contents.
+
+### Paste model (8001) — disabled by default
+
+The paste-detection client ships with `"enabled": false`. It is a heavier
+YOLO + MobileSAM pipeline (the `cover%` / `high cover` rule depends on it) and is
+kept off in production for latency. To enable it: install the `paste` extra, start
+the paste server on port `8001`, then set the `paste` client's `"enabled": true`
+in `config/ai_server.json` and restart the merge server.
+
 ## Environment Management with uv
 
 This project uses [`uv`](https://docs.astral.sh/uv/) to manage the Python

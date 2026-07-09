@@ -18,10 +18,10 @@ class DefectClassifier:
     preserve behavior.
     """
 
-    def __init__(self, config: "AppConfig") -> None:
+    def __init__(self, config: AppConfig) -> None:
         """Initialize with the thresholds/offsets from config."""
         self._config = config
 
-    def classify(self, df: "pd.DataFrame") -> "pd.DataFrame":
+    def classify(self, df: pd.DataFrame) -> pd.DataFrame:
         """Return ``df`` with ``ai_defect_name`` and ``is_pass`` populated."""
         raise NotImplementedError("Migrated in a later phase.")

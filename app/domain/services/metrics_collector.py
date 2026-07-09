@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict
 
 
 @dataclass
@@ -18,7 +17,7 @@ class JobMetrics:
 
     pass_count: int = 0
     fail_count: int = 0
-    defect_counts: Dict[str, int] = field(default_factory=dict)
+    defect_counts: dict[str, int] = field(default_factory=dict)
 
 
 class MetricsCollector:

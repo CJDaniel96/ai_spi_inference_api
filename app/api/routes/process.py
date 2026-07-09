@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any
 
 from fastapi import APIRouter, HTTPException
 
@@ -19,7 +19,7 @@ router = APIRouter(tags=["process"])
     response_model=ProcessJobResponse,
     response_model_exclude_none=True,
 )
-async def process(request: ProcessJobRequest) -> Dict[str, Any]:
+async def process(request: ProcessJobRequest) -> dict[str, Any]:
     """Process a job folder and return saved files and errors.
 
     Delegates to :class:`ProcessJobUseCase`. Error mapping preserves the legacy

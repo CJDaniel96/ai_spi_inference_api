@@ -1,9 +1,14 @@
 """Application configuration schema and loader.
 
-The configuration is defined as a Pydantic model and loaded from a JSON file
-(default: ``config/ai_server.json`` relative to the project root, overridable
-via the ``AI_CONFIG_PATH`` environment variable). Production paths live in the
-JSON file, not in code.
+The configuration is defined as nested Pydantic models and loaded from a JSON
+file (default: ``config/ai_server.json`` relative to the project root,
+overridable via the ``AI_CONFIG_PATH`` environment variable). Production paths
+live in the JSON file, never in code.
+
+The top-level :class:`AppConfig` also tolerates extra top-level keys so the
+scanner settings consumed by the legacy ``scan_jobs.py`` (``watch_root``,
+``process_api_url``, ``processed_registry_path``, ``rescan_interval_ms``) can
+coexist in the same file during the staged migration.
 """
 
 from __future__ import annotations
@@ -12,14 +17,17 @@ import json
 import os
 from functools import lru_cache
 from pathlib import Path
-from typing import Optional
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.core.errors import ConfigError
 
 _DEFAULT_CONFIG_RELPATH = "config/ai_server.json"
 _CONFIG_PATH_ENV = "AI_CONFIG_PATH"
+
+# Default image extensions scanned inside a job folder.
+_DEFAULT_IMAGE_EXTENSIONS = [".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif"]
 
 
 def _project_root() -> Path:
@@ -27,17 +35,52 @@ def _project_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
-class AppConfig(BaseModel):
-    """Typed view of ``config/ai_server.json``.
+class ServerConfig(BaseModel):
+    """HTTP server bind settings for the merge server."""
 
-    Mirrors the keys used by the legacy merge server (thresholds, output roots,
-    guardrails) and the scanner (watch/registry settings). Unknown keys are
-    preserved to stay forward compatible.
-    """
+    model_config = ConfigDict(extra="forbid")
 
-    model_config = ConfigDict(extra="allow")
+    host: str = "0.0.0.0"
+    port: int = 5050
 
-    # Rule / processing thresholds.
+
+class PathConfig(BaseModel):
+    """Output root directories for enriched CSVs."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    external_output_root: str
+    backup_output_root: str
+
+
+class ProcessingConfig(BaseModel):
+    """Job-processing guardrails and image discovery settings."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    folder_images_num_threshold: int = 500
+    image_extensions: list[str] = Field(
+        default_factory=lambda: list(_DEFAULT_IMAGE_EXTENSIONS)
+    )
+
+
+class ModelClientConfig(BaseModel):
+    """Configuration for a single downstream inference model endpoint."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    enabled: bool = True
+    url: str
+    target_column: str
+    timeout_seconds: int = 300
+
+
+class DefectRuleConfig(BaseModel):
+    """Thresholds and offsets used by rule-based defect classification."""
+
+    model_config = ConfigDict(extra="forbid")
+
     anomaly_threshold: float
     high_cover_threshold: float
     short_distance_threshold: float
@@ -45,21 +88,55 @@ class AppConfig(BaseModel):
     high_vol_offset: float
     high_paste_height_threshold: float
 
-    # Output roots (production paths supplied by the JSON file).
-    external_output_root: str
-    backup_output_root: str
 
-    # Guardrails.
-    folder_images_num_threshold: int
+class OutputConfig(BaseModel):
+    """Output-writing behavior.
 
-    # Scanner settings (consumed by the legacy scan_jobs.py process).
-    watch_root: Optional[str] = None
-    process_api_url: Optional[str] = None
-    processed_registry_path: Optional[str] = None
-    rescan_interval_ms: Optional[int] = None
+    ``primary_csv_mode`` selects what the primary ``AI/`` CSV contains:
+    ``"is_pass_only"`` (legacy default: original columns + updated ``is_pass``)
+    or ``"full"`` (the full AI schema). Currently declarative — the legacy flow
+    always behaves as ``"is_pass_only"``; wiring happens in a later phase.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    primary_csv_mode: Literal["is_pass_only", "full"] = "is_pass_only"
 
 
-def _resolve_config_path(path: Optional[Path]) -> Path:
+class LoggingConfig(BaseModel):
+    """Logging destinations (relative to the project root)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    log_dir: str = "log"
+    system_log_file: str = "system"
+    request_log_file: str = "log.csv"
+
+
+class AppConfig(BaseModel):
+    """Root application configuration.
+
+    ``extra="allow"`` retains unknown top-level keys (e.g. the scanner settings
+    read directly by ``scan_jobs.py``). ``protected_namespaces=()`` permits the
+    ``model_clients`` field name without a Pydantic protected-namespace warning.
+    """
+
+    model_config = ConfigDict(extra="allow", protected_namespaces=())
+
+    server: ServerConfig = Field(default_factory=ServerConfig)
+    paths: PathConfig
+    processing: ProcessingConfig = Field(default_factory=ProcessingConfig)
+    model_clients: list[ModelClientConfig] = Field(default_factory=list)
+    defect_rules: DefectRuleConfig
+    output: OutputConfig = Field(default_factory=OutputConfig)
+    logging: LoggingConfig = Field(default_factory=LoggingConfig)
+
+    def enabled_model_clients(self) -> list[ModelClientConfig]:
+        """Return only the model clients with ``enabled=True``."""
+        return [client for client in self.model_clients if client.enabled]
+
+
+def _resolve_config_path(path: Path | None) -> Path:
     """Resolve the config file path from arg, env var, or the default."""
     if path is not None:
         return path
@@ -69,7 +146,7 @@ def _resolve_config_path(path: Optional[Path]) -> Path:
     return _project_root() / _DEFAULT_CONFIG_RELPATH
 
 
-def load_config(path: Optional[Path] = None) -> AppConfig:
+def load_config(path: Path | None = None) -> AppConfig:
     """Load and validate the application config from a JSON file.
 
     Args:
@@ -100,3 +177,29 @@ def load_config(path: Optional[Path] = None) -> AppConfig:
 def get_config() -> AppConfig:
     """Return the process-wide cached application config."""
     return load_config()
+
+
+def to_legacy_rule_mapping(config: AppConfig) -> dict[str, Any]:
+    """Flatten the nested config into the legacy ``RuleConfig`` field mapping.
+
+    Bridges :class:`AppConfig` to the flat keys expected by
+    ``ai_server_fastapi.RuleConfig`` so legacy call sites keep working unchanged
+    during the staged migration.
+
+    Args:
+        config: The loaded application config.
+
+    Returns:
+        A dict keyed by legacy ``RuleConfig`` field names.
+    """
+    return {
+        "anomaly_threshold": config.defect_rules.anomaly_threshold,
+        "high_cover_threshold": config.defect_rules.high_cover_threshold,
+        "short_distance_threshold": config.defect_rules.short_distance_threshold,
+        "low_vol_offset": config.defect_rules.low_vol_offset,
+        "high_vol_offset": config.defect_rules.high_vol_offset,
+        "high_paste_height_threshold": config.defect_rules.high_paste_height_threshold,
+        "external_output_root": config.paths.external_output_root,
+        "backup_output_root": config.paths.backup_output_root,
+        "folder_images_num_threshold": config.processing.folder_images_num_threshold,
+    }
