@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import pandas as pd
 
-    from app.domain.entities.inference_result import InferenceResult
+    from app.domain.entities.inference_result import ModelInferenceResult
 
 
 class CsvMerger:
@@ -20,7 +20,7 @@ class CsvMerger:
     def merge(
         self,
         df: pd.DataFrame,
-        result: InferenceResult,
+        result: ModelInferenceResult,
     ) -> pd.DataFrame:
         """Return ``df`` with the result's scalar column merged in by image name."""
         raise NotImplementedError("Migrated in a later phase.")

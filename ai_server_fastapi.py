@@ -8,7 +8,6 @@ and computes derived metrics/labels for SPI jobs.
 - Logs per-request timing/metadata
 """
 
-import asyncio
 import logging
 from logging.handlers import RotatingFileHandler
 import math
@@ -18,7 +17,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
-import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -27,6 +25,7 @@ import uuid
 
 from app.core.config import get_config as get_app_config
 from app.core.config import to_legacy_rule_mapping
+from app.infrastructure.model_clients.runner import run_enabled_model_clients
 
 
 app = FastAPI(title="AI Merge Server", version="1.0.0")
@@ -135,108 +134,6 @@ def get_rules() -> RuleConfig:
     return RuleConfig(**to_legacy_rule_mapping(get_app_config()))
 
 
-async def post_job(
-    client: httpx.AsyncClient,
-    url: str,
-    job_folder: str,
-    *,
-    timeout: int = 300,
-    logger: Optional[logging.Logger] = None,
-    req_id: Optional[str] = None,
-    service: Optional[str] = None,
-) -> Tuple[str, Dict[str, Any], str, Dict[str, Any]]:
-    """Call a model endpoint and capture timings/metadata.
-
-    Returns: (url, results_map, error_str, meta)
-      - results_map: dict of img_name -> float
-      - meta: {
-          'request_ms': float,
-          'inference_ms': Optional[float],   # parsed from response if available
-          'model_version': Optional[str],
-          'device': Optional[str],
-        }
-    """
-    log = logger or get_system_logger()
-    start = time.perf_counter()
-    if service:
-        log.info(
-            "event=inference.start req_id=%s service=%s url=%s",
-            req_id or "-",
-            service,
-            url,
-        )
-    try:
-        resp = await client.post(url, json={"job_folder": job_folder}, timeout=timeout)
-        resp.raise_for_status()
-        data = resp.json()
-        end = time.perf_counter()
-        results = data.get("results", {})
-        if not isinstance(results, dict):
-            err_msg = f"Unexpected results type from {url}: {type(results)}"
-            if service:
-                log.error(
-                    "event=inference.error req_id=%s service=%s url=%s err=%s request_ms=%.3f",
-                    req_id or "-",
-                    service,
-                    url,
-                    err_msg,
-                    (end - start) * 1000.0,
-                )
-            return url, {}, err_msg, {"request_ms": (end - start) * 1000.0}
-
-        # Try to extract optional inference/metadata from common keys if provided by the model server
-        inference_ms = None
-        model_version = None
-        device = None
-        if isinstance(data, dict):
-            inference_ms = (
-                data.get("inference_ms")
-                or (isinstance(data.get("metrics"), dict) and data.get("metrics", {}).get("inference_ms"))
-                or (isinstance(data.get("timings"), dict) and data.get("timings", {}).get("inference_ms"))
-            )
-            model_version = (
-                data.get("model_version")
-                or data.get("model_ver")
-                or data.get("version")
-            )
-            device = data.get("device")
-
-        # Prepare small sample for logging
-        try:
-            sample_items = list(results.items())[:3]
-        except Exception:
-            sample_items = []
-
-        if service:
-            log.info(
-                "event=inference.done req_id=%s service=%s url=%s request_ms=%.3f result_count=%d sample=%s",
-                req_id or "-",
-                service,
-                url,
-                (end - start) * 1000.0,
-                len(results) if isinstance(results, dict) else -1,
-                repr(sample_items),
-            )
-
-        return url, results, "", {
-            "request_ms": (end - start) * 1000.0,
-            "inference_ms": inference_ms,
-            "model_version": model_version,
-            "device": device,
-        }
-    except Exception as exc:  # noqa: BLE001
-        end = time.perf_counter()
-        if service:
-            log.error(
-                "event=inference.error req_id=%s service=%s url=%s err=%s request_ms=%.3f",
-                req_id or "-",
-                service,
-                url,
-                str(exc),
-                (end - start) * 1000.0,
-            )
-        return url, {}, f"Request to {url} failed: {exc}", {"request_ms": (end - start) * 1000.0}
-
 def _now_tz8_iso() -> str:
     """Return current time in UTC+8 as an ISO 8601 string."""
     tz8 = timezone(timedelta(hours=8))
@@ -303,11 +200,8 @@ async def process_folder(job_folder: str, *, req_id: Optional[str] = None) -> Di
     endpoints: List[Tuple[str, str]] = [
         (client.url, client.target_column) for client in enabled_clients
     ]
-    # Map each endpoint URL to its logical name and per-client request timeout.
+    # Map each endpoint URL to its logical name (used for per-model metrics).
     url_to_name: Dict[str, str] = {client.url: client.name for client in enabled_clients}
-    url_to_timeout: Dict[str, int] = {
-        client.url: client.timeout_seconds for client in enabled_clients
-    }
 
     results_by_endpoint: Dict[str, Dict[str, Any]] = {}
     metrics_by_endpoint: Dict[str, Dict[str, Any]] = {}
@@ -450,24 +344,24 @@ async def process_folder(job_folder: str, *, req_id: Optional[str] = None) -> Di
             "errors": [],
         }
 
-    async with httpx.AsyncClient() as client:
-        tasks = [
-            post_job(
-                client,
-                url,
-                job_folder,
-                timeout=url_to_timeout.get(url, 300),
-                logger=log,
-                req_id=req_id,
-                service=url_to_name.get(url, url),
-            )
-            for url, _ in endpoints
-        ]
-        for url, res, err, meta in await asyncio.gather(*tasks):
-            if err:
-                errors.append(err)
-            results_by_endpoint[url] = res
-            metrics_by_endpoint[url] = meta
+    # Call all enabled model clients concurrently via the infrastructure layer.
+    model_results = await run_enabled_model_clients(
+        get_app_config(), job_folder, logger=log, req_id=req_id
+    )
+    results_by_name = {result.name: result for result in model_results}
+    for client_cfg in enabled_clients:
+        result = results_by_name.get(client_cfg.name)
+        if result is None:
+            continue
+        results_by_endpoint[client_cfg.url] = result.results
+        metrics_by_endpoint[client_cfg.url] = {
+            "request_ms": result.request_ms,
+            "inference_ms": result.inference_ms,
+            "model_version": result.model_version,
+            "device": result.device,
+        }
+        if result.error:
+            errors.append(result.error)
 
     ai_dir = Path(rules.external_output_root) / folder.name / "AI"
     ai_dir.mkdir(parents=True, exist_ok=True)

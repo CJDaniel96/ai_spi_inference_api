@@ -1,24 +1,30 @@
-"""Domain entity: model inference results."""
+"""Domain entity / DTO for a single model endpoint's inference result."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
 
-@dataclass
-class InferenceResult:
-    """Scalar results returned by a single model endpoint.
+@dataclass(frozen=True)
+class ModelInferenceResult:
+    """Typed, immutable result of one model endpoint call.
 
     Attributes:
-        service: Logical model name (e.g. ``"anomaly"``, ``"distance"``).
-        column: Target CSV column for the scalar value.
-        values: Mapping of image name to scalar value (or ``None``).
-        error: Error string when the call failed, otherwise empty.
+        name: Logical model name (e.g. ``"anomaly"``, ``"distance"``).
+        target_column: CSV column the scalar values are merged into.
+        results: Mapping of image name to scalar value (or ``None``).
+        request_ms: Wall-clock request latency in milliseconds.
+        inference_ms: Server-reported inference time, when provided.
+        model_version: Server-reported model version, when provided.
+        device: Server-reported device, when provided.
+        error: Error description when the call failed, otherwise ``None``.
     """
 
-    service: str
-    column: str
-    values: dict[str, float | None] = field(default_factory=dict)
-    error: str = ""
-
-    # TODO(phase-2/3): Produced by HttpModelClient; consumed by CsvMerger.
+    name: str
+    target_column: str
+    results: dict[str, float | None] = field(default_factory=dict)
+    request_ms: float = 0.0
+    inference_ms: float | None = None
+    model_version: str | None = None
+    device: str | None = None
+    error: str | None = None
