@@ -137,6 +137,11 @@ def _count_images(job_folder: Path) -> int:
 async def process_folder(job_folder: str, *, req_id: Optional[str] = None) -> Dict[str, Any]:
     """End-to-end pipeline for a job folder.
 
+    DEPRECATED: superseded by
+    ``app.application.use_cases.process_job.ProcessJobUseCase``, which the new
+    ``python -m app.main`` entry point uses. This legacy implementation is kept
+    for the legacy ``ai_server_fastapi.py`` entry point during migration.
+
     - Validates folder and finds CSVs
     - Calls all model endpoints concurrently and collects results/metrics
     - Merges scalar results into each CSV and computes derived columns

@@ -10,6 +10,7 @@ from typing import Any
 
 import pandas as pd
 
+from app.core.errors import CsvSchemaError
 from app.domain.entities.inference_result import ModelInferenceResult
 
 _IMAGE_SUFFIX = ".jpg"
@@ -35,9 +36,9 @@ def build_image_name(array_id: Any, pad_no: Any) -> str:
     """
     numeric_id = pd.to_numeric(array_id, errors="coerce")
     if pd.isna(numeric_id):
-        raise ValueError(f"Array_id is missing or not numeric: {array_id!r}")
+        raise CsvSchemaError(f"Array_id is missing or not numeric: {array_id!r}")
     if pd.isna(pad_no):
-        raise ValueError(f"Pad_no is missing: {pad_no!r}")
+        raise CsvSchemaError(f"Pad_no is missing: {pad_no!r}")
     prefix = int(numeric_id) - 1
     return f"{prefix}_{pad_no}{_IMAGE_SUFFIX}"
 
@@ -57,7 +58,7 @@ class CsvMerger:
             A new frame with an ``img_name`` column.
 
         Raises:
-            ValueError: If ``Array_id`` or ``Pad_no`` columns are missing.
+            CsvSchemaError: If ``Array_id`` or ``Pad_no`` columns are missing.
         """
         missing = [
             column
@@ -65,7 +66,7 @@ class CsvMerger:
             if column not in df.columns
         ]
         if missing:
-            raise ValueError(f"CSV missing required columns: {missing}")
+            raise CsvSchemaError(f"CSV missing required columns: {missing}")
 
         out = df.copy()
         prefix = (
@@ -94,10 +95,10 @@ class CsvMerger:
             A new frame with one column per model result.
 
         Raises:
-            ValueError: If ``df`` has no ``img_name`` column.
+            CsvSchemaError: If ``df`` has no ``img_name`` column.
         """
         if _IMAGE_NAME_COLUMN not in df.columns:
-            raise ValueError(
+            raise CsvSchemaError(
                 f"DataFrame has no '{_IMAGE_NAME_COLUMN}' column; "
                 "call add_image_name_column first"
             )

@@ -1,13 +1,9 @@
-"""Application entry point (experimental new architecture).
+"""Application entry point (modular, layered architecture).
 
-Creates the FastAPI application, wires the health and process routes, and
-configures logging. This is the new modular-monolith entry point and is meant
-to run as a drop-in for the legacy ``ai_server_fastapi.py`` server (same
-``/health`` and ``/process`` contract on port 5050) during migration.
-
-Run with::
-
-    python -m app.main
+Creates the FastAPI application, wires the health and process routes, configures
+logging from config, and registers centralized exception handlers. This is the
+primary entry point (``python -m app.main``, port 5050); the legacy
+``ai_server_fastapi.py`` server is kept only for backward compatibility.
 """
 
 from __future__ import annotations
@@ -17,28 +13,68 @@ from fastapi.responses import JSONResponse
 
 from app.api.routes import health as health_route
 from app.api.routes import process as process_route
+from app.core.config import get_config, resolve_under_project_root
 from app.core.errors import AppError
-from app.core.logging import setup_logging
+from app.core.logging import get_logger, setup_logging
 
 _HOST = "0.0.0.0"
 _PORT = 5050
+_INTERNAL_ERROR_DETAIL = "Internal Server Error"
+_SERVER_ERROR_STATUS = 500
 
 
-def create_app() -> FastAPI:
-    """Build and configure the FastAPI application."""
-    setup_logging()
+def _configure_logging() -> None:
+    """Configure logging from config, falling back to defaults on any failure."""
+    try:
+        config = get_config()
+        setup_logging(
+            log_dir=resolve_under_project_root(config.logging.log_dir),
+            system_log_file=config.logging.system_log_file,
+        )
+    except Exception:  # noqa: BLE001 - never let logging setup block startup
+        setup_logging()
 
-    application = FastAPI(title="SPI AI Inference API", version="0.1.0")
-    application.include_router(health_route.router)
-    application.include_router(process_route.router)
+
+def _register_exception_handlers(application: FastAPI) -> None:
+    """Map typed app errors to responses and log unexpected errors."""
+    logger = get_logger("api")
 
     @application.exception_handler(AppError)
-    async def _app_error_handler(request: Request, exc: AppError) -> JSONResponse:
-        """Convert application errors into JSON responses."""
+    async def _handle_app_error(request: Request, exc: AppError) -> JSONResponse:
+        """Return a typed error's ``detail``; log server-side (5xx) failures."""
+        if exc.status_code >= _SERVER_ERROR_STATUS:
+            logger.error(
+                "event=api.error path=%s status=%d err=%s",
+                request.url.path,
+                exc.status_code,
+                exc.message,
+            )
         return JSONResponse(
             status_code=exc.status_code, content={"detail": exc.message}
         )
 
+    @application.exception_handler(Exception)
+    async def _handle_unexpected(request: Request, exc: Exception) -> JSONResponse:
+        """Log the traceback and return a generic 500 without leaking details."""
+        logger.exception(
+            "event=api.unhandled path=%s method=%s err=%s",
+            request.url.path,
+            request.method,
+            str(exc),
+        )
+        return JSONResponse(
+            status_code=_SERVER_ERROR_STATUS,
+            content={"detail": _INTERNAL_ERROR_DETAIL},
+        )
+
+
+def create_app() -> FastAPI:
+    """Build and configure the FastAPI application."""
+    _configure_logging()
+    application = FastAPI(title="AI SPI Inference API", version="0.1.0")
+    application.include_router(health_route.router)
+    application.include_router(process_route.router)
+    _register_exception_handlers(application)
     return application
 
 

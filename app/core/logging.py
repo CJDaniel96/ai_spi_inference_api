@@ -1,9 +1,11 @@
 """Centralized logging setup for the application.
 
-This configures a single ``app.system`` logger that writes to
-``<project_root>/log/system`` (rotating) and to stderr. Full metrics logging
-(the per-job ``log.csv``) is intentionally left in the legacy code for now and
-will be migrated with :class:`MetricsCollector` in a later phase.
+Configures a single ``app.system`` logger with a rotating file handler
+(``<log_dir>/<system_log_file>``) plus a console handler. The log directory and
+system-log filename come from config (``logging.log_dir`` /
+``logging.system_log_file``). The directory is created if missing, so logging
+never crashes on a non-existent path. The per-job metrics CSV is written
+separately by ``RequestLogWriter`` (also config-driven).
 """
 
 from __future__ import annotations
@@ -32,16 +34,18 @@ def default_log_dir() -> Path:
 def setup_logging(
     log_dir: Path | None = None,
     *,
+    system_log_file: str = "system",
     level: int = logging.INFO,
 ) -> logging.Logger:
     """Configure and return the application system logger.
 
-    Sets up a rotating file handler writing to ``<log_dir>/system`` plus a
-    stream handler for foreground visibility. The call is idempotent: if the
-    logger already has handlers it is returned unchanged.
+    Sets up a rotating file handler writing to ``<log_dir>/<system_log_file>``
+    plus a stream handler for foreground visibility. The call is idempotent: if
+    the logger already has handlers it is returned unchanged.
 
     Args:
         log_dir: Directory for log files. Defaults to ``<project_root>/log``.
+        system_log_file: Filename for the system log within ``log_dir``.
         level: Logging level for the logger and its handlers.
 
     Returns:
@@ -54,7 +58,7 @@ def setup_logging(
 
     target_dir = log_dir or default_log_dir()
     target_dir.mkdir(parents=True, exist_ok=True)
-    log_path = target_dir / "system"  # No extension, matching legacy behavior.
+    log_path = target_dir / system_log_file
 
     formatter = logging.Formatter(fmt=_LOG_FORMAT, datefmt=_DATE_FORMAT)
 

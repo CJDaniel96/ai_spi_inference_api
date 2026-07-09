@@ -1,25 +1,37 @@
-"""CSV read/write access (skeleton)."""
+"""Infrastructure: CSV read/write with distinct processing vs. output modes."""
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    import pandas as pd
+import pandas as pd
+
+from app.core.errors import OutputWriteError
 
 
 class CsvRepository:
-    """Reads and writes CSV files.
+    """Reads and writes CSV files for the processing pipeline."""
 
-    TODO(phase-3): Encapsulate the legacy dual-read strategy (a typed read for
-    computation and a ``dtype=str`` read for output formatting).
-    """
+    def read_for_processing(self, path: Path) -> pd.DataFrame:
+        """Read a CSV with pandas' default typing (for computation)."""
+        return pd.read_csv(path)
 
-    def read(self, path: Path) -> pd.DataFrame:
-        """Read a CSV file into a DataFrame."""
-        raise NotImplementedError("Migrated in a later phase.")
+    def read_for_output(self, path: Path) -> pd.DataFrame:
+        """Read a CSV as strings, preserving original numeric formatting.
+
+        Uses ``dtype=str`` and ``keep_default_na=False`` so values such as
+        ``"50.000"`` and empty cells round-trip unchanged.
+        """
+        return pd.read_csv(path, dtype=str, keep_default_na=False)
 
     def write(self, df: pd.DataFrame, path: Path) -> None:
-        """Write a DataFrame to ``path`` as CSV."""
-        raise NotImplementedError("Migrated in a later phase.")
+        """Write ``df`` to ``path`` (creating parent directories), without index.
+
+        Raises:
+            OutputWriteError: If the file or its directories cannot be written.
+        """
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            df.to_csv(path, index=False)
+        except OSError as exc:
+            raise OutputWriteError(f"Failed to write CSV to {path}: {exc}") from exc

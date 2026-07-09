@@ -35,6 +35,16 @@ def _project_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+def resolve_under_project_root(path: str | Path) -> Path:
+    """Resolve a possibly-relative path against the project root.
+
+    Absolute paths are returned unchanged; relative paths (e.g. the config
+    ``log_dir``) are resolved under the repository root.
+    """
+    candidate = Path(path)
+    return candidate if candidate.is_absolute() else _project_root() / candidate
+
+
 class ServerConfig(BaseModel):
     """HTTP server bind settings for the merge server."""
 
@@ -93,14 +103,14 @@ class OutputConfig(BaseModel):
     """Output-writing behavior.
 
     ``primary_csv_mode`` selects what the primary ``AI/`` CSV contains:
-    ``"is_pass_only"`` (legacy default: original columns + updated ``is_pass``)
-    or ``"full"`` (the full AI schema). Currently declarative — the legacy flow
-    always behaves as ``"is_pass_only"``; wiring happens in a later phase.
+    ``"is_pass_only"`` (default: original columns with only ``is_pass`` updated)
+    or ``"full_ai_columns"`` (the full processed frame with all AI columns). The
+    backup and processed CSVs keep their existing behavior regardless of mode.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    primary_csv_mode: Literal["is_pass_only", "full"] = "is_pass_only"
+    primary_csv_mode: Literal["is_pass_only", "full_ai_columns"] = "is_pass_only"
 
 
 class LoggingConfig(BaseModel):

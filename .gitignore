@@ -153,19 +153,22 @@ temp/
 log/
 .claude/
 
-# Models (typically large files)
-models/**/*.onnx
-models/**/*.pt
-models/**/*.pth
+# Models / weights (typically large files) — any location
+*.engine
+*.onnx
+*.pt
+*.pth
 models/**/*.bin
 models/**/*.h5
 models/**/*.pkl
 models/**/*.joblib
 models/**/*.safetensors
-models/**/*.engine
 *.cache
 *.ckpt
 *.zip
+
+# Tool caches
+.ruff_cache/
 
 # Data files
 data/

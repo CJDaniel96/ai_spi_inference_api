@@ -1,319 +1,353 @@
-# Four-Service AI Merge Pipeline (FastAPI)
+# AI SPI Inference API
 
-This repository provides four FastAPI services that work together to process a job folder, call three AI endpoints in parallel, merge their numeric results into the CSV(s), classify defects, and save a merged CSV into an `AI` subfolder.
+A FastAPI service that enriches SPI (Solder Paste Inspection) machine output with
+AI model results. It scans a job folder, calls AI inference endpoints in parallel,
+merges their scalar results into the CSV(s), applies rule-based defect
+classification, decides pass/fail, and writes the enriched CSVs plus a per-job
+metrics row.
 
-- Merge server: `ai_server_fastapi.py` on port `5050` (`POST /process`)
-- Model servers:
-  - `8000` PatchCore anomaly — returns `anomaly_score`
-  - `8001` Paste detection — returns `paste_pixels`
-  - `8002` Distance detection — returns `min_center_to_pad_distance`
+## What This Project Does
 
-## Entry Points
+Given a `job_folder` containing SPI CSV(s) and pad images, the service:
 
-- Legacy entry point (stable): `python ai_server_fastapi.py`
-  - Serves `/process` and `/health` on port `5050`.
-- New experimental entry point (modular architecture, Phase 2 skeleton): `python -m app.main`
-  - Same `/process` and `/health` contract on port `5050`. Run from the repository root.
+1. Validates the folder and discovers its CSV files and image count.
+2. Calls the **enabled** model inference endpoints concurrently.
+3. Merges each model's scalar result into the CSV by image name.
+4. Computes derived columns (`pad_area`, `cover%`) when their inputs exist.
+5. Classifies each row's `ai_defect_name` using ordered, config-driven rules.
+6. Sets `is_pass` (22 = pass, 23 = fail).
+7. Writes a **primary**, **backup**, and **processed** CSV, and appends a metrics
+   row to `log/log.csv`.
 
-The new `app/` package is a layered modular-monolith skeleton (`api` / `application` / `domain` / `infrastructure` / `core`). Its `/process` route currently delegates to the legacy `process_folder` implementation while the logic is migrated incrementally, so behavior is unchanged.
+## Architecture
 
-## Configuration
+Modular monolith with a layered architecture under `app/`:
 
-All runtime settings live in a single JSON file, validated on load by the Pydantic
-models in [`app/core/config.py`](app/core/config.py). Nothing below (thresholds,
-model endpoints, output paths) is hard-coded in Python.
+```
+app/
+  api/            # FastAPI routes + request/response schemas (interface layer)
+  application/    # ProcessJobUseCase (orchestration)
+  domain/         # pure business logic: entities + services (no I/O)
+    entities/     #   Job, ModelInferenceResult, DefectLabel/codes
+    services/     #   CsvMerger, DerivedMetricsCalculator, DefectClassifier,
+                  #   MetricsCollector, add_is_pass
+  infrastructure/ # adapters: model HTTP clients, repositories, output writers
+  core/           # config (Pydantic), logging, error hierarchy
+  utils/          # small shared helpers
+```
 
-- **File location:** `config/ai_server.json` (repository root). Override with the
-  `AI_CONFIG_PATH` environment variable to point at a different file.
-- **Schema:** nested sections — `server`, `paths`, `processing`, `model_clients`,
-  `defect_rules`, `output`, `logging`. The scanner keys (`watch_root`,
-  `process_api_url`, `processed_registry_path`, `rescan_interval_ms`) remain at the
-  top level because the legacy `scan_jobs.py` reads them directly.
+The system also involves separate processes:
 
-### Model clients (add / disable an endpoint)
+| Component | Port | Role |
+| --- | --- | --- |
+| Merge server (`app.main`) | `5050` | This API — orchestration (`/process`, `/health`) |
+| PatchCore anomaly | `8000` | Returns `anomaly_score` |
+| Paste detection | `8001` | Returns `paste_pixels` — **disabled by default** |
+| Distance detection | `8002` | Returns `min_center_to_pad_distance` |
+| `scan_jobs.py` | — | Folder watcher that POSTs ready jobs to `/process` |
 
-Model endpoints are **not** hard-coded — the merge server calls only the enabled
-entries in the `model_clients` array. Each client has:
+**Entry points**
 
-| Field | Meaning |
-| --- | --- |
-| `name` | Logical name (also used as the metrics prefix in `log.csv`). |
-| `enabled` | `true` to call it, `false` to skip it entirely. |
-| `url` | The model's `POST /inference` endpoint. |
-| `target_column` | CSV column the returned scalar is merged into. |
-| `timeout_seconds` | Per-request HTTP timeout. |
+- Primary (new architecture): `python -m app.main` — runs entirely on the layered
+  `app/` code.
+- Legacy (deprecated, kept for compatibility): `python ai_server_fastapi.py`.
 
-- **Disable a client:** set its `"enabled": false`. It is then excluded from the
-  parallel inference calls (its `target_column` is left empty / `NaN`).
-- **Add a client:** append a new object with a unique `name`, its `url`,
-  `target_column`, and `timeout_seconds`, then set `"enabled": true`. No code
-  change is required.
+## Runtime Flow
 
-### Adjusting thresholds
+```
+scan_jobs.py  ──POST /process {job_folder}──▶  app.main
+    │                                              │
+    │                              ProcessJobUseCase.execute()
+    │        1. FileSystemJobRepository.load  (validate, find CSVs, count images)
+    │        2. if images > threshold → skip inference, mark all is_pass=23
+    │        3. run enabled model clients concurrently  (asyncio.gather)
+    │        4. per CSV: merge → derived → classify → is_pass
+    │        5. OutputWriter: primary + backup + processed CSV
+    │        6. RequestLogWriter: append metrics row to log/log.csv
+    ▼
+2xx → scan_jobs marks the job processed
+```
 
-Edit the values under `defect_rules`:
+## API Reference
 
-- `anomaly_threshold` — `anomaly_score >` this → `FM/color` (currently `0.9`).
-- `high_vol_offset` / `low_vol_offset` — added to `vol_h_ng` / `vol_l_ng` for the
-  `high vol` / `low vol` bands.
-- `high_cover_threshold` — `cover% >` this → `high cover`.
-- `short_distance_threshold` — `min_pad_distance <` this → `short distance`
-  (currently `6.8`).
-- `high_paste_height_threshold` — `insp_height >` this → `high paste`.
+### GET /health
 
-### Output paths
+Returns liveness and the current UTC+8 timestamp.
 
-Set under `paths`:
+```json
+{ "status": "healthy", "time": "2026-07-09T10:00:00+08:00" }
+```
 
-- `external_output_root` — primary output root; enriched CSVs are written to
-  `<external_output_root>/<job>/AI/`.
-- `backup_output_root` — backup root; CSVs and `*_processed.csv` are written under
-  `<backup_output_root>/YYYY/MM/<job>/`.
+### POST /process
 
-`processing.folder_images_num_threshold` guards oversized jobs, and
-`output.primary_csv_mode` (`is_pass_only`) documents the primary-CSV contents.
+Body:
 
-### Paste model (8001) — disabled by default
+```json
+{ "job_folder": "D:/path/to/job" }
+```
 
-The paste-detection client ships with `"enabled": false`. It is a heavier
-YOLO + MobileSAM pipeline (the `cover%` / `high cover` rule depends on it) and is
-kept off in production for latency. To enable it: install the `paste` extra, start
-the paste server on port `8001`, then set the `paste` client's `"enabled": true`
-in `config/ai_server.json` and restart the merge server.
+Success (200):
 
-## Environment Management with uv
+```json
+{
+  "status": "ok",
+  "saved_files": [".../AI/xxx.csv", ".../backup/.../xxx.csv", ".../xxx_processed.csv"],
+  "errors": [],
+  "csv_count": 1
+}
+```
 
-This project uses [`uv`](https://docs.astral.sh/uv/) to manage the Python
-environment and dependencies. `pyproject.toml` is the **canonical** dependency
-source; the `requirements-*.txt` files are pinned mirrors kept for legacy /
-non-uv deployment (see below).
+Skipped (200, image count over threshold):
 
-Three platforms are supported:
+```json
+{
+  "status": "finished scanning",
+  "skipped": true,
+  "reason": "images_exceed_threshold",
+  "img_numbers": 812,
+  "csv_count": 1,
+  "saved_files": ["..."],
+  "errors": []
+}
+```
 
-| Platform          | PyTorch build                | Extras installed        |
-| ----------------- | ---------------------------- | ----------------------- |
-| Windows + CUDA    | CUDA wheels (PyTorch index)  | `cuda` (+ `dev`)        |
-| Linux + CUDA      | CUDA wheels (PyTorch index)  | `cuda` (+ `dev`)        |
-| macOS (CPU / MPS) | PyPI wheels (CPU / Apple MPS)| `mac` (+ `dev`)         |
+Errors:
 
-> **Python version:** `>=3.10,<3.12` (3.10 or 3.11). Some pinned dependencies do
-> not yet support 3.12, so do not use 3.12.
+| Situation | HTTP | Body |
+| --- | --- | --- |
+| Job folder missing / not a directory | 400 | `{ "detail": "..." }` |
+| No CSV files in folder | 400 | `{ "detail": "..." }` |
+| CSV missing required columns / bad values | 400 | `{ "detail": "..." }` |
+| A single model endpoint fails | 200 | success body with the message in `errors` |
+| Config invalid / output write fails / unexpected | 500 | `{ "detail": "Internal Server Error" }` |
 
-### Prerequisite: install uv
+`curl` example:
 
 ```bash
-# macOS / Linux
+curl -X POST "http://127.0.0.1:5050/process" \
+  -H "Content-Type: application/json" \
+  -d '{ "job_folder": "D:/Dre/JQ_SPI_02_AI_API/data/20250523135357" }'
+```
+
+## Input Job Folder Requirements
+
+- A directory that exists and contains **one or more `.csv` files**.
+- Pad images named `{Array_id - 1}_{Pad_no}.jpg` (used to align model results to
+  rows). Image extensions counted for the guardrail come from
+  `processing.image_extensions`.
+
+## CSV Required Columns
+
+- **Required** (to build the `img_name` join key): `Array_id`, `Pad_no`.
+  Missing either raises a CSV schema error (HTTP 400).
+- **Optional**, consulted by defect rules only when present:
+  `insp_vol`, `vol_l_ng`, `vol_h_ng`, `insp_height`, `Width`, `Length`.
+- **Produced by models** (added during merge): `anomaly_score`,
+  `min_pad_distance`, and `paste_pixels` (only if the paste model is enabled).
+  Missing model columns become `NaN` — rules that need them are simply skipped.
+
+## Model Client Configuration
+
+Model endpoints are **not** hard-coded. The service calls only the enabled entries
+in `model_clients`:
+
+```json
+{
+  "name": "anomaly",
+  "enabled": true,
+  "url": "http://127.0.0.1:8000/inference",
+  "target_column": "anomaly_score",
+  "timeout_seconds": 300
+}
+```
+
+- **Disable** a client: set `"enabled": false` (its column is left `NaN`).
+- **Add** a client: append an object with a unique `name`, `url`, `target_column`,
+  and `timeout_seconds`, then set `"enabled": true`. No code change required.
+- The paste client (`8001`) ships **disabled** (see compatibility notes).
+
+## Defect Classification Rules
+
+Applied in priority order; only the **first** matching rule per row assigns a
+label. Thresholds/offsets come from `defect_rules`.
+
+| # | Condition | Label |
+| --- | --- | --- |
+| 1 | `anomaly_score > anomaly_threshold` | `FM/color` |
+| 2 | `insp_vol > vol_h_ng + high_vol_offset` | `high vol` |
+| 3 | `insp_vol < vol_l_ng + low_vol_offset` | `low vol` |
+| 4 | `cover% > high_cover_threshold` | `high cover` |
+| 5 | `min_pad_distance < short_distance_threshold` | `short distance` |
+| 6 | `insp_height > high_paste_height_threshold` | `high paste` |
+
+`is_pass` = `22` when `ai_defect_name` is empty/whitespace, else `23`.
+
+Note rule 5 uses **`<` (less than)** the threshold.
+
+## Output Files
+
+For each input CSV, three files are written:
+
+| File | Path | Contents |
+| --- | --- | --- |
+| Primary | `{external_output_root}/{job}/AI/{csv}` | Per `primary_csv_mode` (below) |
+| Backup | `{backup_output_root}/{year}/{month}/{job}/{csv}` | Original columns + `is_pass` |
+| Processed | `{backup_output_root}/{year}/{month}/{job}/{stem}_processed.csv` | Full AI schema |
+
+`output.primary_csv_mode`:
+
+- `is_pass_only` (default): the original columns with **only `is_pass` updated**
+  (original numeric formatting preserved).
+- `full_ai_columns`: the full processed frame, including `img_name`, model score
+  columns, `ai_defect_name`, and `is_pass`.
+
+The backup and `_processed.csv` are **unchanged by the mode**. The
+`*_processed.csv` carries the full AI schema and is intended for **debugging**.
+
+The per-job metrics row (`log/log.csv`) keeps its 18-column schema:
+`job_folder, img_numbers, request_start_at, request_end_at, anomaly_request_ms,
+paste_request_ms, distance_request_ms, compute_total_ms, request_latency_ms,
+pass_count, fail_count, anomaly_count, distance_count, low_vol_count,
+high_vol_count, high_cover_count, high_paste_count, logged_at`.
+
+## Config Reference
+
+Single file: `config/ai_server.json` (override the path with the `AI_CONFIG_PATH`
+environment variable). Validated on load by `app/core/config.py`.
+
+```json
+{
+  "server": { "host": "0.0.0.0", "port": 5050 },
+  "paths": {
+    "external_output_root": "D:/Dre/JQ_SPI_02_AI_API/data",
+    "backup_output_root": "D:/Dre/JQ_SPI_02_AI_API/backup"
+  },
+  "processing": {
+    "folder_images_num_threshold": 500,
+    "image_extensions": [".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif"]
+  },
+  "model_clients": [
+    { "name": "anomaly",  "enabled": true,  "url": "http://127.0.0.1:8000/inference", "target_column": "anomaly_score",    "timeout_seconds": 300 },
+    { "name": "paste",    "enabled": false, "url": "http://127.0.0.1:8001/inference", "target_column": "paste_pixels",     "timeout_seconds": 300 },
+    { "name": "distance", "enabled": true,  "url": "http://127.0.0.1:8002/inference", "target_column": "min_pad_distance", "timeout_seconds": 300 }
+  ],
+  "defect_rules": {
+    "anomaly_threshold": 0.9,
+    "high_cover_threshold": 180.0,
+    "short_distance_threshold": 6.8,
+    "low_vol_offset": -10.0,
+    "high_vol_offset": 20.0,
+    "high_paste_height_threshold": 200.0
+  },
+  "output": { "primary_csv_mode": "is_pass_only" },
+  "logging": { "log_dir": "log", "system_log_file": "system", "request_log_file": "log.csv" },
+
+  "watch_root": "D:/spi_ai/output/01/sfcTemp",
+  "process_api_url": "http://127.0.0.1:5050/process",
+  "processed_registry_path": "log/processed.json",
+  "rescan_interval_ms": 500
+}
+```
+
+The top-level `watch_root` / `process_api_url` / `processed_registry_path` /
+`rescan_interval_ms` keys are read directly by `scan_jobs.py`.
+
+Config is cached per process — **restart the server to pick up config changes**
+(the scanner re-reads its own config each loop).
+
+## How to Install
+
+The project uses [`uv`](https://docs.astral.sh/uv/). `pyproject.toml` is the
+canonical dependency source; `requirements-*.txt` are pinned mirrors for non-uv
+installs. Python `>=3.10,<3.12`.
+
+```bash
+# Install uv (macOS/Linux)
 curl -LsSf https://astral.sh/uv/install.sh | sh
-# Windows (PowerShell)
-powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
 
-uv --version
-```
-
-### Dependency organisation
-
-- **base** (`[project].dependencies`): cross-platform packages (fastapi,
-  uvicorn, httpx, pydantic, pandas, numpy, opencv-python, matplotlib,
-  ultralytics, anomalib, torch, torchvision).
-- **`cuda` extra**: Windows/Linux CUDA-only packages — `onnxruntime-gpu`,
-  `pycuda` (markered so they are never resolved/installed on macOS).
-  TensorRT is installed out-of-band; see the CUDA notes below.
-- **`mac` extra**: `onnxruntime` (CPU build) — no CUDA-only packages.
-- **`dev` group**: `pytest`, `ruff`, `mypy`.
-- **`analytics` extra** (optional): `plotly`, `xlsxwriter` for the analytics
-  scripts under `test/`.
-- **`paste` extra** (optional): MobileSAM (git dependency) for the paste
-  detection server (port 8001).
-
-### Windows + CUDA
-
-```powershell
+# Windows/Linux + CUDA
 uv venv --python 3.10
-.venv\Scripts\activate
-
-# 1) Install the CUDA build of PyTorch from the PyTorch index (do this FIRST):
 uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-
-# 2a) Reproducible / legacy path (recommended for deployment):
-uv pip install -r requirements-cuda.txt
-uv pip install -r requirements-dev.txt
-
-# 2b) …or the pyproject-driven path:
 uv sync --extra cuda --group dev
-```
 
-> `uv sync` installs the default PyPI build of torch, which on **Windows is
-> CPU-only**. On Windows always run step (1) (the PyTorch CUDA index) so the
-> CUDA wheels are in place; `uv sync` will then keep them.
-
-### Linux + CUDA
-
-```bash
+# macOS (CPU / Apple Silicon) — no CUDA-only packages
 uv venv --python 3.10
-source .venv/bin/activate
-
-# On Linux the default PyPI torch already bundles CUDA. To pin a specific
-# CUDA version, install from the PyTorch index first:
-uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-
-# Reproducible / legacy path:
-uv pip install -r requirements-cuda.txt
-uv pip install -r requirements-dev.txt
-
-# …or the pyproject-driven path:
-uv sync --extra cuda --group dev
-```
-
-### macOS (CPU / Apple Silicon)
-
-macOS does **not** install any CUDA-only dependency (`pycuda`,
-`onnxruntime-gpu`, `tensorrt`).
-
-```bash
-uv venv --python 3.10
-source .venv/bin/activate
-
-# pyproject-driven path (recommended):
 uv sync --extra mac --group dev
-
-# …or the reproducible / legacy path:
-uv pip install -r requirements-mac.txt
-uv pip install -r requirements-dev.txt
 ```
 
-torch / torchvision come from PyPI (CPU + Apple Silicon MPS) — no index needed.
+CUDA-only packages (`pycuda`, `onnxruntime-gpu`, TensorRT) never install on macOS.
+See the extras in `pyproject.toml` (`cuda`, `mac`, `analytics`, `paste`).
 
-### CUDA / PyTorch notes
-
-- **PyTorch index URL** is only needed for CUDA wheels on Windows/Linux; it is
-  deliberately kept out of the universal dependency set. Pick the CUDA build
-  that matches your driver, e.g. `cu121` or `cu124`.
-- **TensorRT** is imported by `patchcore_inf_trt.py` but is installed
-  out-of-band from NVIDIA to match your CUDA toolkit — pin it in
-  `requirements-cuda.txt` for your deployment (see the TODO in that file).
-- **Legacy discrepancy (TODO):** `setup.bat` installs `torch 1.13.1+cu117`
-  while `requirements.txt` comments target `cu121` and `onnxruntime-gpu==1.19.0`
-  needs CUDA 12.x. Standardise on one CUDA toolchain before production rollout.
-
-### Common uv commands
+## How to Run
 
 ```bash
-uv sync                              # install base deps into .venv
-uv sync --group dev                  # base + dev tooling
-uv sync --extra cuda --group dev     # Windows/Linux CUDA + dev
-uv sync --extra mac --group dev      # macOS + dev
+# The merge API (this service)
+uv run python -m app.main            # http://0.0.0.0:5050
 
-uv run python ai_server_fastapi.py   # legacy entry point (merge server, 5050)
-# uv run python -m app.main          # future entry point (after refactor)
-
-uv run pytest
-uv run ruff check .
-uv run ruff format .
-uv run python scripts/check_env.py   # verify the environment
+# Model servers + scanner (Windows) — starts 5050, 8000, 8002, scanner
+02_api_services.bat
 ```
 
-### requirements-*.txt (legacy / deployment)
+The legacy entry point `uv run python ai_server_fastapi.py` is still available but
+deprecated.
 
-`pyproject.toml` is the source of truth. These pinned files mirror it for
-non-uv `pip` installs and reproducible CI/deployment images:
+## How to Test
 
-- `requirements-cuda.txt` — base + CUDA-only packages (Windows/Linux)
-- `requirements-mac.txt` — base + CPU onnxruntime (macOS)
-- `requirements-dev.txt` — dev tooling (pytest / ruff / mypy)
-- `requirements.txt` — original legacy conda list (kept as-is)
+```bash
+uv run pytest
+```
 
-Keep them in sync with `pyproject.toml`; do not let them diverge long-term.
+Unit tests (`tests/unit/`) cover the pure domain services and config; integration
+tests (`tests/integration/`) drive `ProcessJobUseCase` and the `/process` route
+using temporary directories and a fake model runner — **no real endpoints or
+production paths are required**.
 
-### uv.lock
+## How to Format and Lint
 
-`uv.lock` is currently **git-ignored**. A single universal lockfile cannot
-faithfully capture the CUDA build of torch or the TensorRT bindings (both
-installed out-of-band), so reproducible installs use the pinned
-`requirements-*.txt` files instead. Revisit committing `uv.lock` once the team
-standardises on one CUDA toolchain and brings torch fully under uv.
+The project uses **Ruff** for both linting and formatting (no Black — a single
+formatter avoids conflicts):
 
-## How To Use The API
+```bash
+uv run ruff check .          # lint
+uv run ruff format .         # format
+uv run ruff format --check . # verify formatting in CI
+uv run mypy app              # optional type check
+```
 
-- Start services (Windows): run `start_fastapi_services.bat`.
-  - It launches four consoles on ports 5050, 8000, 8001, 8002.
-  - Use forward slashes in JSON paths on Windows (e.g., `D:/path/...`).
-
-- Merge server (5050)
-  - Endpoint: `POST /process`
-  - Body: `{ "job_folder": "D:/path/to/job" }`
-  - bash:
-    - `curl.exe -X POST "http://127.0.0.1:5050/process" -H "Content-Type: application/json" -d "{ \"job_folder\": \"D:/Dre/JQ_SPI_02_AI_API/data/20250523135357\" }"`
-  - PowerShell:
-    - `$body = @{ job_folder = 'D:/Dre/JQ_SPI_02_AI_API/data/20250523135357' } | ConvertTo-Json`
-    - `Invoke-RestMethod -Uri 'http://127.0.0.1:5050/process' -Method Post -ContentType 'application/json' -Body $body`
-
-- PatchCore anomaly (8000)
-  - Endpoint: `POST /inference`
-  - Body: `{ "job_folder": "D:/path/to/job" }`
-  - Health: `GET /health`
-
-- Paste detection (8001)
-  - Endpoint: `POST /inference`
-  - Body: `{ "job_folder": "D:/path/to/job" }`
-  - Health: `GET /health`
-
-- Distance detection (8002)
-  - Endpoint: `POST /inference`
-  - Body: `{ "job_folder": "D:/path/to/job" }`
-  - Health: `GET /health`
-
-## Service Returns
-
-- Merge server (5050 `POST /process`)
-  - Returns: `{ "status": "ok", "saved_files": [".../AI/xxx.csv", ...], "errors": ["..."], "csv_count": <int> }`
-  - Side effects: writes merged CSV(s) to `AI/` subfolder of the job.
-
-- PatchCore anomaly (8000 `POST /inference`)
-  - Returns: `{ "status": "success", "message": str, "total_images": int, "anomalies_detected": int, "average_score": float, "processing_time": float, "results": { "<img>.jpg": <float|null>, ... } }`
-  - Key `results` maps filename to `anomaly_score` (NaN -> null).
-
-- Paste detection (8001 `POST /inference`)
-  - Returns: `{ "status": "success", "message": str, "total_images": int, "total_inference_time": float, "results": { "<stem>.jpg": <float|null>, ... } }`
-  - Keys are normalized to `<stem>.jpg` to match merge logic; values are `paste_pixels` (NaN -> null).
-
-- Distance detection (8002 `POST /inference`)
-  - Returns: `{ "status": "success", "message": str, "total_images": int, "total_inference_time": float, "results": { "<img>.jpg": <float|null>, ... } }`
-  - Values are `min_center_to_pad_distance` (NaN -> null).
-
-## Quick Start
-
-1) Activate env and install deps
-- `conda activate spi_env`
-- `pip install -r requirements_paste_detection.txt`
-
-2) Start all services (Windows)
-- Run `start_fastapi_services.bat` (opens four consoles)
-
-3) Run a job
-- Call the merge server as shown in the API section above.
-
-## Output Columns (from merge)
-
-- `img_name` from `Array_id` and `Pad_no` → `{Array_id-1}_{Pad_no}.jpg`
-- `anomaly_score` from port 8000
-- `paste_pixels` from port 8001
-- `min_pad_distance` from port 8002
-- `pad_area` = `pi * Width * Length / 4` (when `Width`, `Length` exist)
-- `cover%` = `paste_pixels * 0.8246 * 100 / pad_area` (when `pad_area` exists)
-- `ai_defect_name` per ordered rules (below)
-- `is_pass` = `22` if `ai_defect_name` empty else `23`
-
-## Defect Rules (order matters)
-
-- Anomaly: `anomaly_score > 0.5` → `FM/color`
-- Volume: `insp_vol > vol_h_ng + 20` → `high vol`; `insp_vol < vol_l_ng - 10` → `low vol`
-- Coverage: `cover% > 180` → `high cover`
-- Distance: `min_pad_distance > 6.6` → `short distance`
-- Paste height: `insp_height > 200` → `high paste`
+Legacy top-level scripts (`ai_server_fastapi.py`, the model servers, `scan_jobs.py`,
+etc.) are listed in `extend-exclude` in `pyproject.toml` and are intentionally not
+linted/formatted yet — see "Known Behavior".
 
 ## Troubleshooting
 
-- Empty columns: ensure model responses use the same `img_name` format.
-- Missing derived columns: `pad_area` needs `Width` + `Length`; `cover%` needs `pad_area`.
-- `is_pass` depends on whether `ai_defect_name` is empty after rules.
+- **Empty model columns**: ensure model responses key `results` by the same
+  `img_name` format (`{Array_id-1}_{Pad_no}.jpg`).
+- **`400 CSV missing required columns`**: the CSV needs `Array_id` and `Pad_no`.
+- **`high cover` never fires**: `cover%` needs `paste_pixels` (paste model) and
+  `pad_area` (needs `Width` + `Length`). Paste is disabled by default.
+- **Writes fail / `500`**: check `external_output_root` / `backup_output_root`
+  exist and are writable; output-write failures return a 500.
+- **Config errors on startup**: `config/ai_server.json` must be present and valid
+  (or set `AI_CONFIG_PATH`).
 
+## Known Behavior and Compatibility Notes
+
+- **Paste model (8001) is disabled by default.** It is a heavier YOLO + MobileSAM
+  pipeline and the `cover%` / `high cover` rule depends on it. To enable: install
+  the `paste` extra, start the paste server on `8001`, set the `paste` client's
+  `"enabled": true`, and restart the merge server.
+- **`short distance` uses `min_pad_distance < short_distance_threshold`** (less
+  than), not greater than.
+- **`primary_csv_mode`** has two modes: `is_pass_only` (default) and
+  `full_ai_columns` (see Output Files). Backup and processed CSVs are unaffected.
+- **`*_processed.csv`** contains the full AI schema and exists for **debugging**.
+- **Image count over `folder_images_num_threshold`**: inference is **skipped**,
+  every row is marked `is_pass = 23` (fail), the three CSVs are still written, and
+  the response is `{"status": "finished scanning", "skipped": true, "reason":
+  "images_exceed_threshold"}`.
+- **A single model endpoint failure** does not fail the job: its message is added
+  to the response `errors` array and processing continues (HTTP 200).
+- **`log/`, `backup/`, `data/`** and model weights are git-ignored.
+- **Legacy code**: `ai_server_fastapi.py` (and the model servers / scanner) remain
+  for the legacy entry point and are excluded from Ruff/mypy. The new `app/` entry
+  point has no runtime dependency on `ai_server_fastapi.py`.

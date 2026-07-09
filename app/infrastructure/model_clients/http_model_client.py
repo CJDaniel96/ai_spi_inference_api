@@ -179,8 +179,7 @@ class HttpModelClient:
     def _log_error(self, message: str, request_ms: float) -> None:
         """Emit the ``inference.error`` event."""
         self._logger.error(
-            "event=inference.error req_id=%s service=%s url=%s "
-            "err=%s request_ms=%.3f",
+            "event=inference.error req_id=%s service=%s url=%s err=%s request_ms=%.3f",
             self._req_id or "-",
             self.name,
             self._url,
