@@ -6,6 +6,7 @@ low-level CSV or HTTP code itself — those live in the infrastructure layer.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 import uuid
@@ -119,7 +120,8 @@ class ProcessJobUseCase:
         self._logger.info(
             "event=process.start req_id=%s job_folder=%s", req_id, job_folder
         )
-        job = self._job_repo.load(job_folder)
+        # Folder scan / image count is blocking IO -> run off the event loop.
+        job = await asyncio.to_thread(self._job_repo.load, job_folder)
         self._logger.info(
             "event=process.pipeline.start req_id=%s job_folder=%s "
             "csv_count=%d images=%d",
@@ -131,8 +133,15 @@ class ProcessJobUseCase:
 
         threshold = self._config.processing.folder_images_num_threshold
         if job.image_count > threshold:
-            return self._process_skipped(
-                job, req_id, request_start_at, job_start, year, month, threshold
+            return await asyncio.to_thread(
+                self._process_skipped,
+                job,
+                req_id,
+                request_start_at,
+                job_start,
+                year,
+                month,
+                threshold,
             )
 
         model_results = await self._run_model_clients(
@@ -143,8 +152,10 @@ class ProcessJobUseCase:
         metrics = MetricsCollector()
         saved_files: list[str] = []
         for csv_path in job.csv_files:
+            # CSV read/merge/classify/write is CPU- and IO-bound (pandas) -> offload.
             saved_files.extend(
-                self._process_csv(
+                await asyncio.to_thread(
+                    self._process_csv,
                     csv_path,
                     job.job_folder.name,
                     model_results,
@@ -156,7 +167,8 @@ class ProcessJobUseCase:
             )
 
         request_latency_ms = (time.perf_counter() - job_start) * 1000.0
-        self._write_log_row(
+        await asyncio.to_thread(
+            self._write_log_row,
             job=job,
             model_results=model_results,
             counts=metrics.counts,

@@ -93,6 +93,36 @@ def test_health_returns_200(client: TestClient) -> None:
     assert response.json()["status"] == "healthy"
 
 
+def test_ready_returns_200_when_config_ok(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def _fake_probe(config: object) -> list:
+        return []
+
+    monkeypatch.setattr("app.application.readiness.probe_endpoints", _fake_probe)
+
+    response = client.get("/ready")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ready"
+    assert body["config_ok"] is True
+
+
+def test_ready_returns_503_when_config_broken(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _raise() -> None:
+        raise RuntimeError("broken config")
+
+    monkeypatch.setattr("app.application.readiness.get_config", _raise)
+
+    response = client.get("/ready")
+
+    assert response.status_code == 503
+    assert response.json()["status"] == "not_ready"
+
+
 def test_missing_job_folder_returns_400(client: TestClient, tmp_path: Path) -> None:
     response = client.post(
         "/process", json={"job_folder": str(tmp_path / "does_not_exist")}

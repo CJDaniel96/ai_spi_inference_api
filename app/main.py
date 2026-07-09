@@ -17,10 +17,19 @@ from app.core.config import get_config, resolve_under_project_root
 from app.core.errors import AppError
 from app.core.logging import get_logger, setup_logging
 
-_HOST = "0.0.0.0"
-_PORT = 5050
+_DEFAULT_HOST = "127.0.0.1"
+_DEFAULT_PORT = 5050
 _INTERNAL_ERROR_DETAIL = "Internal Server Error"
 _SERVER_ERROR_STATUS = 500
+
+
+def _server_bind() -> tuple[str, int]:
+    """Return the (host, port) to bind, from config with a safe fallback."""
+    try:
+        server = get_config().server
+        return server.host, server.port
+    except Exception:  # noqa: BLE001 - fall back to loopback defaults
+        return _DEFAULT_HOST, _DEFAULT_PORT
 
 
 def _configure_logging() -> None:
@@ -84,4 +93,5 @@ app = create_app()
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host=_HOST, port=_PORT)
+    host, port = _server_bind()
+    uvicorn.run(app, host=host, port=port)

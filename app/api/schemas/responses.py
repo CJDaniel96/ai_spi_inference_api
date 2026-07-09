@@ -17,6 +17,29 @@ class HealthResponse(BaseModel):
     time: str
 
 
+class ModelHealth(BaseModel):
+    """Reachability of one model endpoint (readiness diagnostics)."""
+
+    name: str
+    url: str
+    healthy: bool
+    detail: str
+
+
+class ReadinessResponse(BaseModel):
+    """Readiness-check response payload.
+
+    ``status`` is ``"ready"`` when the config loaded (HTTP 200) or ``"not_ready"``
+    when it did not (HTTP 503). ``models`` reports endpoint reachability for
+    diagnostics only and does not affect readiness.
+    """
+
+    status: str
+    config_ok: bool
+    config_error: str | None = None
+    models: list[ModelHealth] = Field(default_factory=list)
+
+
 class ProcessJobResponse(BaseModel):
     """Response payload for the ``/process`` endpoint.
 

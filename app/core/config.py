@@ -46,11 +46,15 @@ def resolve_under_project_root(path: str | Path) -> Path:
 
 
 class ServerConfig(BaseModel):
-    """HTTP server bind settings for the merge server."""
+    """HTTP server bind settings for the merge server.
+
+    Defaults to ``127.0.0.1`` (loopback) because the only client is the
+    same-host scanner; expose a wider interface only via explicit config.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
-    host: str = "0.0.0.0"
+    host: str = "127.0.0.1"
     port: int = 5050
 
 

@@ -72,10 +72,29 @@ scan_jobs.py  ──POST /process {job_folder}──▶  app.main
 
 ### GET /health
 
-Returns liveness and the current UTC+8 timestamp.
+Cheap liveness probe — returns immediately with the current UTC+8 timestamp.
 
 ```json
 { "status": "healthy", "time": "2026-07-09T10:00:00+08:00" }
+```
+
+### GET /ready
+
+Readiness probe. Returns **200** when the config loads (the service can accept
+jobs) or **503** when it cannot. Each enabled model endpoint's `/health` is probed
+(short timeout) and reported for diagnostics, but a model being down does **not**
+flip readiness (since `/process` tolerates a single model failure).
+
+```json
+{
+  "status": "ready",
+  "config_ok": true,
+  "config_error": null,
+  "models": [
+    { "name": "anomaly",  "url": "http://127.0.0.1:8000/health", "healthy": true,  "detail": "status=200" },
+    { "name": "distance", "url": "http://127.0.0.1:8002/health", "healthy": false, "detail": "ConnectError" }
+  ]
+}
 ```
 
 ### POST /process
@@ -217,7 +236,7 @@ environment variable). Validated on load by `app/core/config.py`.
 
 ```json
 {
-  "server": { "host": "0.0.0.0", "port": 5050 },
+  "server": { "host": "127.0.0.1", "port": 5050 },
   "paths": {
     "external_output_root": "D:/Dre/JQ_SPI_02_AI_API/data",
     "backup_output_root": "D:/Dre/JQ_SPI_02_AI_API/backup"
@@ -282,7 +301,7 @@ See the extras in `pyproject.toml` (`cuda`, `mac`, `analytics`, `paste`).
 
 ```bash
 # The merge API (this service)
-uv run python -m app.main            # http://0.0.0.0:5050
+uv run python -m app.main            # binds server.host:port (default 127.0.0.1:5050)
 
 # Model servers + scanner (Windows) — starts 5050, 8000, 8002, scanner
 02_api_services.bat
@@ -348,6 +367,12 @@ linted/formatted yet — see "Known Behavior".
 - **A single model endpoint failure** does not fail the job: its message is added
   to the response `errors` array and processing continues (HTTP 200).
 - **`log/`, `backup/`, `data/`** and model weights are git-ignored.
+- **Binds `127.0.0.1` by default** (`server.host`): the only client is the
+  same-host scanner. Set `server.host` to a wider interface only if needed.
+- **`/process` offloads CPU/IO-bound work** (CSV read/write, classification) to a
+  thread pool, so `/health` and `/ready` stay responsive while a job runs.
+- **Output CSVs are written atomically** (temp file + `os.replace`), so a crash
+  mid-write never leaves a partial CSV at the target path.
 - **Legacy code**: `ai_server_fastapi.py` (and the model servers / scanner) remain
   for the legacy entry point and are excluded from Ruff/mypy. The new `app/` entry
   point has no runtime dependency on `ai_server_fastapi.py`.
