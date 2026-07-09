@@ -10,7 +10,6 @@ and computes derived metrics/labels for SPI jobs.
 
 import logging
 from logging.handlers import RotatingFileHandler
-import math
 import os
 import time
 from pathlib import Path
@@ -25,6 +24,9 @@ import uuid
 
 from app.core.config import get_config as get_app_config
 from app.core.config import to_legacy_rule_mapping
+from app.domain.services.csv_merger import CsvMerger
+from app.domain.services.defect_classifier import DefectClassifier, add_is_pass
+from app.domain.services.derived_metrics import DerivedMetricsCalculator
 from app.infrastructure.model_clients.runner import run_enabled_model_clients
 
 
@@ -87,19 +89,6 @@ async def _unhandled_exception_logger(request: Request, exc: Exception):  # noqa
     return JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
 
 
-def build_img_name_column(df: pd.DataFrame) -> pd.Series:
-    """Build image filename as "{Array_id-1}_{Pad_no}.jpg" for each row.
-
-    Requires columns `Array_id` and `Pad_no`. Raises ValueError if missing.
-    """
-    if "Array_id" not in df.columns or "Pad_no" not in df.columns:
-        missing = [c for c in ("Array_id", "Pad_no") if c not in df.columns]
-        raise ValueError(f"CSV missing required columns: {missing}")
-    array_minus_one = pd.to_numeric(df["Array_id"], errors="coerce").astype("Int64") - 1
-    pad_str = df["Pad_no"].astype(str)
-    return array_minus_one.astype(str) + "_" + pad_str + ".jpg"
-
-
 class RuleConfig(BaseModel):
     """Thresholds, offsets, and output roots used by processing.
 
@@ -145,38 +134,6 @@ def _count_images(job_folder: Path) -> int:
     exts = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif"}
     return sum(1 for p in job_folder.rglob("*") if p.is_file() and p.suffix.lower() in exts)
 
-def merge_scalar_result(df: pd.DataFrame, results: Dict[str, Any], column_name: str) -> pd.DataFrame:
-    """Merge scalar float results into df under the specified column name.
-
-    - results is a dict keyed by img_name -> float (or dict containing column_name)
-    - coerces to numeric floats, non-parsable values become NaN
-    """
-    if not results:
-        if column_name not in df.columns:
-            df[column_name] = pd.Series([pd.NA] * len(df), dtype="Float64")
-        return df
-
-    values: Dict[str, Any] = {}
-    for k, v in results.items():
-        if isinstance(v, dict):
-            if column_name in v:
-                values[k] = v.get(column_name)
-        else:
-            values[k] = v
-
-    if not values:
-        if column_name not in df.columns:
-            df[column_name] = pd.Series([pd.NA] * len(df), dtype="Float64")
-        return df
-
-    map_df = pd.DataFrame({"img_name": list(values.keys()), column_name: list(values.values())})
-    map_df[column_name] = pd.to_numeric(map_df[column_name], errors="coerce")
-    merged = df.merge(map_df, on="img_name", how="left")
-    # Ensure dtype is numeric float for the merged column
-    merged[column_name] = pd.to_numeric(merged[column_name], errors="coerce")
-    return merged
-
-
 async def process_folder(job_folder: str, *, req_id: Optional[str] = None) -> Dict[str, Any]:
     """End-to-end pipeline for a job folder.
 
@@ -203,7 +160,6 @@ async def process_folder(job_folder: str, *, req_id: Optional[str] = None) -> Di
     # Map each endpoint URL to its logical name (used for per-model metrics).
     url_to_name: Dict[str, str] = {client.url: client.name for client in enabled_clients}
 
-    results_by_endpoint: Dict[str, Dict[str, Any]] = {}
     metrics_by_endpoint: Dict[str, Dict[str, Any]] = {}
     errors: List[str] = []
 
@@ -219,6 +175,11 @@ async def process_folder(job_folder: str, *, req_id: Optional[str] = None) -> Di
 
     log = get_system_logger()
     rules = get_rules()
+
+    # Domain services (pure logic; no I/O, HTTP, or FastAPI dependency).
+    merger = CsvMerger()
+    classifier = DefectClassifier(get_app_config().defect_rules)
+    derived_calc = DerivedMetricsCalculator()
 
     # Initialize counts for logging
     total_pass = 0
@@ -281,8 +242,8 @@ async def process_folder(job_folder: str, *, req_id: Optional[str] = None) -> Di
 
             # 2. Processed Phase: Generate *_processed.csv with full AI schema (all NA/Empty)
             df_processing = pd.read_csv(csv_path)
-            df_processing["img_name"] = build_img_name_column(df_processing)
-            
+            df_processing = merger.add_image_name_column(df_processing)
+
             # Initialize AI columns from endpoints with NA
             for _, col_name in endpoints:
                 df_processing[col_name] = pd.Series([pd.NA] * len(df_processing), dtype="Float64")
@@ -353,7 +314,6 @@ async def process_folder(job_folder: str, *, req_id: Optional[str] = None) -> Di
         result = results_by_name.get(client_cfg.name)
         if result is None:
             continue
-        results_by_endpoint[client_cfg.url] = result.results
         metrics_by_endpoint[client_cfg.url] = {
             "request_ms": result.request_ms,
             "inference_ms": result.inference_ms,
@@ -375,13 +335,17 @@ async def process_folder(job_folder: str, *, req_id: Optional[str] = None) -> Di
         df = pd.read_csv(csv_path)
         df_processing = df.copy() # Use this for logic
         
-        df_processing["img_name"] = build_img_name_column(df_processing)
-        for url, col_name in endpoints:
-            df_processing = merge_scalar_result(df_processing, results_by_endpoint.get(url, {}), col_name)
-        
-        # Compute derived metrics and defect name
-        # df_processing = add_pad_area_and_cover(df_processing)
-        df_processing = add_ai_defect_name(df_processing)
+        df_processing = merger.add_image_name_column(df_processing)
+        df_processing = merger.merge_model_results(df_processing, model_results)
+
+        # Compute derived metrics (pad_area / cover%) when their inputs exist.
+        derived = derived_calc.add_derived_columns(df_processing)
+        df_processing = derived.df
+        for warning in derived.warnings:
+            log.info("event=derived.skip req_id=%s detail=%s", req_id or "-", warning)
+
+        # Rule-based defect classification and pass/fail decision.
+        df_processing = classifier.classify(df_processing)
         df_processing = add_is_pass(df_processing)
 
         # Accumulate counts
@@ -505,112 +469,6 @@ async def process_folder(job_folder: str, *, req_id: Optional[str] = None) -> Di
     )
 
     return {"saved_files": saved_files, "errors": errors, "csv_count": len(csv_files)}
-
-# ------------------------
-# Post-merge enrich helpers
-# ------------------------
-
-def add_pad_area_and_cover(df: pd.DataFrame) -> pd.DataFrame:
-    """Add pad_area and cover% columns when possible.
-
-    pad_area = pi * Width * Length / 4
-    cover% = paste_pixels * 0.8246 * 100 / pad_area
-    """
-    out = df.copy()
-    # pad_area
-    if "Width" in out.columns and "Length" in out.columns:
-        width = pd.to_numeric(out["Width"], errors="coerce")
-        length = pd.to_numeric(out["Length"], errors="coerce")
-        out["pad_area"] = math.pi * width * length / 4.0
-    # cover%
-    if "paste_pixels" in out.columns and "pad_area" in out.columns:
-        paste_pixels = pd.to_numeric(out["paste_pixels"], errors="coerce")
-        out["cover%"] = paste_pixels * 0.8246 * 100.0 / out["pad_area"]
-    return out
-
-
-def add_ai_defect_name(df: pd.DataFrame) -> pd.DataFrame:
-    """Add ai_defect_name column per row using ordered rules.
-
-    Priority:
-      1) anomaly_score > 0.5 -> "FM/color"
-      2) insp_vol outside dynamic thresholds -> "high vol" / "low vol"
-      3) cover% > 180 -> "high cover"
-      4) 6.6 > min_pad_distance -> "short distance" (as requested)
-      5) insp_height > 200 -> "high paste"
-    Only the first matching condition per row is applied.
-    """
-    out = df.copy()
-    if "ai_defect_name" not in out.columns:
-        out["ai_defect_name"] = ""
-
-    assigned = out["ai_defect_name"].astype(str).str.len() > 0
-
-    rules = get_rules()
-
-    # 1) Anomaly threshold
-    if "anomaly_score" in out.columns:
-        anomaly = pd.to_numeric(out["anomaly_score"], errors="coerce")
-        mask = (~assigned) & (anomaly > rules.anomaly_threshold)
-        out.loc[mask, "ai_defect_name"] = "FM/color"
-        assigned = out["ai_defect_name"].astype(str).str.len() > 0
-
-    # 2) insp_vol thresholds using offsets and vol_l_ng, vol_h_ng
-    cols_needed = {"insp_vol", "vol_l_ng", "vol_h_ng"}
-    if cols_needed.issubset(out.columns):
-        insp_vol = pd.to_numeric(out["insp_vol"], errors="coerce")
-        vol_l_ng = pd.to_numeric(out["vol_l_ng"], errors="coerce")
-        vol_h_ng = pd.to_numeric(out["vol_h_ng"], errors="coerce")
-        low_thr = vol_l_ng + rules.low_vol_offset
-        high_thr = vol_h_ng + rules.high_vol_offset
-
-        mask_high = (~assigned) & (insp_vol > high_thr)
-        out.loc[mask_high, "ai_defect_name"] = "high vol"
-        assigned = out["ai_defect_name"].astype(str).str.len() > 0
-
-        mask_low = (~assigned) & (insp_vol < low_thr)
-        out.loc[mask_low, "ai_defect_name"] = "low vol"
-        assigned = out["ai_defect_name"].astype(str).str.len() > 0
-
-    # 3) high cover
-    if "cover%" in out.columns:
-        cover = pd.to_numeric(out["cover%"], errors="coerce")
-        mask = (~assigned) & (cover > rules.high_cover_threshold)
-        out.loc[mask, "ai_defect_name"] = "high cover"
-        assigned = out["ai_defect_name"].astype(str).str.len() > 0
-
-    # 4) short distance (note: condition provided as 6.6 < min_pad_distance)
-    if "min_pad_distance" in out.columns:
-        dist = pd.to_numeric(out["min_pad_distance"], errors="coerce")
-        mask = (~assigned) & (dist < rules.short_distance_threshold)
-        out.loc[mask, "ai_defect_name"] = "short distance"
-        assigned = out["ai_defect_name"].astype(str).str.len() > 0
-
-    # 5) high paste based on insp_height
-    if "insp_height" in out.columns:
-        height = pd.to_numeric(out["insp_height"], errors="coerce")
-        mask = (~assigned) & (height > rules.high_paste_height_threshold)
-        out.loc[mask, "ai_defect_name"] = "high paste"
-
-    return out
-
-
-def add_is_pass(df: pd.DataFrame) -> pd.DataFrame:
-    """Add/update 'is_pass' column based on ai_defect_name.
-
-    - If ai_defect_name == "" (empty after strip) => is_pass = 22
-    - Else => is_pass = 23
-    """
-    out = df.copy()
-    if "ai_defect_name" not in out.columns:
-        out["ai_defect_name"] = ""
-    # default 22
-    is_pass = pd.Series(22, index=out.index, dtype="Int64")
-    mask_fail = out["ai_defect_name"].astype(str).str.strip() != ""
-    is_pass.loc[mask_fail] = 23
-    out["is_pass"] = is_pass
-    return out
-
 
 @app.get("/health")
 async def health():

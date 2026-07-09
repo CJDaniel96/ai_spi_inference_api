@@ -1,27 +1,163 @@
-"""Domain service: rule-based defect classification (skeleton)."""
+"""Domain service: rule-based defect classification and pass/fail decision.
+
+Pure pandas logic. Thresholds come from a config object; there is no filesystem,
+HTTP, or FastAPI dependency.
+"""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import pandas as pd
 
-if TYPE_CHECKING:
-    import pandas as pd
+from app.core.config import DefectRuleConfig
+from app.domain.entities.defect import FAIL_CODE, PASS_CODE, DefectLabel
 
-    from app.core.config import AppConfig
+_DEFECT_COLUMN = "ai_defect_name"
+_IS_PASS_COLUMN = "is_pass"
+
+# Input columns consulted by the rules.
+_ANOMALY_SCORE_COLUMN = "anomaly_score"
+_INSP_VOL_COLUMN = "insp_vol"
+_VOL_L_NG_COLUMN = "vol_l_ng"
+_VOL_H_NG_COLUMN = "vol_h_ng"
+_COVER_COLUMN = "cover%"
+_MIN_PAD_DISTANCE_COLUMN = "min_pad_distance"
+_INSP_HEIGHT_COLUMN = "insp_height"
 
 
 class DefectClassifier:
-    """Assigns ``ai_defect_name`` and ``is_pass`` using ordered rules.
+    """Assigns ``ai_defect_name`` using ordered, first-match-wins rules.
 
-    TODO(phase-3): Migrate logic from ``ai_server_fastapi.add_ai_defect_name``
-    and ``add_is_pass``. Keep the rule order and thresholds identical to
-    preserve behavior.
+    Rule priority (only the first matching rule per row assigns a label):
+
+    1. ``anomaly_score > anomaly_threshold`` -> ``FM/color``
+    2. ``insp_vol > vol_h_ng + high_vol_offset`` -> ``high vol``
+    3. ``insp_vol < vol_l_ng + low_vol_offset`` -> ``low vol``
+    4. ``cover% > high_cover_threshold`` -> ``high cover``
+    5. ``min_pad_distance < short_distance_threshold`` -> ``short distance``
+    6. ``insp_height > high_paste_height_threshold`` -> ``high paste``
+
+    Rules whose input columns are absent are skipped without error.
     """
 
-    def __init__(self, config: AppConfig) -> None:
-        """Initialize with the thresholds/offsets from config."""
+    def __init__(self, config: DefectRuleConfig) -> None:
+        """Initialize with the defect thresholds/offsets.
+
+        Args:
+            config: Threshold configuration (see :class:`DefectRuleConfig`).
+        """
         self._config = config
 
     def classify(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Return ``df`` with ``ai_defect_name`` and ``is_pass`` populated."""
-        raise NotImplementedError("Migrated in a later phase.")
+        """Return a copy of ``df`` with ``ai_defect_name`` populated.
+
+        Args:
+            df: Frame with any subset of the rule input columns.
+
+        Returns:
+            A new frame with the ``ai_defect_name`` column.
+        """
+        out = df.copy()
+        if _DEFECT_COLUMN not in out.columns:
+            out[_DEFECT_COLUMN] = ""
+
+        self._apply_above(
+            out,
+            _ANOMALY_SCORE_COLUMN,
+            self._config.anomaly_threshold,
+            DefectLabel.FM_COLOR,
+        )
+        self._apply_volume(out)
+        self._apply_above(
+            out,
+            _COVER_COLUMN,
+            self._config.high_cover_threshold,
+            DefectLabel.HIGH_COVER,
+        )
+        self._apply_below(
+            out,
+            _MIN_PAD_DISTANCE_COLUMN,
+            self._config.short_distance_threshold,
+            DefectLabel.SHORT_DISTANCE,
+        )
+        self._apply_above(
+            out,
+            _INSP_HEIGHT_COLUMN,
+            self._config.high_paste_height_threshold,
+            DefectLabel.HIGH_PASTE,
+        )
+        return out
+
+    @staticmethod
+    def _unassigned(out: pd.DataFrame) -> pd.Series:
+        """Return a boolean mask of rows without a defect label yet."""
+        return out[_DEFECT_COLUMN].astype(str).str.len() == 0
+
+    def _apply_above(
+        self,
+        out: pd.DataFrame,
+        column: str,
+        threshold: float,
+        label: DefectLabel,
+    ) -> None:
+        """Label unassigned rows where ``column > threshold`` (in place)."""
+        if column not in out.columns:
+            return
+        values = pd.to_numeric(out[column], errors="coerce")
+        mask = self._unassigned(out) & (values > threshold)
+        out.loc[mask, _DEFECT_COLUMN] = label.value
+
+    def _apply_below(
+        self,
+        out: pd.DataFrame,
+        column: str,
+        threshold: float,
+        label: DefectLabel,
+    ) -> None:
+        """Label unassigned rows where ``column < threshold`` (in place)."""
+        if column not in out.columns:
+            return
+        values = pd.to_numeric(out[column], errors="coerce")
+        mask = self._unassigned(out) & (values < threshold)
+        out.loc[mask, _DEFECT_COLUMN] = label.value
+
+    def _apply_volume(self, out: pd.DataFrame) -> None:
+        """Apply the high-vol then low-vol rules (in place)."""
+        needed = {_INSP_VOL_COLUMN, _VOL_L_NG_COLUMN, _VOL_H_NG_COLUMN}
+        if not needed.issubset(out.columns):
+            return
+        insp_vol = pd.to_numeric(out[_INSP_VOL_COLUMN], errors="coerce")
+        low = (
+            pd.to_numeric(out[_VOL_L_NG_COLUMN], errors="coerce")
+            + self._config.low_vol_offset
+        )
+        high = (
+            pd.to_numeric(out[_VOL_H_NG_COLUMN], errors="coerce")
+            + self._config.high_vol_offset
+        )
+
+        high_mask = self._unassigned(out) & (insp_vol > high)
+        out.loc[high_mask, _DEFECT_COLUMN] = DefectLabel.HIGH_VOL.value
+        low_mask = self._unassigned(out) & (insp_vol < low)
+        out.loc[low_mask, _DEFECT_COLUMN] = DefectLabel.LOW_VOL.value
+
+
+def add_is_pass(df: pd.DataFrame) -> pd.DataFrame:
+    """Return a copy of ``df`` with ``is_pass`` derived from ``ai_defect_name``.
+
+    ``is_pass`` is :data:`PASS_CODE` (22) when ``ai_defect_name`` is empty or
+    whitespace, otherwise :data:`FAIL_CODE` (23).
+
+    Args:
+        df: Frame that may contain an ``ai_defect_name`` column.
+
+    Returns:
+        A new frame with the ``is_pass`` column.
+    """
+    out = df.copy()
+    if _DEFECT_COLUMN not in out.columns:
+        out[_DEFECT_COLUMN] = ""
+    is_pass = pd.Series(PASS_CODE, index=out.index, dtype="Int64")
+    has_defect = out[_DEFECT_COLUMN].astype(str).str.strip() != ""
+    is_pass.loc[has_defect] = FAIL_CODE
+    out[_IS_PASS_COLUMN] = is_pass
+    return out
