@@ -1,10 +1,15 @@
-"""FastAPI server that orchestrates model calls, merges results into CSVs,
-and computes derived metrics/labels for SPI jobs.
+"""Deprecated legacy entry point.
 
+Use ``python -m app.main`` instead. This file is kept temporarily for backward
+compatibility; the modular ``app/`` package fully replaces this flow (identical
+``/health`` and ``POST /process`` contract on port 5050, same output files and
+``log/log.csv`` schema). Do not add new features here — extend the ``app/``
+layers instead.
+
+Original behavior (retained for this legacy entry point):
 - Accepts a folder with CSVs/images
 - Calls configured model endpoints concurrently
-- Merges scalar results back into each CSV and writes to
-  `<external_output_root>/<job_folder_name>/AI/*.csv`
+- Merges scalar results back into each CSV and writes primary/backup/processed CSVs
 - Logs per-request timing/metadata
 """
 

@@ -7,8 +7,9 @@ cd /d "%~dp0"
 REM Use Python from the specific Conda env path for 'spi_env'
 set "PYTHON_EXE=C:\Users\Admin\.conda\envs\py310_cu117_j15\python.exe"
 
-REM Launch Merge Server (5050)
-start "SPI_02_main_5050" cmd /k "cd /d "%~dp0" && "%PYTHON_EXE%" ai_server_fastapi.py"
+REM Launch Merge Server (5050) — new modular entry point (app/).
+REM Legacy fallback (deprecated): "%PYTHON_EXE%" ai_server_fastapi.py
+start "SPI_02_main_5050" cmd /k "cd /d "%~dp0" && "%PYTHON_EXE%" -m app.main"
 
 REM Small delay between windows (optional)
 timeout /t 1 >nul 2>nul
