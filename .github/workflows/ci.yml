@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.10"
+
+      # The maintained surface (app/ + tests/unit + tests/integration) only needs
+      # the lightweight web/data stack plus dev tooling. The heavy ML deps
+      # (torch/opencv/ultralytics/anomalib) and the import-only smoke test are
+      # exercised on the deployment machine, not in CI, to keep it fast/reliable.
+      - name: Create venv and install deps
+        run: |
+          uv venv
+          uv pip install fastapi httpx pandas pydantic -r requirements-dev.txt
+
+      - name: Ruff lint
+        run: uv run ruff check .
+
+      - name: Ruff format check
+        run: uv run ruff format --check .
+
+      - name: Pytest
+        run: uv run pytest tests/unit tests/integration

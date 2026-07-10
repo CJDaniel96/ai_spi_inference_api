@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+import httpx
+
 from app.core.config import load_config
 from app.domain.entities.inference_result import ModelInferenceResult
 from app.infrastructure.model_clients.runner import (
@@ -98,3 +100,27 @@ def test_run_enabled_model_clients_builds_only_enabled() -> None:
     # paste is disabled in the shipped config, so it is never built or called.
     assert built == ["anomaly", "distance"]
     assert [r.name for r in results] == ["anomaly", "distance"]
+
+
+def test_run_enabled_model_clients_reuses_injected_http_client() -> None:
+    config = load_config(_REAL_CONFIG_PATH)
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        return httpx.Response(200, json={"results": {}})
+
+    async def _run() -> list[ModelInferenceResult]:
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport) as client:
+            results = await run_enabled_model_clients(
+                config, "/job", http_client=client
+            )
+            # An injected client is reused and NOT closed by the runner.
+            assert client.is_closed is False
+            return results
+
+    results = asyncio.run(_run())
+
+    assert [r.name for r in results] == ["anomaly", "distance"]
+    assert len(calls) == 2

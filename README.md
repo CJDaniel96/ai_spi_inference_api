@@ -233,6 +233,9 @@ high_vol_count, high_cover_count, high_paste_count, logged_at`.
 
 Single file: `config/ai_server.json` (override the path with the `AI_CONFIG_PATH`
 environment variable). Validated on load by `app/core/config.py`.
+`config/ai_server.example.json` is a committed template with placeholder paths —
+copy it (or point `AI_CONFIG_PATH` at a deployment-specific file) rather than
+baking environment-specific paths into a shared file.
 
 ```json
 {
@@ -259,7 +262,10 @@ environment variable). Validated on load by `app/core/config.py`.
     "high_paste_height_threshold": 200.0
   },
   "output": { "primary_csv_mode": "is_pass_only" },
-  "logging": { "log_dir": "log", "system_log_file": "system", "request_log_file": "log.csv" },
+  "logging": {
+    "log_dir": "log", "system_log_file": "system", "request_log_file": "log.csv",
+    "request_log_max_bytes": 52428800, "request_log_backup_count": 5
+  },
 
   "watch_root": "D:/spi_ai/output/01/sfcTemp",
   "process_api_url": "http://127.0.0.1:5050/process",
@@ -309,6 +315,28 @@ uv run python -m app.main            # binds server.host:port (default 127.0.0.1
 
 The legacy entry point `uv run python ai_server_fastapi.py` is still available but
 deprecated.
+
+## Deployment / Operations
+
+- **Auto-restart**: `02_api_services.bat` launches the merge server via
+  `run_merge_server.bat`, which relaunches `python -m app.main` if it exits or
+  crashes. For a proper Windows service (auto-start on boot, crash recovery,
+  graceful stop), install it under **NSSM** instead:
+  `nssm install SPI_Merge <PYTHON_EXE> -m app.main` (set the working directory to
+  the repo root).
+- **Graceful shutdown**: the app manages a shared HTTP client via a FastAPI
+  lifespan; on SIGINT/SIGTERM (uvicorn) it finishes in-flight work and closes the
+  client cleanly.
+- **Metrics log rotation**: `log/log.csv` rotates at
+  `logging.request_log_max_bytes` (default 50 MB) keeping
+  `logging.request_log_backup_count` backups (`log.csv.1..N`); set
+  `request_log_max_bytes: 0` to disable. No data is lost until the backup count is
+  exceeded.
+- **Config per environment**: keep deployment paths out of the shared repo by
+  pointing `AI_CONFIG_PATH` at a machine-local config (template:
+  `config/ai_server.example.json`).
+- **CI**: `.github/workflows/ci.yml` runs `ruff check`, `ruff format --check`, and
+  the `tests/unit` + `tests/integration` suites on every push/PR.
 
 ## How to Test
 

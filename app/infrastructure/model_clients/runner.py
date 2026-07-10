@@ -83,6 +83,31 @@ def _build_http_client(
     )
 
 
+async def _build_and_gather(
+    config: AppConfig,
+    job_folder: str,
+    *,
+    factory: ClientFactory,
+    logger: logging.Logger,
+    req_id: str | None,
+    http_client: httpx.AsyncClient,
+) -> list[ModelInferenceResult]:
+    """Build the enabled clients on ``http_client`` and run them concurrently."""
+    clients = [
+        factory(
+            name=entry.name,
+            url=entry.url,
+            target_column=entry.target_column,
+            timeout_seconds=entry.timeout_seconds,
+            http_client=http_client,
+            logger=logger,
+            req_id=req_id,
+        )
+        for entry in config.enabled_model_clients()
+    ]
+    return await gather_inferences(clients, job_folder)
+
+
 async def run_enabled_model_clients(
     config: AppConfig,
     job_folder: str,
@@ -90,6 +115,7 @@ async def run_enabled_model_clients(
     logger: logging.Logger | None = None,
     req_id: str | None = None,
     client_factory: ClientFactory | None = None,
+    http_client: httpx.AsyncClient | None = None,
 ) -> list[ModelInferenceResult]:
     """Build and run every enabled model client from ``config`` in parallel.
 
@@ -103,23 +129,30 @@ async def run_enabled_model_clients(
         req_id: Correlation id included in log lines.
         client_factory: Optional factory for building clients (tests inject a
             fake here to avoid real HTTP calls).
+        http_client: Optional shared HTTP client (e.g. app lifespan-managed). When
+            provided it is reused and left open; otherwise a client is created and
+            closed for this call.
 
     Returns:
         One result per enabled client, in config order.
     """
     log = logger or get_logger("model_client")
     factory = client_factory or _build_http_client
-    async with httpx.AsyncClient() as http_client:
-        clients = [
-            factory(
-                name=entry.name,
-                url=entry.url,
-                target_column=entry.target_column,
-                timeout_seconds=entry.timeout_seconds,
-                http_client=http_client,
-                logger=log,
-                req_id=req_id,
-            )
-            for entry in config.enabled_model_clients()
-        ]
-        return await gather_inferences(clients, job_folder)
+    if http_client is not None:
+        return await _build_and_gather(
+            config,
+            job_folder,
+            factory=factory,
+            logger=log,
+            req_id=req_id,
+            http_client=http_client,
+        )
+    async with httpx.AsyncClient() as owned_client:
+        return await _build_and_gather(
+            config,
+            job_folder,
+            factory=factory,
+            logger=log,
+            req_id=req_id,
+            http_client=owned_client,
+        )

@@ -81,7 +81,7 @@ def _make_job(tmp_path: Path) -> Path:
 
 
 def _fake_runner(results: list[ModelInferenceResult]):
-    async def runner(config, job_folder, *, logger=None, req_id=None):
+    async def runner(config, job_folder, *, logger=None, req_id=None, http_client=None):
         return results
 
     return runner

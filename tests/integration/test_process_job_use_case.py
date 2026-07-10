@@ -33,7 +33,13 @@ class _FakeRunner:
         self.called = False
 
     async def __call__(
-        self, config: AppConfig, job_folder: str, *, logger=None, req_id=None
+        self,
+        config: AppConfig,
+        job_folder: str,
+        *,
+        logger=None,
+        req_id=None,
+        http_client=None,
     ) -> list[ModelInferenceResult]:
         self.called = True
         return self._results

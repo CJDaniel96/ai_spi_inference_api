@@ -4,8 +4,8 @@
     "port": 5050
   },
   "paths": {
-    "external_output_root": "D:/Dre/JQ_SPI_02_AI_API/data",
-    "backup_output_root": "D:/Dre/JQ_SPI_02_AI_API/backup"
+    "external_output_root": "D:/path/to/output/data",
+    "backup_output_root": "D:/path/to/output/backup"
   },
   "processing": {
     "folder_images_num_threshold": 500,
@@ -52,7 +52,7 @@
     "request_log_max_bytes": 52428800,
     "request_log_backup_count": 5
   },
-  "watch_root": "D:/spi_ai/output/01/sfcTemp",
+  "watch_root": "D:/path/to/watch/root",
   "process_api_url": "http://127.0.0.1:5050/process",
   "processed_registry_path": "log/processed.json",
   "rescan_interval_ms": 500

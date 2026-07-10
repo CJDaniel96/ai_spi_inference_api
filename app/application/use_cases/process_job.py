@@ -13,9 +13,12 @@ import uuid
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pandas as pd
+
+if TYPE_CHECKING:
+    import httpx
 
 from app.api.schemas.requests import ProcessJobRequest
 from app.core.config import AppConfig, get_config, resolve_under_project_root
@@ -65,6 +68,7 @@ class ProcessJobUseCase:
         config: AppConfig | None = None,
         logger: logging.Logger | None = None,
         model_client_runner: ModelClientRunner | None = None,
+        http_client: httpx.AsyncClient | None = None,
     ) -> None:
         """Wire the use case with config, logger, and collaborators.
 
@@ -73,10 +77,13 @@ class ProcessJobUseCase:
             logger: Logger for structured events; defaults to the app logger.
             model_client_runner: Async runner for the model clients; defaults to
                 the real HTTP runner. Tests inject a fake to avoid network calls.
+            http_client: Optional shared HTTP client (lifespan-managed) reused for
+                model calls; when omitted the runner creates one per request.
         """
         self._config = config or get_config()
         self._logger = logger or get_logger("process_job")
         self._run_model_clients = model_client_runner or run_enabled_model_clients
+        self._http_client = http_client
 
         self._job_repo = FileSystemJobRepository(
             self._config.processing.image_extensions
@@ -94,6 +101,8 @@ class ProcessJobUseCase:
         self._log_writer = RequestLogWriter(
             log_dir=self._resolve_log_dir(),
             request_log_file=self._config.logging.request_log_file,
+            max_bytes=self._config.logging.request_log_max_bytes,
+            backup_count=self._config.logging.request_log_backup_count,
         )
 
     async def execute(self, request: ProcessJobRequest) -> dict[str, Any]:
@@ -145,7 +154,11 @@ class ProcessJobUseCase:
             )
 
         model_results = await self._run_model_clients(
-            self._config, job_folder, logger=self._logger, req_id=req_id
+            self._config,
+            job_folder,
+            logger=self._logger,
+            req_id=req_id,
+            http_client=self._http_client,
         )
         errors = [result.error for result in model_results if result.error]
 

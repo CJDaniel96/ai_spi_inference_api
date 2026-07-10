@@ -118,13 +118,20 @@ class OutputConfig(BaseModel):
 
 
 class LoggingConfig(BaseModel):
-    """Logging destinations (relative to the project root)."""
+    """Logging destinations and request-log rotation policy.
+
+    Paths are relative to the project root. ``request_log_max_bytes`` caps the
+    metrics CSV before rotating to numbered backups (``0`` disables rotation);
+    ``request_log_backup_count`` is how many backups to retain.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     log_dir: str = "log"
     system_log_file: str = "system"
     request_log_file: str = "log.csv"
+    request_log_max_bytes: int = 50 * 1024 * 1024
+    request_log_backup_count: int = 5
 
 
 class AppConfig(BaseModel):
