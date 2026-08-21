@@ -7,7 +7,7 @@
 #
 # Recommended install (Windows / Linux, inside an activated venv):
 #   1) Install the CUDA build of PyTorch FIRST, from the PyTorch index:
-#        uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+#        uv pip install torch==2.7.1 torchvision==0.22.1 --index-url https://download.pytorch.org/whl/cu128
 #   2) Then install everything else:
 #        uv pip install -r requirements-cuda.txt
 #

@@ -292,7 +292,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # Windows/Linux + CUDA
 uv venv --python 3.10
-uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+uv pip install torch==2.7.1 torchvision==0.22.1 --index-url https://download.pytorch.org/whl/cu128
 uv sync --extra cuda --group dev
 
 # macOS (CPU / Apple Silicon) — no CUDA-only packages

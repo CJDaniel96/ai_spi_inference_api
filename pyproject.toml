@@ -10,13 +10,9 @@ requires-python = ">=3.10,<3.12"
 # These are needed on Windows + CUDA, Linux + CUDA and macOS alike.
 # Pins mirror the legacy requirements.txt so runtime behaviour is unchanged.
 #
-# NOTE on PyTorch: `torch` / `torchvision` are cross-platform requirements
-# (ultralytics, anomalib, distance_detection and paste_inference all import
-# torch). They are intentionally left index-neutral here so `uv sync` works on
-# every OS. To install a *CUDA* build on Windows/Linux, use the PyTorch index
-# URL documented in the README (uv pip install torch torchvision
-# --index-url https://download.pytorch.org/whl/cu121) — the platform-specific
-# index is kept out of the universal dependency set on purpose.
+# NOTE on PyTorch: Windows/Linux x86-64 resolve these pinned versions from the
+# CUDA 12.8 PyTorch index configured under [tool.uv.sources]. Other platforms
+# fall back to PyPI.
 # ---------------------------------------------------------------------------
 dependencies = [
     # Web framework / server
@@ -30,11 +26,11 @@ dependencies = [
     # Computer vision
     "opencv-python==4.11.0.86",
     "matplotlib==3.8.4",
-    # AI / ML (torch build selected per-platform; see README)
+    # AI / ML
     "ultralytics==8.3.187",
     "anomalib==0.7.0",
-    "torch>=1.13.1",
-    "torchvision>=0.14.1",
+    "torch==2.7.1",
+    "torchvision==0.22.1",
 ]
 
 [project.optional-dependencies]
@@ -96,6 +92,15 @@ package = false
 # MobileSAM ships no PyPI wheel; pull it from git only when the `paste` extra
 # is requested.
 mobile-sam = { git = "https://github.com/ChaoningZhang/MobileSAM.git" }
+torch = { index = "pytorch-cu128", marker = "(sys_platform == 'linux' and platform_machine == 'x86_64') or (sys_platform == 'win32' and platform_machine == 'AMD64')" }
+torchvision = { index = "pytorch-cu128", marker = "(sys_platform == 'linux' and platform_machine == 'x86_64') or (sys_platform == 'win32' and platform_machine == 'AMD64')" }
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+# Keep unrelated packages on PyPI; only explicitly mapped packages use this
+# index.
+explicit = true
 
 # ---------------------------------------------------------------------------
 # Tooling configuration
