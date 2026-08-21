@@ -1,6 +1,6 @@
 # To install PyTorch with CUDA 12.8, run the following command:
 # pip install torch==2.7.1 torchvision==0.22.1 --index-url https://download.pytorch.org/whl/cu128
-# Core web framework and server prd python 3.10
+# Core web framework and server prd Python 3.12
 fastapi==0.115.12
 uvicorn==0.34.1
 httpx==0.28.1

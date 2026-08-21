@@ -284,19 +284,19 @@ Config is cached per process — **restart the server to pick up config changes*
 
 The project uses [`uv`](https://docs.astral.sh/uv/). `pyproject.toml` is the
 canonical dependency source; `requirements-*.txt` are pinned mirrors for non-uv
-installs. Python `>=3.10,<3.12`.
+installs. Python `>=3.12,<3.13`.
 
 ```bash
 # Install uv (macOS/Linux)
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # Windows/Linux + CUDA
-uv venv --python 3.10
+uv venv --python 3.12
 uv pip install torch==2.7.1 torchvision==0.22.1 --index-url https://download.pytorch.org/whl/cu128
 uv sync --extra cuda --group dev
 
 # macOS (CPU / Apple Silicon) — no CUDA-only packages
-uv venv --python 3.10
+uv venv --python 3.12
 uv sync --extra mac --group dev
 ```
 

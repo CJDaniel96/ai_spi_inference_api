@@ -10,7 +10,7 @@ REM ---------------------------------------------------------------------------
 setlocal enableextensions
 cd /d "%~dp0"
 
-set "PYTHON_EXE=C:\Users\Admin\.conda\envs\py310_cu117_j15\python.exe"
+set "PYTHON_EXE=C:\Users\Admin\.conda\envs\py312_cu128_j15\python.exe"
 
 :loop
 echo [%date% %time%] Starting merge server (python -m app.main) ...

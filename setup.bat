@@ -1,8 +1,8 @@
 @echo off
 setlocal
 
-set ENV_NAME=spi_prd
-set PYTHON_VERSION=3.9
+set ENV_NAME=py312_cu128_j15
+set PYTHON_VERSION=3.12
 
 echo Checking for conda...
 where conda >nul 2>nul
@@ -15,7 +15,7 @@ echo Creating Conda environment '%ENV_NAME%' with Python %PYTHON_VERSION%...
 conda create -n %ENV_NAME% python=%PYTHON_VERSION% -y
 
 echo Activating environment and installing dependencies...
-call conda run -n %ENV_NAME% pip install torch==1.13.1+cu117 torchvision==0.14.1+cu117 --extra-index-url https://download.pytorch.org/whl/cu117
+call conda run -n %ENV_NAME% pip install torch==2.7.1 torchvision==0.22.1 --index-url https://download.pytorch.org/whl/cu128
 call conda run -n %ENV_NAME% pip install -r requirements.txt
 
 echo.
