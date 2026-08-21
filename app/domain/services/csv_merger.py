@@ -5,6 +5,8 @@ Pure pandas logic — no filesystem, HTTP, or FastAPI dependencies.
 
 from __future__ import annotations
 
+import math
+import string
 from collections.abc import Sequence
 from typing import Any
 
@@ -17,6 +19,18 @@ _IMAGE_SUFFIX = ".jpg"
 _IMAGE_NAME_COLUMN = "img_name"
 _ARRAY_ID_COLUMN = "Array_id"
 _PAD_NO_COLUMN = "Pad_no"
+
+
+def _image_key_part(value: Any) -> str:
+    """Return a filename-safe textual representation of one CSV value."""
+    if pd.isna(value):
+        raise CsvSchemaError("Image-name template value is missing")
+    if isinstance(value, float) and math.isfinite(value) and value.is_integer():
+        return str(int(value))
+    text = str(value).strip()
+    if not text:
+        raise CsvSchemaError("Image-name template value is empty")
+    return text
 
 
 def build_image_name(array_id: Any, pad_no: Any) -> str:
@@ -46,20 +60,60 @@ def build_image_name(array_id: Any, pad_no: Any) -> str:
 class CsvMerger:
     """Adds the image-name column and merges model results into a DataFrame."""
 
-    def add_image_name_column(self, df: pd.DataFrame) -> pd.DataFrame:
+    def add_image_name_column(
+        self,
+        df: pd.DataFrame,
+        *,
+        source_column: str | None = None,
+        template: str | None = None,
+        csv_stem: str | None = None,
+    ) -> pd.DataFrame:
         """Return a copy of ``df`` with the ``img_name`` column added.
 
-        Mirrors the legacy vectorized build ``{Array_id - 1}_{Pad_no}.jpg``.
+        ``template`` supports a machine-specific filename built from
+        ``{csv_stem}`` and CSV column names. With no template,
+        ``source_column`` may name a column that already carries the image path.
+        With neither configured, the legacy ``{Array_id - 1}_{Pad_no}.jpg``
+        convention is retained.
 
         Args:
-            df: Input frame; must contain ``Array_id`` and ``Pad_no`` columns.
+            df: Input frame.
+            source_column: Optional column containing image filenames/paths.
+            template: Optional image filename format string.
+            csv_stem: Source CSV filename without its extension.
 
         Returns:
             A new frame with an ``img_name`` column.
 
         Raises:
-            CsvSchemaError: If ``Array_id`` or ``Pad_no`` columns are missing.
+            CsvSchemaError: If the selected input columns are missing or empty.
         """
+        if template is not None:
+            return self._add_from_template(df, template=template, csv_stem=csv_stem)
+
+        if source_column is not None:
+            if source_column not in df.columns:
+                raise CsvSchemaError(
+                    f"CSV missing configured image-name column: {source_column!r}"
+                )
+            source = df[source_column]
+            missing = source.isna() | source.astype(str).str.strip().eq("")
+            if missing.any():
+                row_numbers = [
+                    position + 2
+                    for position, is_missing in enumerate(missing.tolist())
+                    if is_missing
+                ][:5]
+                raise CsvSchemaError(
+                    f"CSV image-name column {source_column!r} is empty at "
+                    f"CSV row(s): {row_numbers}"
+                )
+            out = df.copy()
+            out[_IMAGE_NAME_COLUMN] = source.astype(str).map(
+                lambda value: value.replace("\\", "/").rsplit("/", 1)[-1]
+            )
+            return out
+
         missing = [
             column
             for column in (_ARRAY_ID_COLUMN, _PAD_NO_COLUMN)
@@ -74,6 +128,45 @@ class CsvMerger:
         )
         pad_str = out[_PAD_NO_COLUMN].astype(str)
         out[_IMAGE_NAME_COLUMN] = prefix.astype(str) + "_" + pad_str + _IMAGE_SUFFIX
+        return out
+
+    @staticmethod
+    def _add_from_template(
+        df: pd.DataFrame, *, template: str, csv_stem: str | None
+    ) -> pd.DataFrame:
+        """Build ``img_name`` from ``csv_stem`` and configured CSV columns."""
+        formatter = string.Formatter()
+        fields = {
+            field_name
+            for _, field_name, _, _ in formatter.parse(template)
+            if field_name
+        }
+        allowed_fields = set(df.columns) | {"csv_stem"}
+        missing_fields = sorted(fields - allowed_fields)
+        if missing_fields:
+            raise CsvSchemaError(
+                f"Image-name template references missing fields: {missing_fields}"
+            )
+        if "csv_stem" in fields and not csv_stem:
+            raise CsvSchemaError("Image-name template requires the CSV filename")
+
+        image_names: list[str] = []
+        for position, (_, row) in enumerate(df.iterrows(), start=2):
+            values = {
+                column: _image_key_part(row[column])
+                for column in fields
+                if column != "csv_stem"
+            }
+            values["csv_stem"] = csv_stem or ""
+            try:
+                image_names.append(template.format_map(values))
+            except (KeyError, ValueError) as exc:
+                raise CsvSchemaError(
+                    f"Unable to build image filename at CSV row {position}: {exc}"
+                ) from exc
+
+        out = df.copy()
+        out[_IMAGE_NAME_COLUMN] = image_names
         return out
 
     def merge_model_results(

@@ -21,7 +21,7 @@ _VOL_L_NG_COLUMN = "vol_l_ng"
 _VOL_H_NG_COLUMN = "vol_h_ng"
 _COVER_COLUMN = "cover%"
 _MIN_PAD_DISTANCE_COLUMN = "min_pad_distance"
-_INSP_HEIGHT_COLUMN = "insp_height"
+_INSP_HEI_COLUMN = "insp_hei"
 
 
 class DefectClassifier:
@@ -34,7 +34,7 @@ class DefectClassifier:
     3. ``insp_vol < vol_l_ng + low_vol_offset`` -> ``low vol``
     4. ``cover% > high_cover_threshold`` -> ``high cover``
     5. ``min_pad_distance < short_distance_threshold`` -> ``short distance``
-    6. ``insp_height > high_paste_height_threshold`` -> ``high paste``
+    6. ``insp_hei > high_paste_height_threshold`` -> ``high paste``
 
     Rules whose input columns are absent are skipped without error.
     """
@@ -81,7 +81,7 @@ class DefectClassifier:
         )
         self._apply_above(
             out,
-            _INSP_HEIGHT_COLUMN,
+            _INSP_HEI_COLUMN,
             self._config.high_paste_height_threshold,
             DefectLabel.HIGH_PASTE,
         )

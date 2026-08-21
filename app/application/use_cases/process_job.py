@@ -96,6 +96,9 @@ class ProcessJobUseCase:
             external_output_root=self._config.paths.external_output_root,
             backup_output_root=self._config.paths.backup_output_root,
             primary_csv_mode=self._config.output.primary_csv_mode,
+            primary_path_layout=self._config.output.primary_path_layout,
+            preserve_job_folder=self._config.output.preserve_job_folder,
+            require_existing_is_pass=self._config.output.require_existing_is_pass,
             csv_repository=self._csv_repo,
         )
         self._log_writer = RequestLogWriter(
@@ -219,7 +222,12 @@ class ProcessJobUseCase:
     ) -> list[str]:
         """Enrich, classify, and write outputs for a single CSV."""
         processing_df = self._csv_repo.read_for_processing(csv_path)
-        processing_df = self._merger.add_image_name_column(processing_df)
+        processing_df = self._merger.add_image_name_column(
+            processing_df,
+            source_column=self._config.processing.image_name_source_column,
+            template=self._config.processing.image_name_template,
+            csv_stem=csv_path.stem,
+        )
         processing_df = self._merger.merge_model_results(processing_df, model_results)
 
         derived = self._derived.add_derived_columns(processing_df)
@@ -235,6 +243,7 @@ class ProcessJobUseCase:
         return self._output_writer.write(
             job_name=job_name,
             csv_name=csv_path.name,
+            source_csv=csv_path,
             year=year,
             month=month,
             output_frame=output_df,
@@ -262,6 +271,7 @@ class ProcessJobUseCase:
                 self._output_writer.write(
                     job_name=job.job_folder.name,
                     csv_name=csv_path.name,
+                    source_csv=csv_path,
                     year=year,
                     month=month,
                     output_frame=output_df,
@@ -300,7 +310,12 @@ class ProcessJobUseCase:
     def _build_skip_frame(self, csv_path: Path) -> pd.DataFrame:
         """Build the full-schema frame for a skipped CSV (all NA, is_pass=23)."""
         df = self._csv_repo.read_for_processing(csv_path)
-        df = self._merger.add_image_name_column(df)
+        df = self._merger.add_image_name_column(
+            df,
+            source_column=self._config.processing.image_name_source_column,
+            template=self._config.processing.image_name_template,
+            csv_stem=csv_path.stem,
+        )
         for entry in self._config.enabled_model_clients():
             df[entry.target_column] = pd.Series([pd.NA] * len(df), dtype="Float64")
         df[_DEFECT_COLUMN] = ""

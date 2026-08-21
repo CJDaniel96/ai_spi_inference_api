@@ -100,8 +100,8 @@ class RuleConfig(BaseModel):
     - anomaly_threshold: score above which rows are labeled "FM/color"
     - high_cover_threshold: percent threshold for "high cover"
     - short_distance_threshold: distance threshold for "short distance"
-    - low_vol_offset/high_vol_offset: dynamic insp_vol thresholds
-    - high_paste_height_threshold: insp_height threshold for "high paste"
+    - low_vol_offset/high_vol_offset: dynamic insp_vol threshold offsets
+    - high_paste_height_threshold: insp_hei threshold for "high paste"
     - external_output_root: base folder for enriched CSVs (e.g. "E:/external")
     - backup_output_root: secondary base folder for enriched CSVs
     """

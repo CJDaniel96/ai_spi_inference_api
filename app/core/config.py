@@ -76,6 +76,13 @@ class ProcessingConfig(BaseModel):
     image_extensions: list[str] = Field(
         default_factory=lambda: list(_DEFAULT_IMAGE_EXTENSIONS)
     )
+    # When unset, retain the legacy ``{Array_id - 1}_{Pad_no}.jpg`` mapping.
+    # Set this to a machine CSV column containing an image filename/path to use
+    # that value directly as the model-result join key.
+    image_name_source_column: str | None = None
+    # Optional format using ``{csv_stem}`` plus CSV column names, for example:
+    # ``{csv_stem}_{component_name}_{Array_id}_{Pad_no}.jpg``.
+    image_name_template: str | None = None
 
 
 class ModelClientConfig(BaseModel):
@@ -110,11 +117,21 @@ class OutputConfig(BaseModel):
     ``"is_pass_only"`` (default: original columns with only ``is_pass`` updated)
     or ``"full_ai_columns"`` (the full processed frame with all AI columns). The
     backup and processed CSVs keep their existing behavior regardless of mode.
+
+    ``primary_path_layout="machine_return"`` switches the primary output to the
+    SINIC file-interface contract: return the source filename directly under the
+    external output root (or under its timestamp folder) while preserving the
+    source CSV's encoding, delimiter, line endings, and column order.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     primary_csv_mode: Literal["is_pass_only", "full_ai_columns"] = "is_pass_only"
+    primary_path_layout: Literal["legacy_ai_subfolder", "machine_return"] = (
+        "legacy_ai_subfolder"
+    )
+    preserve_job_folder: bool = False
+    require_existing_is_pass: bool = True
 
 
 class LoggingConfig(BaseModel):

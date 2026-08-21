@@ -160,7 +160,7 @@ curl -X POST "http://127.0.0.1:5050/process" \
 - **Required** (to build the `img_name` join key): `Array_id`, `Pad_no`.
   Missing either raises a CSV schema error (HTTP 400).
 - **Optional**, consulted by defect rules only when present:
-  `insp_vol`, `vol_l_ng`, `vol_h_ng`, `insp_height`, `Width`, `Length`.
+  `insp_vol`, `vol_l_ng`, `vol_h_ng`, `insp_hei`, `Width`, `Length`.
 - **Produced by models** (added during merge): `anomaly_score`,
   `min_pad_distance`, and `paste_pixels` (only if the paste model is enabled).
   Missing model columns become `NaN` — rules that need them are simply skipped.
@@ -197,7 +197,7 @@ label. Thresholds/offsets come from `defect_rules`.
 | 3 | `insp_vol < vol_l_ng + low_vol_offset` | `low vol` |
 | 4 | `cover% > high_cover_threshold` | `high cover` |
 | 5 | `min_pad_distance < short_distance_threshold` | `short distance` |
-| 6 | `insp_height > high_paste_height_threshold` | `high paste` |
+| 6 | `insp_hei > high_paste_height_threshold` | `high paste` |
 
 `is_pass` = `22` when `ai_defect_name` is empty/whitespace, else `23`.
 
@@ -335,6 +335,12 @@ deprecated.
 - **Config per environment**: keep deployment paths out of the shared repo by
   pointing `AI_CONFIG_PATH` at a machine-local config (template:
   `config/ai_server.example.json`).
+- **Scanner retry / dead-letter**: `scan_jobs.py` no longer re-posts a failing job
+  on every tick. Client errors (4xx, e.g. a malformed CSV) are dead-lettered after
+  `scanner_client_error_max_attempts` (default 2); server/transport errors (5xx or
+  connection failures) get exponential backoff (`scanner_backoff_base_seconds` ..
+  `scanner_backoff_max_seconds`) up to `scanner_max_retries` (default 5), then
+  dead-letter. Dead-letter state is in-memory, so a scanner restart re-attempts.
 - **CI**: `.github/workflows/ci.yml` runs `ruff check`, `ruff format --check`, and
   the `tests/unit` + `tests/integration` suites on every push/PR.
 

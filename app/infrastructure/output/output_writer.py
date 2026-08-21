@@ -6,12 +6,14 @@ from pathlib import Path
 
 import pandas as pd
 
+from app.infrastructure.output.sinic_csv_output import SinicCsvOutput
 from app.infrastructure.repositories.csv_repository import CsvRepository
 
 _AI_SUBFOLDER = "AI"
 _PROCESSED_SUFFIX = "_processed"
 _IS_PASS_COLUMN = "is_pass"
 _MODE_FULL_AI_COLUMNS = "full_ai_columns"
+_LAYOUT_MACHINE_RETURN = "machine_return"
 
 
 class OutputWriter:
@@ -38,12 +40,21 @@ class OutputWriter:
         backup_output_root: str,
         primary_csv_mode: str,
         csv_repository: CsvRepository,
+        primary_path_layout: str = "legacy_ai_subfolder",
+        preserve_job_folder: bool = False,
+        require_existing_is_pass: bool = True,
     ) -> None:
         """Initialize with output roots, the primary mode, and a CSV writer."""
         self._external_root = Path(external_output_root)
         self._backup_root = Path(backup_output_root)
         self._mode = primary_csv_mode
+        self._path_layout = primary_path_layout
         self._csv = csv_repository
+        self._machine_output = SinicCsvOutput(
+            self._external_root,
+            preserve_job_folder=preserve_job_folder,
+            require_existing_result_column=require_existing_is_pass,
+        )
 
     def write(
         self,
@@ -54,6 +65,7 @@ class OutputWriter:
         month: str,
         output_frame: pd.DataFrame,
         processing_frame: pd.DataFrame,
+        source_csv: Path | None = None,
     ) -> list[str]:
         """Write the three output CSVs and return their paths.
 
@@ -75,12 +87,21 @@ class OutputWriter:
             processing_frame if self._mode == _MODE_FULL_AI_COLUMNS else is_pass_frame
         )
 
-        primary_path = self._external_root / job_name / _AI_SUBFOLDER / csv_name
         backup_dir = self._backup_root / year / month / job_name
         backup_path = backup_dir / csv_name
         processed_path = backup_dir / self._processed_name(csv_name)
 
-        self._csv.write(primary_frame, primary_path)
+        if self._path_layout == _LAYOUT_MACHINE_RETURN:
+            if source_csv is None:
+                raise ValueError("source_csv is required for machine_return output")
+            machine_result = self._machine_output.write(
+                source_csv,
+                processing_frame[_IS_PASS_COLUMN].astype(str).tolist(),
+            )
+            primary_path = machine_result.destination_csv
+        else:
+            primary_path = self._external_root / job_name / _AI_SUBFOLDER / csv_name
+            self._csv.write(primary_frame, primary_path)
         self._csv.write(is_pass_frame, backup_path)
         self._csv.write(processing_frame, processed_path)
         return [str(primary_path), str(backup_path), str(processed_path)]

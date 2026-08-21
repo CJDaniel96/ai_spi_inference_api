@@ -46,7 +46,13 @@ class _FakeRunner:
 
 
 def _config(
-    tmp_path: Path, *, threshold: int = 500, mode: str = "is_pass_only"
+    tmp_path: Path,
+    *,
+    threshold: int = 500,
+    mode: str = "is_pass_only",
+    path_layout: str = "legacy_ai_subfolder",
+    preserve_job_folder: bool = False,
+    require_existing_is_pass: bool = True,
 ) -> AppConfig:
     return AppConfig(
         paths=PathConfig(
@@ -87,7 +93,12 @@ def _config(
             high_vol_offset=20.0,
             high_paste_height_threshold=200.0,
         ),
-        output=OutputConfig(primary_csv_mode=mode),
+        output=OutputConfig(
+            primary_csv_mode=mode,
+            primary_path_layout=path_layout,
+            preserve_job_folder=preserve_job_folder,
+            require_existing_is_pass=require_existing_is_pass,
+        ),
         logging=LoggingConfig(
             log_dir=str(tmp_path / "log"),
             system_log_file="system",
@@ -231,6 +242,26 @@ def test_full_ai_columns_primary_includes_ai_columns(tmp_path: Path) -> None:
     assert "ai_defect_name" in df.columns
     assert df["anomaly_score"].tolist() == [0.95]
     assert df["ai_defect_name"].tolist() == ["FM/color"]
+
+
+def test_machine_return_layout_writes_machine_visible_csv(tmp_path: Path) -> None:
+    job = _make_job(tmp_path)
+    use_case = ProcessJobUseCase(
+        config=_config(
+            tmp_path,
+            path_layout="machine_return",
+            preserve_job_folder=True,
+            require_existing_is_pass=False,
+        ),
+        model_client_runner=_FakeRunner(_results()),
+    )
+
+    result = _run(use_case, job)
+
+    machine_csv = tmp_path / "primary" / _JOB_NAME / "amr.csv"
+    assert machine_csv.exists()
+    assert pd.read_csv(machine_csv)["is_pass"].tolist() == [23]
+    assert str(machine_csv) in result["saved_files"]
 
 
 def test_model_client_failure_recorded_but_flow_completes(tmp_path: Path) -> None:

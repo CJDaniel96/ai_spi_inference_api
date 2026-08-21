@@ -40,6 +40,51 @@ def test_add_image_name_column_builds_expected() -> None:
     assert out["img_name"].tolist() == ["0_001.jpg", "1_1426.jpg"]
 
 
+def test_add_image_name_column_from_configured_direct_column() -> None:
+    df = pd.DataFrame(
+        {
+            "machine_image": [
+                "C:\\machine\\output\\pad_001.jpg",
+                "images/pad_002.jpeg",
+            ]
+        }
+    )
+
+    out = CsvMerger().add_image_name_column(df, source_column="machine_image")
+
+    assert out["img_name"].tolist() == ["pad_001.jpg", "pad_002.jpeg"]
+
+
+def test_direct_image_name_column_rejects_empty_values() -> None:
+    df = pd.DataFrame({"machine_image": ["pad.jpg", ""]})
+
+    with pytest.raises(ValueError, match="empty"):
+        CsvMerger().add_image_name_column(df, source_column="machine_image")
+
+
+def test_add_image_name_column_from_sinic_template() -> None:
+    df = pd.DataFrame(
+        {
+            "component_name": ["C1012", "J1701", "J1701", "C1007"],
+            "Array_id": [116, 133, 133, 9],
+            "Pad_no": [26109, 27345, 27346, 32758],
+        }
+    )
+
+    out = CsvMerger().add_image_name_column(
+        df,
+        template="{csv_stem}_{component_name}_{Array_id}_{Pad_no}.jpg",
+        csv_stem="20260817093032_MA8067770C917A",
+    )
+
+    assert out["img_name"].tolist() == [
+        "20260817093032_MA8067770C917A_C1012_116_26109.jpg",
+        "20260817093032_MA8067770C917A_J1701_133_27345.jpg",
+        "20260817093032_MA8067770C917A_J1701_133_27346.jpg",
+        "20260817093032_MA8067770C917A_C1007_9_32758.jpg",
+    ]
+
+
 def _df_with_images() -> pd.DataFrame:
     """Return a 2-row frame with img_name ``0_100.jpg`` / ``0_101.jpg``."""
     df = pd.DataFrame({"Array_id": [1, 1], "Pad_no": [100, 101]})

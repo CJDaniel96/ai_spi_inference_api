@@ -9,7 +9,9 @@
   },
   "processing": {
     "folder_images_num_threshold": 500,
-    "image_extensions": [".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif"]
+    "image_extensions": [".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif"],
+    "image_name_source_column": null,
+    "image_name_template": "{csv_stem}_{component_name}_{Array_id}_{Pad_no}.jpg"
   },
   "model_clients": [
     {
@@ -43,7 +45,10 @@
     "high_paste_height_threshold": 200.0
   },
   "output": {
-    "primary_csv_mode": "is_pass_only"
+    "primary_csv_mode": "is_pass_only",
+    "primary_path_layout": "machine_return",
+    "preserve_job_folder": false,
+    "require_existing_is_pass": true
   },
   "logging": {
     "log_dir": "log",
@@ -53,7 +58,14 @@
     "request_log_backup_count": 5
   },
   "watch_root": "D:/path/to/watch/root",
+  "scanner_input_mode": "sinic_timestamp",
+  "scanner_settle_seconds": 2.0,
+  "scanner_allow_no_images": false,
   "process_api_url": "http://127.0.0.1:5050/process",
   "processed_registry_path": "log/processed.json",
-  "rescan_interval_ms": 500
+  "rescan_interval_ms": 500,
+  "scanner_max_retries": 5,
+  "scanner_client_error_max_attempts": 2,
+  "scanner_backoff_base_seconds": 5,
+  "scanner_backoff_max_seconds": 300
 }

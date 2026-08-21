@@ -40,6 +40,17 @@ def test_low_vol() -> None:
     assert _classify(df) == ["low vol"]
 
 
+def test_volume_thresholds_are_strict() -> None:
+    df = pd.DataFrame(
+        {
+            "insp_vol": [40.0, 120.0],
+            "vol_l_ng": [50.0, 50.0],
+            "vol_h_ng": [100.0, 100.0],
+        }
+    )
+    assert _classify(df) == ["", ""]
+
+
 def test_high_cover() -> None:
     df = pd.DataFrame({"cover%": [200.0]})
     assert _classify(df) == ["high cover"]
@@ -52,7 +63,7 @@ def test_short_distance_uses_less_than() -> None:
 
 
 def test_high_paste() -> None:
-    df = pd.DataFrame({"insp_height": [250.0]})
+    df = pd.DataFrame({"insp_hei": [250.0]})
     assert _classify(df) == ["high paste"]
 
 
