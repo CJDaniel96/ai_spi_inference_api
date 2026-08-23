@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 
 
-class DefectLabel(str, Enum):
+class DefectLabel(StrEnum):
     """Canonical ``ai_defect_name`` values produced by classification.
 
     Values must stay byte-compatible with the legacy pipeline and downstream

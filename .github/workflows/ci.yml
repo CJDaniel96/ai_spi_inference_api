@@ -13,22 +13,20 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v5
         with:
-          python-version: "3.10"
+          python-version: "3.12"
 
       # The maintained surface (app/ + tests/unit + tests/integration) only needs
       # the lightweight web/data stack plus dev tooling. The heavy ML deps
       # (torch/opencv/ultralytics/anomalib) and the import-only smoke test are
       # exercised on the deployment machine, not in CI, to keep it fast/reliable.
-      - name: Create venv and install deps
-        run: |
-          uv venv
-          uv pip install fastapi httpx pandas pydantic -r requirements-dev.txt
+      - name: Install lightweight test dependencies
+        run: uv pip install fastapi httpx pandas pydantic -r requirements-dev.txt
 
       - name: Ruff lint
-        run: uv run ruff check .
+        run: uv run --no-sync ruff check .
 
       - name: Ruff format check
-        run: uv run ruff format --check .
+        run: uv run --no-sync ruff format --check .
 
       - name: Pytest
-        run: uv run pytest tests/unit tests/integration
+        run: uv run --no-sync pytest tests/unit tests/integration
