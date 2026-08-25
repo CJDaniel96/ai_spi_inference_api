@@ -40,6 +40,14 @@
     }
   ],
   "defect_rules": {
+    "rule_order": [
+      "anomaly",
+      "high_vol",
+      "low_vol",
+      "high_cover",
+      "short_distance",
+      "high_paste"
+    ],
     "anomaly_threshold": 0.9,
     "high_cover_threshold": 180.0,
     "short_distance_threshold": 6.8,

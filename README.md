@@ -213,8 +213,11 @@ in `model_clients`:
 
 ## Defect Classification Rules
 
-Applied in priority order; only the **first** matching rule per row assigns a
-label. Thresholds/offsets come from `defect_rules`.
+Applied in the order listed by `defect_rules.rule_order`; only the **first**
+matching rule per row assigns a label. Remove a name from `rule_order` to disable
+that rule, or use an empty list to disable all six rules. Unknown or duplicate
+names are rejected when configuration is loaded. Thresholds/offsets also come
+from `defect_rules`.
 
 | # | Condition | Label |
 | --- | --- | --- |
@@ -224,6 +227,19 @@ label. Thresholds/offsets come from `defect_rules`.
 | 4 | `cover% > high_cover_threshold` | `high cover` |
 | 5 | `min_pad_distance < short_distance_threshold` | `short distance` |
 | 6 | `insp_hei > high_paste_height_threshold` | `high paste` |
+
+The corresponding configuration names are `anomaly`, `high_vol`, `low_vol`,
+`high_cover`, `short_distance`, and `high_paste`. For example, this evaluates
+short distance first and disables anomaly and high-cover classification:
+
+```json
+"rule_order": ["short_distance", "high_vol", "low_vol", "high_paste"]
+```
+
+Restart the merge server after changing the config. `rule_order` controls only
+classification; model execution and fail-safe requirements remain controlled by
+the corresponding `model_clients[].enabled` and `model_clients[].required`
+settings.
 
 `is_pass` = `22` when `ai_defect_name` is empty/whitespace, else `23`.
 
@@ -283,6 +299,10 @@ baking environment-specific paths into a shared file.
     { "name": "distance", "enabled": true,  "required": true,  "url": "http://127.0.0.1:8002/inference", "target_column": "min_pad_distance", "timeout_seconds": 300 }
   ],
   "defect_rules": {
+    "rule_order": [
+      "anomaly", "high_vol", "low_vol", "high_cover",
+      "short_distance", "high_paste"
+    ],
     "anomaly_threshold": 0.9,
     "high_cover_threshold": 180.0,
     "short_distance_threshold": 6.8,

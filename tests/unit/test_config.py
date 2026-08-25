@@ -83,6 +83,14 @@ def test_loads_real_repo_config() -> None:
     assert config.paths.backup_output_root == "D:/Dre/JQ_SPI_02_AI_API/backup"
     assert config.defect_rules.anomaly_threshold == 0.9
     assert config.defect_rules.short_distance_threshold == 6.8
+    assert config.defect_rules.rule_order == [
+        "anomaly",
+        "high_vol",
+        "low_vol",
+        "high_cover",
+        "short_distance",
+        "high_paste",
+    ]
     assert config.processing.folder_images_num_threshold == 500
     assert config.reliability.primary_return_deadline_seconds == 30.0
     assert config.reliability.primary_publish_reserve_seconds == 5.0
@@ -131,6 +139,38 @@ def test_missing_required_section_raises_clear_error(tmp_path: Path) -> None:
         load_config(_write_config(tmp_path, data))
 
     assert "defect_rules" in str(exc_info.value)
+
+
+def test_legacy_config_gets_default_defect_rule_order(tmp_path: Path) -> None:
+    config = load_config(_write_config(tmp_path, _valid_config_dict()))
+
+    assert config.defect_rules.rule_order == [
+        "anomaly",
+        "high_vol",
+        "low_vol",
+        "high_cover",
+        "short_distance",
+        "high_paste",
+    ]
+
+
+@pytest.mark.parametrize(
+    "rule_order, expected_error",
+    [
+        (["anomaly", "not_a_rule"], "rule_order"),
+        (["anomaly", "anomaly"], "duplicate"),
+    ],
+)
+def test_invalid_defect_rule_order_is_rejected(
+    tmp_path: Path, rule_order: list[str], expected_error: str
+) -> None:
+    data = _valid_config_dict()
+    data["defect_rules"]["rule_order"] = rule_order
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_config(_write_config(tmp_path, data))
+
+    assert expected_error in str(exc_info.value)
 
 
 def test_missing_config_file_raises_config_error(tmp_path: Path) -> None:

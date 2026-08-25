@@ -100,17 +100,48 @@ class ModelClientConfig(BaseModel):
     timeout_seconds: int = Field(default=300, gt=0)
 
 
+DefectRuleName = Literal[
+    "anomaly",
+    "high_vol",
+    "low_vol",
+    "high_cover",
+    "short_distance",
+    "high_paste",
+]
+
+_DEFAULT_DEFECT_RULE_ORDER: tuple[DefectRuleName, ...] = (
+    "anomaly",
+    "high_vol",
+    "low_vol",
+    "high_cover",
+    "short_distance",
+    "high_paste",
+)
+
+
 class DefectRuleConfig(BaseModel):
     """Thresholds and offsets used by rule-based defect classification."""
 
     model_config = ConfigDict(extra="forbid")
 
+    # Rules are evaluated from first to last. Omitting a rule disables it; an
+    # empty list disables all defect rules. The default preserves legacy order
+    # for configuration files created before this field existed.
+    rule_order: list[DefectRuleName] = Field(
+        default_factory=lambda: list(_DEFAULT_DEFECT_RULE_ORDER)
+    )
     anomaly_threshold: float
     high_cover_threshold: float
     short_distance_threshold: float
     low_vol_offset: float
     high_vol_offset: float
     high_paste_height_threshold: float
+
+    @model_validator(mode="after")
+    def _rule_order_must_not_contain_duplicates(self) -> DefectRuleConfig:
+        if len(self.rule_order) != len(set(self.rule_order)):
+            raise ValueError("defect rule_order must not contain duplicate rules")
+        return self
 
 
 class OutputConfig(BaseModel):

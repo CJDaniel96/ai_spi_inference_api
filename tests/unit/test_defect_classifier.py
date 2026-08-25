@@ -4,12 +4,25 @@ from __future__ import annotations
 
 import pandas as pd
 
-from app.core.config import DefectRuleConfig
+from app.core.config import DefectRuleConfig, DefectRuleName
 from app.domain.services.defect_classifier import DefectClassifier, add_is_pass
 
 
-def _config() -> DefectRuleConfig:
+def _config(*, rule_order: list[DefectRuleName] | None = None) -> DefectRuleConfig:
+    effective_order: list[DefectRuleName] = (
+        rule_order
+        if rule_order is not None
+        else [
+            "anomaly",
+            "high_vol",
+            "low_vol",
+            "high_cover",
+            "short_distance",
+            "high_paste",
+        ]
+    )
     return DefectRuleConfig(
+        rule_order=effective_order,
         anomaly_threshold=0.9,
         high_cover_threshold=180.0,
         short_distance_threshold=6.8,
@@ -77,6 +90,44 @@ def test_priority_anomaly_beats_high_vol() -> None:
         }
     )
     assert _classify(df) == ["FM/color"]
+
+
+def test_configured_rule_order_changes_priority() -> None:
+    df = pd.DataFrame(
+        {
+            "anomaly_score": [0.95],
+            "min_pad_distance": [5.0],
+        }
+    )
+    result = DefectClassifier(
+        _config(rule_order=["short_distance", "anomaly"])
+    ).classify(df)
+
+    assert result["ai_defect_name"].tolist() == ["short distance"]
+
+
+def test_omitted_rule_is_disabled() -> None:
+    df = pd.DataFrame(
+        {
+            "anomaly_score": [0.95],
+            "min_pad_distance": [5.0],
+        }
+    )
+    result = DefectClassifier(_config(rule_order=["short_distance"])).classify(df)
+
+    assert result["ai_defect_name"].tolist() == ["short distance"]
+
+
+def test_empty_rule_order_disables_all_rules() -> None:
+    df = pd.DataFrame(
+        {
+            "anomaly_score": [0.95],
+            "min_pad_distance": [5.0],
+        }
+    )
+    result = DefectClassifier(_config(rule_order=[])).classify(df)
+
+    assert result["ai_defect_name"].tolist() == [""]
 
 
 def test_no_relevant_columns_yields_empty_labels() -> None:

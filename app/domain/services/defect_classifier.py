@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from app.core.config import DefectRuleConfig
+from app.core.config import DefectRuleConfig, DefectRuleName
 from app.domain.entities.defect import FAIL_CODE, PASS_CODE, DefectLabel
 
 _DEFECT_COLUMN = "ai_defect_name"
@@ -27,7 +27,8 @@ _INSP_HEI_COLUMN = "insp_hei"
 class DefectClassifier:
     """Assigns ``ai_defect_name`` using ordered, first-match-wins rules.
 
-    Rule priority (only the first matching rule per row assigns a label):
+    Rule priority comes from ``DefectRuleConfig.rule_order``. Only the first
+    matching enabled rule per row assigns a label. The legacy default order is:
 
     1. ``anomaly_score > anomaly_threshold`` -> ``FM/color``
     2. ``insp_vol > vol_h_ng + high_vol_offset`` -> ``high vol``
@@ -60,32 +61,44 @@ class DefectClassifier:
         if _DEFECT_COLUMN not in out.columns:
             out[_DEFECT_COLUMN] = ""
 
-        self._apply_above(
-            out,
-            _ANOMALY_SCORE_COLUMN,
-            self._config.anomaly_threshold,
-            DefectLabel.FM_COLOR,
-        )
-        self._apply_volume(out)
-        self._apply_above(
-            out,
-            _COVER_COLUMN,
-            self._config.high_cover_threshold,
-            DefectLabel.HIGH_COVER,
-        )
-        self._apply_below(
-            out,
-            _MIN_PAD_DISTANCE_COLUMN,
-            self._config.short_distance_threshold,
-            DefectLabel.SHORT_DISTANCE,
-        )
-        self._apply_above(
-            out,
-            _INSP_HEI_COLUMN,
-            self._config.high_paste_height_threshold,
-            DefectLabel.HIGH_PASTE,
-        )
+        for rule_name in self._config.rule_order:
+            self._apply_rule(out, rule_name)
         return out
+
+    def _apply_rule(self, out: pd.DataFrame, rule_name: DefectRuleName) -> None:
+        """Apply one configured rule to rows which are still unassigned."""
+        if rule_name == "anomaly":
+            self._apply_above(
+                out,
+                _ANOMALY_SCORE_COLUMN,
+                self._config.anomaly_threshold,
+                DefectLabel.FM_COLOR,
+            )
+        elif rule_name == "high_vol":
+            self._apply_volume_rule(out, high=True)
+        elif rule_name == "low_vol":
+            self._apply_volume_rule(out, high=False)
+        elif rule_name == "high_cover":
+            self._apply_above(
+                out,
+                _COVER_COLUMN,
+                self._config.high_cover_threshold,
+                DefectLabel.HIGH_COVER,
+            )
+        elif rule_name == "short_distance":
+            self._apply_below(
+                out,
+                _MIN_PAD_DISTANCE_COLUMN,
+                self._config.short_distance_threshold,
+                DefectLabel.SHORT_DISTANCE,
+            )
+        elif rule_name == "high_paste":
+            self._apply_above(
+                out,
+                _INSP_HEI_COLUMN,
+                self._config.high_paste_height_threshold,
+                DefectLabel.HIGH_PASTE,
+            )
 
     @staticmethod
     def _unassigned(out: pd.DataFrame) -> pd.Series:
@@ -120,25 +133,27 @@ class DefectClassifier:
         mask = self._unassigned(out) & (values < threshold)
         out.loc[mask, _DEFECT_COLUMN] = label.value
 
-    def _apply_volume(self, out: pd.DataFrame) -> None:
-        """Apply the high-vol then low-vol rules (in place)."""
+    def _apply_volume_rule(self, out: pd.DataFrame, *, high: bool) -> None:
+        """Apply one configured high- or low-volume rule (in place)."""
         needed = {_INSP_VOL_COLUMN, _VOL_L_NG_COLUMN, _VOL_H_NG_COLUMN}
         if not needed.issubset(out.columns):
             return
         insp_vol = pd.to_numeric(out[_INSP_VOL_COLUMN], errors="coerce")
-        low = (
-            pd.to_numeric(out[_VOL_L_NG_COLUMN], errors="coerce")
-            + self._config.low_vol_offset
-        )
-        high = (
-            pd.to_numeric(out[_VOL_H_NG_COLUMN], errors="coerce")
-            + self._config.high_vol_offset
-        )
-
-        high_mask = self._unassigned(out) & (insp_vol > high)
-        out.loc[high_mask, _DEFECT_COLUMN] = DefectLabel.HIGH_VOL.value
-        low_mask = self._unassigned(out) & (insp_vol < low)
-        out.loc[low_mask, _DEFECT_COLUMN] = DefectLabel.LOW_VOL.value
+        if high:
+            threshold = (
+                pd.to_numeric(out[_VOL_H_NG_COLUMN], errors="coerce")
+                + self._config.high_vol_offset
+            )
+            mask = self._unassigned(out) & (insp_vol > threshold)
+            label = DefectLabel.HIGH_VOL
+        else:
+            threshold = (
+                pd.to_numeric(out[_VOL_L_NG_COLUMN], errors="coerce")
+                + self._config.low_vol_offset
+            )
+            mask = self._unassigned(out) & (insp_vol < threshold)
+            label = DefectLabel.LOW_VOL
+        out.loc[mask, _DEFECT_COLUMN] = label.value
 
 
 def add_is_pass(df: pd.DataFrame) -> pd.DataFrame:
