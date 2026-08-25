@@ -12,11 +12,14 @@ Given a `job_folder` containing SPI CSV(s) and pad images, the service:
 
 1. Validates the folder and discovers its CSV files and image count.
 2. Calls the **enabled** model inference endpoints concurrently.
-3. Merges each model's scalar result into the CSV by image name.
-4. Computes derived columns (`pad_area`, `cover%`) when their inputs exist.
-5. Classifies each row's `ai_defect_name` using ordered, config-driven rules.
-6. Sets `is_pass` (22 = pass, 23 = fail).
-7. Writes a **primary**, **backup**, and **processed** CSV, and appends a metrics
+3. Verifies every required model returned a finite result for every expected image.
+   Required-model errors, incomplete responses, invalid values, and deadline
+   timeouts produce a fail-safe CSV with every row set to `is_pass=23`.
+4. Merges each model's scalar result into the CSV by image name.
+5. Computes derived columns (`pad_area`, `cover%`) when their inputs exist.
+6. Classifies each row's `ai_defect_name` using ordered, config-driven rules.
+7. Sets `is_pass` (22 = pass, 23 = fail).
+8. Writes a **primary**, **backup**, and **processed** CSV, and appends a metrics
    row to `log/log.csv`.
 
 ## Architecture
@@ -60,10 +63,11 @@ scan_jobs.py  ──POST /process {job_folder}──▶  app.main
     │                              ProcessJobUseCase.execute()
     │        1. FileSystemJobRepository.load  (validate, find CSVs, count images)
     │        2. if images > threshold → skip inference, mark all is_pass=23
-    │        3. run enabled model clients concurrently  (asyncio.gather)
-    │        4. per CSV: merge → derived → classify → is_pass
-    │        5. OutputWriter: primary + backup + processed CSV
-    │        6. RequestLogWriter: append metrics row to log/log.csv
+    │        3. run enabled model clients concurrently within the SLA budget
+    │        4. required failure/timeout/incomplete result → all is_pass=23
+    │        5. otherwise per CSV: merge → derived → classify → is_pass
+    │        6. OutputWriter: primary + backup + processed CSV
+    │        7. RequestLogWriter: append metrics row to log/log.csv
     ▼
 2xx → scan_jobs marks the job processed
 ```
@@ -83,7 +87,8 @@ Cheap liveness probe — returns immediately with the current UTC+8 timestamp.
 Readiness probe. Returns **200** when the config loads (the service can accept
 jobs) or **503** when it cannot. Each enabled model endpoint's `/health` is probed
 (short timeout) and reported for diagnostics, but a model being down does **not**
-flip readiness (since `/process` tolerates a single model failure).
+flip readiness (`/process` publishes the configured all-23 fail-safe result when
+a required model is unavailable).
 
 ```json
 {
@@ -116,6 +121,20 @@ Success (200):
 }
 ```
 
+Fail-safe result (200, required model failure or inference-budget timeout):
+
+```json
+{
+  "status": "ok",
+  "fallback": true,
+  "reason": "required_model_failure",
+  "img_numbers": 4,
+  "csv_count": 1,
+  "saved_files": ["..."],
+  "errors": ["distance boom"]
+}
+```
+
 Skipped (200, image count over threshold):
 
 ```json
@@ -137,7 +156,8 @@ Errors:
 | Job folder missing / not a directory | 400 | `{ "detail": "..." }` |
 | No CSV files in folder | 400 | `{ "detail": "..." }` |
 | CSV missing required columns / bad values | 400 | `{ "detail": "..." }` |
-| A single model endpoint fails | 200 | success body with the message in `errors` |
+| Required model fails/times out/returns incomplete data | 200 | all rows are returned as `23` |
+| Optional model endpoint fails | 200 | normal result with the message in `errors` |
 | Config invalid / output write fails / unexpected | 500 | `{ "detail": "Internal Server Error" }` |
 
 `curl` example:
@@ -151,14 +171,15 @@ curl -X POST "http://127.0.0.1:5050/process" \
 ## Input Job Folder Requirements
 
 - A directory that exists and contains **one or more `.csv` files**.
-- Pad images named `{Array_id - 1}_{Pad_no}.jpg` (used to align model results to
-  rows). Image extensions counted for the guardrail come from
-  `processing.image_extensions`.
+- SINIC pad images named
+  `{Insp_st_time}_{BoardBarcode}_{component_name}_{Array_id}_{Pad_id}.jpg`.
+  The shipped template uses the equivalent
+  `{csv_stem}_{component_name}_{Array_id}_{Pad_id}.jpg`.
 
 ## CSV Required Columns
 
-- **Required** (to build the `img_name` join key): `Array_id`, `Pad_no`.
-  Missing either raises a CSV schema error (HTTP 400).
+- **Required** by the shipped SINIC template: `component_name`, `Array_id`, and
+  `Pad_id`; the CSV stem represents `{Insp_st_time}_{BoardBarcode}`.
 - **Optional**, consulted by defect rules only when present:
   `insp_vol`, `vol_l_ng`, `vol_h_ng`, `insp_hei`, `Width`, `Length`.
 - **Produced by models** (added during merge): `anomaly_score`,
@@ -174,6 +195,7 @@ in `model_clients`:
 {
   "name": "anomaly",
   "enabled": true,
+  "required": true,
   "url": "http://127.0.0.1:8000/inference",
   "target_column": "anomaly_score",
   "timeout_seconds": 300
@@ -181,6 +203,10 @@ in `model_clients`:
 ```
 
 - **Disable** a client: set `"enabled": false` (its column is left `NaN`).
+- **Required** client: set `"required": true`; any error, missing image key,
+  `None`, `NaN`, or infinite result triggers the all-23 fail-safe output.
+- **Optional** client: set `"required": false`; its failure is reported but does
+  not trigger the fail-safe policy.
 - **Add** a client: append an object with a unique `name`, `url`, `target_column`,
   and `timeout_seconds`, then set `"enabled": true`. No code change required.
 - The paste client (`8001`) ships **disabled** (see compatibility notes).
@@ -209,7 +235,8 @@ For each input CSV, three files are written:
 
 | File | Path | Contents |
 | --- | --- | --- |
-| Primary | `{external_output_root}/{job}/AI/{csv}` | Per `primary_csv_mode` (below) |
+| Primary (`machine_return`) | `{external_output_root}/{csv}` | Source schema with `is_pass` updated; published atomically |
+| Primary (legacy layout) | `{external_output_root}/{job}/AI/{csv}` | Per `primary_csv_mode` (below) |
 | Backup | `{backup_output_root}/{year}/{month}/{job}/{csv}` | Original columns + `is_pass` |
 | Processed | `{backup_output_root}/{year}/{month}/{job}/{stem}_processed.csv` | Full AI schema |
 
@@ -246,12 +273,14 @@ baking environment-specific paths into a shared file.
   },
   "processing": {
     "folder_images_num_threshold": 500,
-    "image_extensions": [".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif"]
+    "image_extensions": [".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif"],
+    "image_name_source_column": null,
+    "image_name_template": "{csv_stem}_{component_name}_{Array_id}_{Pad_id}.jpg"
   },
   "model_clients": [
-    { "name": "anomaly",  "enabled": true,  "url": "http://127.0.0.1:8000/inference", "target_column": "anomaly_score",    "timeout_seconds": 300 },
-    { "name": "paste",    "enabled": false, "url": "http://127.0.0.1:8001/inference", "target_column": "paste_pixels",     "timeout_seconds": 300 },
-    { "name": "distance", "enabled": true,  "url": "http://127.0.0.1:8002/inference", "target_column": "min_pad_distance", "timeout_seconds": 300 }
+    { "name": "anomaly",  "enabled": true,  "required": true,  "url": "http://127.0.0.1:8000/inference", "target_column": "anomaly_score",    "timeout_seconds": 300 },
+    { "name": "paste",    "enabled": false, "required": false, "url": "http://127.0.0.1:8001/inference", "target_column": "paste_pixels",     "timeout_seconds": 300 },
+    { "name": "distance", "enabled": true,  "required": true,  "url": "http://127.0.0.1:8002/inference", "target_column": "min_pad_distance", "timeout_seconds": 300 }
   ],
   "defect_rules": {
     "anomaly_threshold": 0.9,
@@ -261,13 +290,26 @@ baking environment-specific paths into a shared file.
     "high_vol_offset": 20.0,
     "high_paste_height_threshold": 200.0
   },
-  "output": { "primary_csv_mode": "is_pass_only" },
+  "output": {
+    "primary_csv_mode": "is_pass_only",
+    "primary_path_layout": "machine_return",
+    "preserve_job_folder": false,
+    "require_existing_is_pass": true
+  },
+  "reliability": {
+    "primary_return_deadline_seconds": 30.0,
+    "primary_publish_reserve_seconds": 5.0,
+    "scanner_http_timeout_grace_seconds": 5.0,
+    "required_model_failure_policy": "fail_all_23"
+  },
   "logging": {
     "log_dir": "log", "system_log_file": "system", "request_log_file": "log.csv",
     "request_log_max_bytes": 52428800, "request_log_backup_count": 5
   },
 
   "watch_root": "D:/spi_ai/output/01/sfcTemp",
+  "scanner_input_mode": "sinic_timestamp",
+  "scanner_settle_seconds": 2.0,
   "process_api_url": "http://127.0.0.1:5050/process",
   "processed_registry_path": "log/processed.json",
   "rescan_interval_ms": 500
@@ -276,6 +318,14 @@ baking environment-specific paths into a shared file.
 
 The top-level `watch_root` / `process_api_url` / `processed_registry_path` /
 `rescan_interval_ms` keys are read directly by `scan_jobs.py`.
+
+`primary_return_deadline_seconds` defaults to 30 seconds. In the current
+synchronous pipeline it is measured from the beginning of `/process`; model
+inference is cut off after subtracting `primary_publish_reserve_seconds`, leaving
+time to publish the all-23 fallback. The scanner waits for the deadline plus
+`scanner_http_timeout_grace_seconds`, so its transport timeout does not race the
+production deadline. Once the durable ingest worker is implemented, the same SLA
+will start at the persisted folder-ready timestamp and include copy/queue time.
 
 Config is cached per process — **restart the server to pick up config changes**
 (the scanner re-reads its own config each loop).
@@ -373,9 +423,10 @@ linted/formatted yet — see "Known Behavior".
 
 ## Troubleshooting
 
-- **Empty model columns**: ensure model responses key `results` by the same
-  `img_name` format (`{Array_id-1}_{Pad_no}.jpg`).
-- **`400 CSV missing required columns`**: the CSV needs `Array_id` and `Pad_no`.
+- **Required-model fallback**: inspect `errors` and `reason`; missing or invalid
+  keys for the SINIC image-name template intentionally return all rows as `23`.
+- **`400 CSV missing required columns`**: check the configured image-name
+  template fields, normally `component_name`, `Array_id`, and `Pad_id`.
 - **`high cover` never fires**: `cover%` needs `paste_pixels` (paste model) and
   `pad_area` (needs `Width` + `Length`). Paste is disabled by default.
 - **Writes fail / `500`**: check `external_output_root` / `backup_output_root`
@@ -398,8 +449,9 @@ linted/formatted yet — see "Known Behavior".
   every row is marked `is_pass = 23` (fail), the three CSVs are still written, and
   the response is `{"status": "finished scanning", "skipped": true, "reason":
   "images_exceed_threshold"}`.
-- **A single model endpoint failure** does not fail the job: its message is added
-  to the response `errors` array and processing continues (HTTP 200).
+- **Required model failure policy**: an endpoint error, deadline timeout,
+  incomplete key set, or invalid scalar publishes an HTTP-200 fail-safe result
+  with every row set to `23`. Optional-model failures continue normally.
 - **`log/`, `backup/`, `data/`** and model weights are git-ignored.
 - **Binds `127.0.0.1` by default** (`server.host`): the only client is the
   same-host scanner. Set `server.host` to a wider interface only if needed.

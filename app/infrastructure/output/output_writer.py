@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 import pandas as pd
@@ -66,6 +67,7 @@ class OutputWriter:
         output_frame: pd.DataFrame,
         processing_frame: pd.DataFrame,
         source_csv: Path | None = None,
+        on_primary_written: Callable[[], None] | None = None,
     ) -> list[str]:
         """Write the three output CSVs and return their paths.
 
@@ -76,6 +78,8 @@ class OutputWriter:
             month: 2-digit month for the backup path.
             output_frame: The string-typed original frame (for ``is_pass_only``).
             processing_frame: The full enriched frame (carrying ``is_pass``).
+            on_primary_written: Optional callback invoked immediately after the
+                primary file's atomic write, before local backup/debug writes.
 
         Returns:
             The written paths ``[primary, backup, processed]``.
@@ -102,6 +106,8 @@ class OutputWriter:
         else:
             primary_path = self._external_root / job_name / _AI_SUBFOLDER / csv_name
             self._csv.write(primary_frame, primary_path)
+        if on_primary_written is not None:
+            on_primary_written()
         self._csv.write(is_pass_frame, backup_path)
         self._csv.write(processing_frame, processed_path)
         return [str(primary_path), str(backup_path), str(processed_path)]

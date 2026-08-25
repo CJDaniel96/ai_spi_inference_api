@@ -19,7 +19,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from app.core.errors import ConfigError
 
@@ -81,7 +81,7 @@ class ProcessingConfig(BaseModel):
     # that value directly as the model-result join key.
     image_name_source_column: str | None = None
     # Optional format using ``{csv_stem}`` plus CSV column names, for example:
-    # ``{csv_stem}_{component_name}_{Array_id}_{Pad_no}.jpg``.
+    # ``{csv_stem}_{component_name}_{Array_id}_{Pad_id}.jpg``.
     image_name_template: str | None = None
 
 
@@ -92,9 +92,12 @@ class ModelClientConfig(BaseModel):
 
     name: str
     enabled: bool = True
+    # A required model must succeed before normal 22/23 classification is used.
+    # Disabled clients are never run and therefore never participate in this check.
+    required: bool = True
     url: str
     target_column: str
-    timeout_seconds: int = 300
+    timeout_seconds: int = Field(default=300, gt=0)
 
 
 class DefectRuleConfig(BaseModel):
@@ -134,6 +137,36 @@ class OutputConfig(BaseModel):
     require_existing_is_pass: bool = True
 
 
+class ReliabilityConfig(BaseModel):
+    """Production deadline and fail-safe behavior.
+
+    ``primary_return_deadline_seconds`` is the end-to-end target for making the
+    machine-facing primary CSV visible. The current synchronous API measures it
+    from the beginning of ``/process``; the future ingest worker will carry the
+    folder-ready timestamp so the same setting covers discovery/copy time too.
+
+    ``primary_publish_reserve_seconds`` is held back from model inference so a
+    fail-safe CSV still has time to be generated and published before the target.
+    The reserve is a scheduling budget, not a hard filesystem guarantee.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    primary_return_deadline_seconds: float = Field(default=30.0, gt=0)
+    primary_publish_reserve_seconds: float = Field(default=5.0, ge=0)
+    scanner_http_timeout_grace_seconds: float = Field(default=5.0, ge=0)
+    required_model_failure_policy: Literal["fail_all_23"] = "fail_all_23"
+
+    @model_validator(mode="after")
+    def _reserve_must_fit_deadline(self) -> ReliabilityConfig:
+        if self.primary_publish_reserve_seconds >= self.primary_return_deadline_seconds:
+            raise ValueError(
+                "primary_publish_reserve_seconds must be less than "
+                "primary_return_deadline_seconds"
+            )
+        return self
+
+
 class LoggingConfig(BaseModel):
     """Logging destinations and request-log rotation policy.
 
@@ -167,11 +200,20 @@ class AppConfig(BaseModel):
     model_clients: list[ModelClientConfig] = Field(default_factory=list)
     defect_rules: DefectRuleConfig
     output: OutputConfig = Field(default_factory=OutputConfig)
+    reliability: ReliabilityConfig = Field(default_factory=ReliabilityConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
 
     def enabled_model_clients(self) -> list[ModelClientConfig]:
         """Return only the model clients with ``enabled=True``."""
         return [client for client in self.model_clients if client.enabled]
+
+    def required_enabled_model_clients(self) -> list[ModelClientConfig]:
+        """Return enabled model clients that must succeed for normal output."""
+        return [
+            client
+            for client in self.model_clients
+            if client.enabled and client.required
+        ]
 
 
 def _resolve_config_path(path: Path | None) -> Path:

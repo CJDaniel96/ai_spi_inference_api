@@ -11,12 +11,13 @@
     "folder_images_num_threshold": 500,
     "image_extensions": [".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif"],
     "image_name_source_column": null,
-    "image_name_template": "{csv_stem}_{component_name}_{Array_id}_{Pad_no}.jpg"
+    "image_name_template": "{csv_stem}_{component_name}_{Array_id}_{Pad_id}.jpg"
   },
   "model_clients": [
     {
       "name": "anomaly",
       "enabled": true,
+      "required": true,
       "url": "http://127.0.0.1:8000/inference",
       "target_column": "anomaly_score",
       "timeout_seconds": 300
@@ -24,6 +25,7 @@
     {
       "name": "paste",
       "enabled": false,
+      "required": false,
       "url": "http://127.0.0.1:8001/inference",
       "target_column": "paste_pixels",
       "timeout_seconds": 300
@@ -31,6 +33,7 @@
     {
       "name": "distance",
       "enabled": true,
+      "required": true,
       "url": "http://127.0.0.1:8002/inference",
       "target_column": "min_pad_distance",
       "timeout_seconds": 300
@@ -49,6 +52,12 @@
     "primary_path_layout": "machine_return",
     "preserve_job_folder": false,
     "require_existing_is_pass": true
+  },
+  "reliability": {
+    "primary_return_deadline_seconds": 30.0,
+    "primary_publish_reserve_seconds": 5.0,
+    "scanner_http_timeout_grace_seconds": 5.0,
+    "required_model_failure_policy": "fail_all_23"
   },
   "logging": {
     "log_dir": "log",

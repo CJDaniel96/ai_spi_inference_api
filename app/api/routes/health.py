@@ -23,7 +23,8 @@ async def ready(response: Response) -> ReadinessResponse:
 
     Returns 200 when the config loads (the service can accept jobs) and 503 when
     it cannot. Model reachability is reported for diagnostics but does not gate
-    readiness, since ``/process`` tolerates a single model failure.
+    readiness, since ``/process`` has a configured all-23 fail-safe policy for a
+    required-model failure.
     """
     result = await check_readiness()
     if not result.ready:

@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from scan_jobs import FailureTracker, backoff_seconds, classify_status
+from scan_jobs import (
+    FailureTracker,
+    backoff_seconds,
+    classify_status,
+    process_http_timeout_seconds,
+)
 
 
 def test_sinic_input_mode_does_not_require_done_file(tmp_path) -> None:
@@ -34,6 +39,17 @@ def test_classify_status() -> None:
     assert classify_status(404) == "client_error"
     assert classify_status(500) == "server_error"
     assert classify_status(-1) == "server_error"
+
+
+def test_process_http_timeout_is_deadline_plus_transport_grace() -> None:
+    cfg = {
+        "reliability": {
+            "primary_return_deadline_seconds": 30,
+            "scanner_http_timeout_grace_seconds": 5,
+        }
+    }
+
+    assert process_http_timeout_seconds(cfg) == 35.0
 
 
 def test_backoff_is_exponential_and_capped() -> None:

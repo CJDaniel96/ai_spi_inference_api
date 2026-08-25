@@ -33,6 +33,7 @@ def _write_config(tmp_path: Path) -> Path:
             {
                 "name": "anomaly",
                 "enabled": True,
+                "required": True,
                 "url": "http://model/inference",
                 "target_column": "anomaly_score",
                 "timeout_seconds": 5,
@@ -40,6 +41,7 @@ def _write_config(tmp_path: Path) -> Path:
             {
                 "name": "distance",
                 "enabled": True,
+                "required": True,
                 "url": "http://model/inference",
                 "target_column": "min_pad_distance",
                 "timeout_seconds": 5,
@@ -131,7 +133,7 @@ def test_missing_job_folder_returns_400(client: TestClient, tmp_path: Path) -> N
     assert "detail" in response.json()
 
 
-def test_partial_model_failure_returns_200_with_errors(
+def test_required_model_failure_returns_200_fail_safe_result(
     client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     job = _make_job(tmp_path)
@@ -157,6 +159,8 @@ def test_partial_model_failure_returns_200_with_errors(
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "ok"
+    assert body["fallback"] is True
+    assert body["reason"] == "required_model_failure"
     assert body["errors"] == ["distance boom"]
 
 

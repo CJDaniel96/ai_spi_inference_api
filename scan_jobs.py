@@ -92,7 +92,7 @@ def save_registry(registry_path: Path, registry: dict) -> None:
 
 
 def http_post_with_curl(
-    url: str, payload: dict, timeout_sec: int = 30
+    url: str, payload: dict, timeout_sec: float = 30.0
 ) -> tuple[int, str]:
     # Use curl.exe to POST JSON and emit only HTTP status code
     body = json.dumps(payload, ensure_ascii=False)
@@ -123,6 +123,14 @@ def http_post_with_curl(
         return -1, "curl.exe not found"
     except Exception as e:
         return -1, str(e)
+
+
+def process_http_timeout_seconds(cfg: dict) -> float:
+    """Return scanner wait time: production deadline plus transport grace."""
+    reliability = cfg.get("reliability", {})
+    deadline = float(reliability.get("primary_return_deadline_seconds", 30.0))
+    grace = float(reliability.get("scanner_http_timeout_grace_seconds", 5.0))
+    return max(1.0, deadline + grace)
 
 
 def http_get_status_with_curl(url: str, timeout_sec: int = 5) -> tuple[int, str]:
@@ -285,9 +293,11 @@ def run_sinic_timestamp_scanner(
         settle_seconds=settle_seconds,
         allow_no_images=allow_no_images,
     )
+    process_timeout = process_http_timeout_seconds(cfg)
 
     logger.info("Scanner input mode: sinic_timestamp")
     logger.info("Settle window: %.3fs", settle_seconds)
+    logger.info("Process response timeout: %.3fs", process_timeout)
     while True:
         today_date = dt.date.today()
         today_key = today_date.strftime("%Y-%m-%d")
@@ -315,7 +325,9 @@ def run_sinic_timestamp_scanner(
                 len(job.csv_files),
                 len(job.image_files),
             )
-            status, err = http_post_with_curl(process_api_url, payload)
+            status, err = http_post_with_curl(
+                process_api_url, payload, timeout_sec=process_timeout
+            )
             if 200 <= status <= 299:
                 retry_tracker.record_success(key)
                 registry.setdefault(today_key, []).append(job_id)
@@ -384,6 +396,8 @@ def main() -> int:
     logger.info(f"Process API: {process_api_url}")
     logger.info(f"Registry: {registry_path}")
     logger.info(f"Interval: {rescan_interval:.3f}s")
+    process_timeout = process_http_timeout_seconds(cfg)
+    logger.info(f"Process response timeout: {process_timeout:.3f}s")
 
     if cfg.get("scanner_input_mode", "legacy_done") == "sinic_timestamp":
         return run_sinic_timestamp_scanner(
@@ -436,7 +450,9 @@ def main() -> int:
             payload = {"job_folder": job_folder_payload}
 
             logger.info(f"Processing job {today}/{job_id} ...")
-            status, err = http_post_with_curl(process_api_url, payload)
+            status, err = http_post_with_curl(
+                process_api_url, payload, timeout_sec=process_timeout
+            )
 
             if 200 <= status <= 299:
                 # Mark as processed

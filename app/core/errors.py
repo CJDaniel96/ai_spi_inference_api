@@ -13,8 +13,8 @@ HTTP mapping:
     * CsvFileNotFoundError      -> 400
     * CsvSchemaError            -> 400
     * OutputWriteError          -> 500
-    * ModelClientError          -> 502 (a single model failure is not raised;
-      it is collected into the response ``errors`` array and returns 200)
+    * ModelClientError          -> 502 (client adapters normally return typed
+      error results; required failures become an HTTP-200 all-23 fallback)
     * any other Exception       -> 500 (generic message, traceback logged)
 """
 

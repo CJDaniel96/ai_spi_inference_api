@@ -57,5 +57,8 @@ class ProcessJobResponse(BaseModel):
     errors: list[str] = Field(default_factory=list)
     csv_count: int = 0
     skipped: bool | None = None
+    fallback: bool | None = None
     reason: str | None = None
     img_numbers: int | None = None
+    primary_return_latency_ms: float | None = None
+    deadline_met: bool | None = None

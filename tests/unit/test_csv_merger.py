@@ -67,13 +67,13 @@ def test_add_image_name_column_from_sinic_template() -> None:
         {
             "component_name": ["C1012", "J1701", "J1701", "C1007"],
             "Array_id": [116, 133, 133, 9],
-            "Pad_no": [26109, 27345, 27346, 32758],
+            "Pad_id": [26109, 27345, 27346, 32758],
         }
     )
 
     out = CsvMerger().add_image_name_column(
         df,
-        template="{csv_stem}_{component_name}_{Array_id}_{Pad_no}.jpg",
+        template="{csv_stem}_{component_name}_{Array_id}_{Pad_id}.jpg",
         csv_stem="20260817093032_MA8067770C917A",
     )
 

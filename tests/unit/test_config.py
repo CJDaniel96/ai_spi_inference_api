@@ -84,6 +84,9 @@ def test_loads_real_repo_config() -> None:
     assert config.defect_rules.anomaly_threshold == 0.9
     assert config.defect_rules.short_distance_threshold == 6.8
     assert config.processing.folder_images_num_threshold == 500
+    assert config.reliability.primary_return_deadline_seconds == 30.0
+    assert config.reliability.primary_publish_reserve_seconds == 5.0
+    assert config.reliability.required_model_failure_policy == "fail_all_23"
     assert len(config.model_clients) == 3
 
 
@@ -97,6 +100,18 @@ def test_enabled_model_clients_excludes_disabled(tmp_path: Path) -> None:
     assert names == ["anomaly", "distance"]
     assert all(client.enabled for client in enabled)
     assert "paste" not in names
+
+
+def test_required_enabled_model_clients_excludes_optional_and_disabled(
+    tmp_path: Path,
+) -> None:
+    """Only enabled+required clients gate normal 22/23 output."""
+    data = _valid_config_dict()
+    data["model_clients"][1]["required"] = False
+    data["model_clients"][2]["required"] = False
+    config = load_config(_write_config(tmp_path, data))
+
+    assert [c.name for c in config.required_enabled_model_clients()] == ["anomaly"]
 
 
 def test_paste_client_disabled_by_default() -> None:
@@ -137,6 +152,52 @@ def test_invalid_primary_csv_mode_raises_validation_error(tmp_path: Path) -> Non
         load_config(_write_config(tmp_path, data))
 
     assert "primary_csv_mode" in str(exc_info.value)
+
+
+def test_reliability_defaults_apply_to_legacy_config(tmp_path: Path) -> None:
+    """Older config files get the production-safe deadline defaults."""
+    config = load_config(_write_config(tmp_path, _valid_config_dict()))
+
+    assert config.reliability.primary_return_deadline_seconds == 30.0
+    assert config.reliability.primary_publish_reserve_seconds == 5.0
+    assert config.reliability.scanner_http_timeout_grace_seconds == 5.0
+    assert config.reliability.required_model_failure_policy == "fail_all_23"
+
+
+@pytest.mark.parametrize("deadline", [0, -1])
+def test_non_positive_primary_deadline_is_rejected(
+    tmp_path: Path, deadline: int
+) -> None:
+    data = _valid_config_dict()
+    data["reliability"] = {"primary_return_deadline_seconds": deadline}
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_config(_write_config(tmp_path, data))
+
+    assert "primary_return_deadline_seconds" in str(exc_info.value)
+
+
+def test_publish_reserve_must_be_less_than_deadline(tmp_path: Path) -> None:
+    data = _valid_config_dict()
+    data["reliability"] = {
+        "primary_return_deadline_seconds": 10,
+        "primary_publish_reserve_seconds": 10,
+    }
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_config(_write_config(tmp_path, data))
+
+    assert "primary_publish_reserve_seconds" in str(exc_info.value)
+
+
+def test_non_positive_model_timeout_is_rejected(tmp_path: Path) -> None:
+    data = _valid_config_dict()
+    data["model_clients"][0]["timeout_seconds"] = 0
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_config(_write_config(tmp_path, data))
+
+    assert "timeout_seconds" in str(exc_info.value)
 
 
 def test_to_legacy_rule_mapping_matches_config() -> None:

@@ -18,9 +18,9 @@ _Probe = Callable[[AppConfig], Awaitable[list[EndpointHealth]]]
 class ReadinessResult:
     """Outcome of a readiness check.
 
-    ``ready`` is gated only on config loading: ``/process`` degrades gracefully
-    when a model is down (the failure is reported in the response ``errors``), so
-    model reachability is surfaced for diagnostics but does not flip readiness.
+    ``ready`` is gated only on config loading: ``/process`` publishes a fail-safe
+    all-23 result when a required model is down, so model reachability is surfaced
+    for diagnostics but does not flip readiness.
 
     Attributes:
         config_ok: Whether the application config loaded successfully.

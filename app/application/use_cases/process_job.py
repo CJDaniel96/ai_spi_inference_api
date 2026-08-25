@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -22,6 +23,7 @@ if TYPE_CHECKING:
 
 from app.api.schemas.requests import ProcessJobRequest
 from app.core.config import AppConfig, get_config, resolve_under_project_root
+from app.core.errors import CsvSchemaError
 from app.core.logging import get_logger
 from app.domain.entities.defect import FAIL_CODE, DefectLabel
 from app.domain.entities.inference_result import ModelInferenceResult
@@ -43,6 +45,8 @@ _TZ8 = timezone(timedelta(hours=8))
 _OK_STATUS = "ok"
 _SKIP_STATUS = "finished scanning"
 _SKIP_REASON = "images_exceed_threshold"
+_FALLBACK_REASON_REQUIRED_MODEL_FAILURE = "required_model_failure"
+_FALLBACK_REASON_REQUIRED_MODEL_TIMEOUT = "required_model_timeout"
 
 _DEFECT_COLUMN = "ai_defect_name"
 _IS_PASS_COLUMN = "is_pass"
@@ -156,17 +160,82 @@ class ProcessJobUseCase:
                 threshold,
             )
 
-        model_results = await self._run_model_clients(
-            self._config,
-            job_folder,
-            logger=self._logger,
-            req_id=req_id,
-            http_client=self._http_client,
-        )
+        expected_image_keys = await asyncio.to_thread(self._expected_image_keys, job)
+
+        inference_budget = self._inference_budget_seconds(job_start)
+        if inference_budget <= 0:
+            message = "Primary return deadline exhausted before inference started"
+            return await asyncio.to_thread(
+                self._process_all_failed,
+                job,
+                req_id,
+                request_start_at,
+                job_start,
+                year,
+                month,
+                _FALLBACK_REASON_REQUIRED_MODEL_TIMEOUT,
+                [message],
+                [],
+            )
+
+        try:
+            model_results = await asyncio.wait_for(
+                self._run_model_clients(
+                    self._config,
+                    job_folder,
+                    logger=self._logger,
+                    req_id=req_id,
+                    http_client=self._http_client,
+                ),
+                timeout=inference_budget,
+            )
+        except TimeoutError:
+            message = (
+                "Required model inference exceeded its deadline budget "
+                f"({inference_budget:.3f}s)"
+            )
+            self._logger.error(
+                "event=process.required_model_timeout req_id=%s "
+                "job_folder=%s inference_budget_seconds=%.3f",
+                req_id,
+                job_folder,
+                inference_budget,
+            )
+            return await asyncio.to_thread(
+                self._process_all_failed,
+                job,
+                req_id,
+                request_start_at,
+                job_start,
+                year,
+                month,
+                _FALLBACK_REASON_REQUIRED_MODEL_TIMEOUT,
+                [message],
+                [],
+            )
+
         errors = [result.error for result in model_results if result.error]
+        required_failures = self._required_model_failures(
+            model_results, expected_image_keys=expected_image_keys
+        )
+        if required_failures:
+            fallback_errors = list(dict.fromkeys([*errors, *required_failures]))
+            return await asyncio.to_thread(
+                self._process_all_failed,
+                job,
+                req_id,
+                request_start_at,
+                job_start,
+                year,
+                month,
+                _FALLBACK_REASON_REQUIRED_MODEL_FAILURE,
+                fallback_errors,
+                model_results,
+            )
 
         metrics = MetricsCollector()
         saved_files: list[str] = []
+        primary_return_times: list[float] = []
         for csv_path in job.csv_files:
             # CSV read/merge/classify/write is CPU- and IO-bound (pandas) -> offload.
             saved_files.extend(
@@ -179,10 +248,14 @@ class ProcessJobUseCase:
                     year,
                     month,
                     req_id,
+                    lambda: primary_return_times.append(time.perf_counter()),
                 )
             )
 
         request_latency_ms = (time.perf_counter() - job_start) * 1000.0
+        primary_return_latency_ms, deadline_met = self._primary_deadline_metrics(
+            job_start, primary_return_times
+        )
         await asyncio.to_thread(
             self._write_log_row,
             job=job,
@@ -193,7 +266,8 @@ class ProcessJobUseCase:
         )
         self._logger.info(
             "event=process.summary req_id=%s job_folder=%s csv_count=%d "
-            "images=%d saved_files=%d errors=%d request_latency_ms=%.3f",
+            "images=%d saved_files=%d errors=%d request_latency_ms=%.3f "
+            "primary_return_latency_ms=%.3f deadline_met=%s",
             req_id,
             job_folder,
             len(job.csv_files),
@@ -201,6 +275,8 @@ class ProcessJobUseCase:
             len(saved_files),
             len(errors),
             request_latency_ms,
+            primary_return_latency_ms,
+            deadline_met,
         )
         self._logger.info("event=process.end req_id=%s status=ok", req_id)
         return {
@@ -208,7 +284,103 @@ class ProcessJobUseCase:
             "saved_files": saved_files,
             "errors": errors,
             "csv_count": len(job.csv_files),
+            "primary_return_latency_ms": primary_return_latency_ms,
+            "deadline_met": deadline_met,
         }
+
+    def _primary_deadline_metrics(
+        self, job_start: float, primary_return_times: list[float]
+    ) -> tuple[float, bool]:
+        """Return latency to the last primary atomic write and SLA outcome."""
+        returned_at = (
+            max(primary_return_times) if primary_return_times else time.perf_counter()
+        )
+        latency_ms = (returned_at - job_start) * 1000.0
+        deadline_ms = self._config.reliability.primary_return_deadline_seconds * 1000.0
+        return latency_ms, latency_ms <= deadline_ms
+
+    def _inference_budget_seconds(self, job_start: float) -> float:
+        """Return time available to models while preserving the publish reserve."""
+        reliability = self._config.reliability
+        elapsed = time.perf_counter() - job_start
+        return (
+            reliability.primary_return_deadline_seconds
+            - reliability.primary_publish_reserve_seconds
+            - elapsed
+        )
+
+    def _required_model_failures(
+        self,
+        model_results: list[ModelInferenceResult],
+        *,
+        expected_image_keys: set[str],
+    ) -> list[str]:
+        """Describe incomplete or invalid results from required models."""
+        results_by_name = {result.name: result for result in model_results}
+        failures: list[str] = []
+        for client in self._config.required_enabled_model_clients():
+            result = results_by_name.get(client.name)
+            if result is None:
+                failures.append(f"Required model '{client.name}' returned no result")
+            elif result.error:
+                failures.append(result.error)
+            elif result.target_column != client.target_column:
+                failures.append(
+                    f"Required model '{client.name}' returned unexpected target "
+                    f"column {result.target_column!r}"
+                )
+            else:
+                missing = sorted(expected_image_keys - result.results.keys())
+                if missing:
+                    failures.append(
+                        f"Required model '{client.name}' is missing "
+                        f"{len(missing)} image result(s); sample={missing[:5]!r}"
+                    )
+                    continue
+                invalid = [
+                    key
+                    for key in sorted(expected_image_keys)
+                    if not self._is_finite_model_value(result.results[key])
+                ]
+                if invalid:
+                    failures.append(
+                        f"Required model '{client.name}' returned invalid values for "
+                        f"{len(invalid)} image(s); sample={invalid[:5]!r}"
+                    )
+        return failures
+
+    def _expected_image_keys(self, job: Job) -> set[str]:
+        """Build and validate the complete image-key set across a job's CSVs."""
+        expected: set[str] = set()
+        for csv_path in job.csv_files:
+            frame = self._csv_repo.read_for_processing(csv_path)
+            frame = self._merger.add_image_name_column(
+                frame,
+                source_column=self._config.processing.image_name_source_column,
+                template=self._config.processing.image_name_template,
+                csv_stem=csv_path.stem,
+            )
+            image_names = frame["img_name"].astype(str)
+            duplicates = image_names[image_names.duplicated()].unique().tolist()
+            if duplicates:
+                raise CsvSchemaError(
+                    f"CSV contains duplicate image keys: {duplicates[:5]!r} "
+                    f"({csv_path})"
+                )
+            expected.update(image_names.tolist())
+        if not expected:
+            raise CsvSchemaError(f"Job CSV contains no data rows: {job.job_folder}")
+        return expected
+
+    @staticmethod
+    def _is_finite_model_value(value: float | None) -> bool:
+        """Return whether a required scalar model result is numeric and finite."""
+        if value is None:
+            return False
+        try:
+            return math.isfinite(float(value))
+        except (TypeError, ValueError):
+            return False
 
     def _process_csv(
         self,
@@ -219,6 +391,7 @@ class ProcessJobUseCase:
         year: str,
         month: str,
         req_id: str,
+        on_primary_written: Callable[[], None] | None = None,
     ) -> list[str]:
         """Enrich, classify, and write outputs for a single CSV."""
         processing_df = self._csv_repo.read_for_processing(csv_path)
@@ -248,6 +421,7 @@ class ProcessJobUseCase:
             month=month,
             output_frame=output_df,
             processing_frame=processing_df,
+            on_primary_written=on_primary_written,
         )
 
     def _process_skipped(
@@ -262,6 +436,7 @@ class ProcessJobUseCase:
     ) -> dict[str, Any]:
         """Handle an oversized job: mark all rows failed without inference."""
         saved_files: list[str] = []
+        primary_return_times: list[float] = []
         fail_count = 0
         for csv_path in job.csv_files:
             processing_df = self._build_skip_frame(csv_path)
@@ -276,10 +451,16 @@ class ProcessJobUseCase:
                     month=month,
                     output_frame=output_df,
                     processing_frame=processing_df,
+                    on_primary_written=lambda: primary_return_times.append(
+                        time.perf_counter()
+                    ),
                 )
             )
 
         request_latency_ms = (time.perf_counter() - job_start) * 1000.0
+        primary_return_latency_ms, deadline_met = self._primary_deadline_metrics(
+            job_start, primary_return_times
+        )
         self._write_log_row(
             job=job,
             model_results=[],
@@ -289,13 +470,16 @@ class ProcessJobUseCase:
         )
         self._logger.info(
             "event=process.skip req_id=%s job_folder=%s reason=%s "
-            "images=%d threshold=%d request_latency_ms=%.3f",
+            "images=%d threshold=%d request_latency_ms=%.3f "
+            "primary_return_latency_ms=%.3f deadline_met=%s",
             req_id,
             str(job.job_folder),
             _SKIP_REASON,
             job.image_count,
             threshold,
             request_latency_ms,
+            primary_return_latency_ms,
+            deadline_met,
         )
         return {
             "status": _SKIP_STATUS,
@@ -305,6 +489,80 @@ class ProcessJobUseCase:
             "csv_count": len(job.csv_files),
             "saved_files": saved_files,
             "errors": [],
+            "primary_return_latency_ms": primary_return_latency_ms,
+            "deadline_met": deadline_met,
+        }
+
+    def _process_all_failed(
+        self,
+        job: Job,
+        req_id: str,
+        request_start_at: str,
+        job_start: float,
+        year: str,
+        month: str,
+        reason: str,
+        errors: list[str],
+        model_results: list[ModelInferenceResult],
+    ) -> dict[str, Any]:
+        """Publish a fail-safe result with every row set to ``is_pass=23``."""
+        saved_files: list[str] = []
+        primary_return_times: list[float] = []
+        fail_count = 0
+        for csv_path in job.csv_files:
+            processing_df = self._build_skip_frame(csv_path)
+            fail_count += len(processing_df)
+            output_df = self._csv_repo.read_for_output(csv_path)
+            saved_files.extend(
+                self._output_writer.write(
+                    job_name=job.job_folder.name,
+                    csv_name=csv_path.name,
+                    source_csv=csv_path,
+                    year=year,
+                    month=month,
+                    output_frame=output_df,
+                    processing_frame=processing_df,
+                    on_primary_written=lambda: primary_return_times.append(
+                        time.perf_counter()
+                    ),
+                )
+            )
+
+        request_latency_ms = (time.perf_counter() - job_start) * 1000.0
+        primary_return_latency_ms, deadline_met = self._primary_deadline_metrics(
+            job_start, primary_return_times
+        )
+        self._write_log_row(
+            job=job,
+            model_results=model_results,
+            counts=JobCounts(fail_count=fail_count),
+            request_start_at=request_start_at,
+            request_latency_ms=request_latency_ms,
+        )
+        self._logger.error(
+            "event=process.fallback req_id=%s job_folder=%s reason=%s "
+            "errors=%s rows_failed=%d request_latency_ms=%.3f "
+            "primary_return_latency_ms=%.3f "
+            "deadline_met=%s",
+            req_id,
+            str(job.job_folder),
+            reason,
+            repr(errors),
+            fail_count,
+            request_latency_ms,
+            primary_return_latency_ms,
+            deadline_met,
+        )
+        return {
+            "status": _OK_STATUS,
+            "fallback": True,
+            "reason": reason,
+            "img_numbers": job.image_count,
+            "csv_count": len(job.csv_files),
+            "saved_files": saved_files,
+            "errors": errors,
+            "primary_return_latency_ms": primary_return_latency_ms,
+            "deadline_met": deadline_met,
         }
 
     def _build_skip_frame(self, csv_path: Path) -> pd.DataFrame:

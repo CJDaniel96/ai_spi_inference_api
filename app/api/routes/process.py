@@ -25,7 +25,8 @@ async def process(payload: ProcessJobRequest, request: Request) -> dict[str, Any
     HTTP client. Typed application errors (missing folder/CSV, CSV schema, output
     write, config) are mapped to HTTP responses by the app-level exception
     handlers registered in :func:`app.main.create_app`; a single model-client
-    failure is reported in the ``errors`` array with a 200.
+    optional-model failure is reported in the ``errors`` array with a 200;
+    required-model failure returns a 200 fail-safe result with all rows set to 23.
 
     Args:
         payload: The parsed request body carrying ``job_folder``.
