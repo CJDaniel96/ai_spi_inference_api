@@ -95,6 +95,11 @@ def test_loads_real_repo_config() -> None:
     assert config.reliability.primary_return_deadline_seconds == 30.0
     assert config.reliability.primary_publish_reserve_seconds == 5.0
     assert config.reliability.required_model_failure_policy == "fail_all_23"
+    assert config.pipeline.enabled is True
+    assert config.pipeline.database_path.endswith("state/pipeline.sqlite3")
+    assert config.pipeline.staging_root is None
+    assert config.pipeline.source_settle_seconds == 2.0
+    assert config.pipeline.publisher_poll_interval_seconds == 0.05
     assert len(config.model_clients) == 3
 
 
@@ -202,6 +207,167 @@ def test_reliability_defaults_apply_to_legacy_config(tmp_path: Path) -> None:
     assert config.reliability.primary_publish_reserve_seconds == 5.0
     assert config.reliability.scanner_http_timeout_grace_seconds == 5.0
     assert config.reliability.required_model_failure_policy == "fail_all_23"
+
+
+def test_pipeline_defaults_keep_legacy_deployments_disabled(tmp_path: Path) -> None:
+    config = load_config(_write_config(tmp_path, _valid_config_dict()))
+
+    assert config.pipeline.enabled is False
+    assert config.pipeline.database_path == "data/pipeline/jobs.sqlite3"
+    assert config.pipeline.staging_root is None
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "source_settle_seconds",
+        "ingest_poll_interval_seconds",
+        "inference_poll_interval_seconds",
+        "publisher_poll_interval_seconds",
+        "publisher_lease_seconds",
+        "publisher_heartbeat_interval_seconds",
+        "worker_lease_seconds",
+    ],
+)
+def test_pipeline_timing_values_are_validated(tmp_path: Path, field: str) -> None:
+    data = _valid_config_dict()
+    data["pipeline"] = {field: -1}
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_config(_write_config(tmp_path, data))
+
+    assert field in str(exc_info.value)
+
+
+def test_enabled_pipeline_requires_watch_root_and_long_enough_lease(
+    tmp_path: Path,
+) -> None:
+    data = _valid_config_dict()
+    data["pipeline"] = {"enabled": True, "worker_lease_seconds": 60}
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_config(_write_config(tmp_path, data))
+
+    assert "watch_root" in str(exc_info.value)
+
+    data["pipeline"] = {
+        "enabled": True,
+        "watch_root": "D:/watch",
+        "worker_lease_seconds": 30,
+    }
+    with pytest.raises(ConfigError) as exc_info:
+        load_config(_write_config(tmp_path, data))
+
+    assert "worker_lease_seconds" in str(exc_info.value)
+
+
+def test_enabled_pipeline_publisher_lease_must_fit_publish_reserve(
+    tmp_path: Path,
+) -> None:
+    data = _valid_config_dict()
+    data["pipeline"] = {
+        "enabled": True,
+        "watch_root": "D:/watch",
+        "worker_lease_seconds": 60,
+        "publisher_lease_seconds": 5,
+        "publisher_heartbeat_interval_seconds": 0.25,
+    }
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_config(_write_config(tmp_path, data))
+
+    assert "publisher_lease_seconds" in str(exc_info.value)
+
+
+def test_enabled_pipeline_publisher_heartbeat_must_be_shorter_than_lease(
+    tmp_path: Path,
+) -> None:
+    data = _valid_config_dict()
+    data["pipeline"] = {
+        "enabled": True,
+        "watch_root": "D:/watch",
+        "worker_lease_seconds": 60,
+        "publisher_lease_seconds": 1,
+        "publisher_heartbeat_interval_seconds": 1,
+    }
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_config(_write_config(tmp_path, data))
+
+    assert "publisher_heartbeat_interval_seconds" in str(exc_info.value)
+
+
+@pytest.mark.parametrize("duplicate_field", ["name", "target_column"])
+def test_model_client_identity_fields_must_be_unique(
+    tmp_path: Path,
+    duplicate_field: str,
+) -> None:
+    data = _valid_config_dict()
+    data["model_clients"][1][duplicate_field] = data["model_clients"][0][
+        duplicate_field
+    ]
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_config(_write_config(tmp_path, data))
+
+    assert duplicate_field in str(exc_info.value)
+
+
+@pytest.mark.parametrize("field", ["name", "url", "target_column"])
+def test_model_client_identity_fields_must_not_be_blank(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    data = _valid_config_dict()
+    data["model_clients"][0][field] = "   "
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_config(_write_config(tmp_path, data))
+
+    assert field in str(exc_info.value)
+
+
+def test_model_client_url_must_be_http(tmp_path: Path) -> None:
+    data = _valid_config_dict()
+    data["model_clients"][0]["url"] = "not-a-url"
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_config(_write_config(tmp_path, data))
+
+    assert "url" in str(exc_info.value)
+
+
+def test_enabled_pipeline_requires_a_required_model(tmp_path: Path) -> None:
+    data = _valid_config_dict()
+    for client in data["model_clients"]:
+        client["required"] = False
+    data["output"]["primary_path_layout"] = "machine_return"
+    data["pipeline"] = {
+        "enabled": True,
+        "watch_root": "D:/watch",
+        "worker_lease_seconds": 60,
+    }
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_config(_write_config(tmp_path, data))
+
+    assert "required model" in str(exc_info.value)
+
+
+def test_enabled_pipeline_requires_machine_return_output_contract(
+    tmp_path: Path,
+) -> None:
+    data = _valid_config_dict()
+    data["pipeline"] = {
+        "enabled": True,
+        "watch_root": "D:/watch",
+        "worker_lease_seconds": 60,
+    }
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_config(_write_config(tmp_path, data))
+
+    assert "primary_path_layout" in str(exc_info.value)
 
 
 @pytest.mark.parametrize("deadline", [0, -1])

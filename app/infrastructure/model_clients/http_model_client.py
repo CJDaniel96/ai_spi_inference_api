@@ -61,7 +61,7 @@ class HttpModelClient:
         name: str,
         url: str,
         target_column: str,
-        timeout_seconds: int,
+        timeout_seconds: float,
         http_client: httpx.AsyncClient,
         logger: logging.Logger | None = None,
         req_id: str | None = None,

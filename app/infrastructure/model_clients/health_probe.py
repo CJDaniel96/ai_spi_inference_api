@@ -20,7 +20,8 @@ class EndpointHealth:
     Attributes:
         name: Logical model name.
         url: The probed health URL.
-        healthy: True when the endpoint returned a 2xx status.
+        healthy: True when the endpoint returned 2xx and its payload does not
+            report an unready model.
         detail: Short status/error string for diagnostics.
     """
 
@@ -49,8 +50,7 @@ async def probe_endpoints(
             health_url = urljoin(entry.url, _HEALTH_PATH)
             try:
                 response = await client.get(health_url, timeout=timeout_seconds)
-                healthy = 200 <= response.status_code < 300
-                detail = f"status={response.status_code}"
+                healthy, detail = _response_readiness(response)
             except httpx.HTTPError as exc:
                 healthy = False
                 detail = str(exc) or exc.__class__.__name__
@@ -60,3 +60,33 @@ async def probe_endpoints(
                 )
             )
     return results
+
+
+def _response_readiness(response: httpx.Response) -> tuple[bool, str]:
+    """Interpret both HTTP status and the model server's readiness payload."""
+    if not 200 <= response.status_code < 300:
+        return False, f"status={response.status_code}"
+    try:
+        body = response.json()
+    except ValueError:
+        return True, f"status={response.status_code}"
+    if not isinstance(body, dict):
+        return True, f"status={response.status_code}"
+
+    status = str(body.get("status", "")).strip().lower()
+    model_ready = body.get("model_ready")
+    not_ready_statuses = {
+        "error",
+        "failed",
+        "initializing",
+        "not_ready",
+        "not ready",
+        "unhealthy",
+    }
+    healthy = model_ready is not False and status not in not_ready_statuses
+    detail_parts = [f"status={response.status_code}"]
+    if status:
+        detail_parts.append(f"model_status={status}")
+    if model_ready is not None:
+        detail_parts.append(f"model_ready={model_ready}")
+    return healthy, " ".join(detail_parts)

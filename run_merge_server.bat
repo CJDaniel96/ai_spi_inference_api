@@ -10,7 +10,9 @@ REM ---------------------------------------------------------------------------
 setlocal enableextensions
 cd /d "%~dp0"
 
-set "PYTHON_EXE=C:\Users\Admin\.conda\envs\py312_cu128_j15\python.exe"
+call "%~dp0resolve_python.bat"
+if errorlevel 1 exit /b 1
+if not defined AI_CONFIG_PATH set "AI_CONFIG_PATH=%~dp0config\ai_server.json"
 
 :loop
 echo [%date% %time%] Starting merge server (python -m app.main) ...

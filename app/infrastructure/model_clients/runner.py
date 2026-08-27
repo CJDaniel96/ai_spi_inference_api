@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Callable, Sequence
 
 import httpx
@@ -61,12 +62,79 @@ async def gather_inferences(
     return list(await asyncio.gather(*tasks))
 
 
+async def gather_inferences_until_required_complete(
+    clients: Sequence[ModelClient],
+    required_names: set[str],
+    job_folder: str,
+    *,
+    timeout_seconds: float,
+) -> list[ModelInferenceResult]:
+    """Return as soon as every required model finishes or the budget expires.
+
+    Optional models are still useful when they finish in parallel, but they are
+    cancelled once all required decisions are available so they cannot consume
+    the fallback publication reserve.
+    """
+    if timeout_seconds <= 0:
+        raise ValueError("timeout_seconds must be greater than zero")
+    started = time.perf_counter()
+    tasks = [asyncio.create_task(_safe_infer(client, job_folder)) for client in clients]
+    pending = set(tasks)
+    completed: dict[str, ModelInferenceResult] = {}
+    deadline = asyncio.get_running_loop().time() + timeout_seconds
+    while pending:
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            break
+        done, pending = await asyncio.wait(
+            pending, timeout=remaining, return_when=asyncio.FIRST_COMPLETED
+        )
+        if not done:
+            break
+        for task in done:
+            result = task.result()
+            completed[result.name] = result
+        required_results = [completed.get(name) for name in required_names]
+        if required_names and all(result is not None for result in required_results):
+            break
+
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
+    for task in pending:
+        task.cancel()
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+
+    results: list[ModelInferenceResult] = []
+    for _task, client in zip(tasks, clients, strict=True):
+        name = getattr(client, "name", "unknown")
+        existing = completed.get(name)
+        if existing is not None:
+            results.append(existing)
+            continue
+        required = name in required_names
+        detail = (
+            "exceeded the job inference budget"
+            if required
+            else "was cancelled after required models completed"
+        )
+        results.append(
+            ModelInferenceResult(
+                name=name,
+                target_column=getattr(client, "target_column", ""),
+                results={},
+                request_ms=elapsed_ms,
+                error=f"Model client '{name}' {detail}",
+            )
+        )
+    return results
+
+
 def _build_http_client(
     *,
     name: str,
     url: str,
     target_column: str,
-    timeout_seconds: int,
+    timeout_seconds: float,
     http_client: httpx.AsyncClient,
     logger: logging.Logger,
     req_id: str | None,
@@ -106,6 +174,37 @@ async def _build_and_gather(
         for entry in config.enabled_model_clients()
     ]
     return await gather_inferences(clients, job_folder)
+
+
+async def _build_and_gather_until_required(
+    config: AppConfig,
+    job_folder: str,
+    *,
+    timeout_seconds: float,
+    factory: ClientFactory,
+    logger: logging.Logger,
+    req_id: str | None,
+    http_client: httpx.AsyncClient,
+) -> list[ModelInferenceResult]:
+    clients = [
+        factory(
+            name=entry.name,
+            url=entry.url,
+            target_column=entry.target_column,
+            timeout_seconds=min(entry.timeout_seconds, timeout_seconds),
+            http_client=http_client,
+            logger=logger,
+            req_id=req_id,
+        )
+        for entry in config.enabled_model_clients()
+    ]
+    required_names = {entry.name for entry in config.required_enabled_model_clients()}
+    return await gather_inferences_until_required_complete(
+        clients,
+        required_names,
+        job_folder,
+        timeout_seconds=timeout_seconds,
+    )
 
 
 async def run_enabled_model_clients(
@@ -151,6 +250,41 @@ async def run_enabled_model_clients(
         return await _build_and_gather(
             config,
             job_folder,
+            factory=factory,
+            logger=log,
+            req_id=req_id,
+            http_client=owned_client,
+        )
+
+
+async def run_enabled_model_clients_until(
+    config: AppConfig,
+    job_folder: str,
+    *,
+    timeout_seconds: float,
+    logger: logging.Logger | None = None,
+    req_id: str | None = None,
+    client_factory: ClientFactory | None = None,
+    http_client: httpx.AsyncClient | None = None,
+) -> list[ModelInferenceResult]:
+    """Run enabled models inside the remaining absolute job budget."""
+    log = logger or get_logger("model_client")
+    factory = client_factory or _build_http_client
+    if http_client is not None:
+        return await _build_and_gather_until_required(
+            config,
+            job_folder,
+            timeout_seconds=timeout_seconds,
+            factory=factory,
+            logger=log,
+            req_id=req_id,
+            http_client=http_client,
+        )
+    async with httpx.AsyncClient() as owned_client:
+        return await _build_and_gather_until_required(
+            config,
+            job_folder,
+            timeout_seconds=timeout_seconds,
             factory=factory,
             logger=log,
             req_id=req_id,

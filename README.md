@@ -1,76 +1,130 @@
 # AI SPI Inference API
 
-A FastAPI service that enriches SPI (Solder Paste Inspection) machine output with
-AI model results. It scans a job folder, calls AI inference endpoints in parallel,
-merges their scalar results into the CSV(s), applies rule-based defect
-classification, decides pass/fail, and writes the enriched CSVs plus a per-job
-metrics row.
+A durable three-stage pipeline that enriches SPI (Solder Paste Inspection) machine
+output with AI results and returns the machine-facing CSV within a configurable
+soft-real-time deadline. Ingest, inference, and publication run as independent
+processes coordinated through a local SQLite database. The original synchronous
+FastAPI `/process` workflow remains available for compatibility.
 
 ## What This Project Does
 
-Given a `job_folder` containing SPI CSV(s) and pad images, the service:
+Given a timestamp folder containing SPI CSV(s) and pad images, the durable pipeline:
 
-1. Validates the folder and discovers its CSV files and image count.
-2. Calls the **enabled** model inference endpoints concurrently.
-3. Verifies every required model returned a finite result for every expected image.
-   Required-model errors, incomplete responses, invalid values, and deadline
-   timeouts produce a fail-safe CSV with every row set to `is_pass=23`.
-4. Merges each model's scalar result into the CSV by image name.
-5. Computes derived columns (`pad_area`, `cover%`) when their inputs exist.
-6. Classifies each row's `ai_defect_name` using ordered, config-driven rules.
-7. Sets `is_pass` (22 = pass, 23 = fail).
-8. Writes a **primary**, **backup**, and **processed** CSV, and appends a metrics
-   row to `log/log.csv`.
+1. Watches today's 14-digit timestamp folders and waits for a stable file set.
+2. Parses every CSV and verifies that every expected image exists, is non-empty,
+   and can be decoded.
+3. Persists `ready_at` and the absolute deadline in SQLite, then atomically copies
+   the complete original tree to the AIPC's local backup.
+4. Calls the **enabled** model endpoints against the immutable local copy.
+5. Verifies that every required model returned a finite result for every expected
+   image. Required-model failure or timeout produces an all-`23` fail-safe result.
+6. Merges results, calculates derived values, classifies defects, and writes a
+   durable result manifest without publishing to the machine share.
+7. Publishes every Primary CSV first, then writes the returned/processed result
+   backups and marks the job complete.
 
 ## Architecture
 
-Modular monolith with a layered architecture under `app/`:
+Layered application with independently runnable workers under `app/`:
 
 ```
 app/
-  api/            # FastAPI routes + request/response schemas (interface layer)
-  application/    # ProcessJobUseCase (orchestration)
-  domain/         # pure business logic: entities + services (no I/O)
-    entities/     #   Job, ModelInferenceResult, DefectLabel/codes
-    services/     #   CsvMerger, DerivedMetricsCalculator, DefectClassifier,
-                  #   MetricsCollector, add_is_pass
-  infrastructure/ # adapters: model HTTP clients, repositories, output writers
-  core/           # config (Pydantic), logging, error hierarchy
-  utils/          # small shared helpers
+  api/                     # FastAPI compatibility routes and schemas
+  application/
+    services/              # ingest, inference-artifact, and publisher services
+    workers/               # three independent durable worker loops
+    use_cases/             # legacy synchronous ProcessJobUseCase
+  domain/                  # jobs, pipeline states/results, classification logic
+  infrastructure/
+    repositories/          # CSV/filesystem adapters and SQLite job repository
+    model_clients/         # deadline-aware HTTP model clients
+    output/                # atomic machine-facing CSV output
+  core/                    # Pydantic config, logging, and error hierarchy
+  pipeline.py              # `python -m app.pipeline <stage>` CLI
 ```
 
-The system also involves separate processes:
+Production components:
 
 | Component | Port | Role |
 | --- | --- | --- |
-| Merge server (`app.main`) | `5050` | This API — orchestration (`/process`, `/health`) |
+| Ingest worker | — | Validate today's timestamp folders and create local immutable input |
+| Inference worker | — | Earliest-deadline-first model execution and result manifest creation |
+| Publisher worker | — | Deadline takeover, Primary-first publication, then local result backup |
+| SQLite WAL database | — | Durable job state, leases, attempts, timestamps, and crash recovery |
 | PatchCore anomaly | `8000` | Returns `anomaly_score` |
 | Paste detection | `8001` | Returns `paste_pixels` — **disabled by default** |
 | Distance detection | `8002` | Returns `min_center_to_pad_distance` |
-| `scan_jobs.py` | — | Folder watcher that POSTs ready jobs to `/process` |
+| Merge server (`app.main`) | `5050` | Compatibility API (`/process`, `/health`, `/ready`) |
 
 **Entry points**
 
-- Primary (new architecture): `python -m app.main` — runs entirely on the layered
-  `app/` code.
-- Legacy (deprecated, kept for compatibility): `python ai_server_fastapi.py`.
+- Durable production pipeline: `python -m app.pipeline ingest`, `inference`, and
+  `publisher` in three separate processes.
+- Compatibility API: `python -m app.main`.
+- Deprecated legacy server: `python ai_server_fastapi.py`.
 
 ## Runtime Flow
 
+```text
+SPI shared folder
+       │
+       ▼
+Ingest Worker
+  stable snapshot + CSV/image validation
+  persist INGESTING + ready_at/deadline_at
+  atomic complete local copy
+       │ READY
+       ▼
+Inference Worker
+  earliest deadline first
+  required models within deadline - publish reserve
+  normal decision or all-23 fallback manifest
+       │ RESULT_READY / FALLBACK_READY
+       ▼
+Publisher Worker
+  normal result, or cutoff takeover from INGESTING/READY/INFERENCING
+  wait for the complete durable raw copy if ingest is still finishing
+  publish all Primary CSVs atomically
+       │ PRIMARY_RETURNED
+       ▼
+  local returned CSV + processed CSV + manifest backup
+       │ DONE
+       ▼
+SQLite WAL state and stage-specific logs retain the evidence
 ```
-scan_jobs.py  ──POST /process {job_folder}──▶  app.main
-    │                                              │
-    │                              ProcessJobUseCase.execute()
-    │        1. FileSystemJobRepository.load  (validate, find CSVs, count images)
-    │        2. if images > threshold → skip inference, mark all is_pass=23
-    │        3. run enabled model clients concurrently within the SLA budget
-    │        4. required failure/timeout/incomplete result → all is_pass=23
-    │        5. otherwise per CSV: merge → derived → classify → is_pass
-    │        6. OutputWriter: primary + backup + processed CSV
-    │        7. RequestLogWriter: append metrics row to log/log.csv
-    ▼
-2xx → scan_jobs marks the job processed
+
+Persisted states are `INGESTING`, `READY`, `INFERENCING`, `RESULT_READY`,
+`FALLBACK_READY`, `PUBLISHING`, `PRIMARY_RETURNED`, `DONE`, and `FAILED`.
+Claims use SQLite transactions and expiring worker leases, so an expired stage can
+be reclaimed after a process crash. Jobs are ordered by the earliest deadline.
+
+### 30-second soft-real-time policy
+
+`ready_at` is recorded after the timestamp folder has a stable snapshot and the
+complete CSV/image contract has passed validation. The absolute deadline is:
+
+```text
+deadline_at = ready_at + primary_return_deadline_seconds
+publish_cutoff = deadline_at - primary_publish_reserve_seconds
 ```
+
+With the shipped `30`-second deadline and `5`-second reserve, model work must be
+committable before approximately second 25. At the cutoff, Publisher atomically
+takes ownership of an unfinished ingest/inference job and selects an all-`23`
+fallback. Primary is produced only from the complete local raw copy, never directly
+from the machine share; this preserves the original evidence even if the machine
+deletes its folder after seeing the return CSV. A late inference commit is rejected
+by SQLite and cannot overwrite the fallback. Optional model tasks are cancelled
+once all required models have finished, so they do not consume the publication
+reserve.
+
+The SLA covers local archival, queueing, inference, result construction, and the
+last Primary CSV write after `ready_at`; folder discovery, settle time, and
+validation happen before `ready_at`. This is a **soft** real-time target: an AIPC
+stall, sustained overload, unavailable/blocked SMB share, or unusually slow raw
+copy can still miss it. A slow copy is allowed to miss the soft target rather than
+returning before the required original backup exists.
+`pipeline.primary_returned` logs include latency and `deadline_met` evidence.
 
 ## API Reference
 
@@ -103,6 +157,20 @@ a required model is unavailable).
 ```
 
 ### POST /process
+
+This endpoint intentionally keeps the original synchronous contract. It runs
+`ProcessJobUseCase` inline and **does not enqueue or update the three-stage SQLite
+pipeline**. It remains useful for existing clients and manual processing, but its
+deadline starts when the request begins rather than at the durable pipeline's
+`ready_at` timestamp.
+
+Do not run `scan_jobs.py` and the new Ingest Worker against the same watched folders
+at the same time: they are two separate execution paths and can publish the same
+job concurrently. For production, choose one mode:
+
+- Durable mode: run the three `app.pipeline` workers; the API is optional.
+- Compatibility mode: run `scan_jobs.py` plus `app.main`; do not run the new Ingest
+  Worker for that share.
 
 Body:
 
@@ -170,11 +238,22 @@ curl -X POST "http://127.0.0.1:5050/process" \
 
 ## Input Job Folder Requirements
 
-- A directory that exists and contains **one or more `.csv` files**.
+- A 14-digit timestamp directory (`YYYYMMDDHHMMSS`) for today's date containing
+  **one or more `.csv` files**. Automatic processing scans only today; a historical
+  date can be submitted manually with
+  `app.pipeline ingest --once --date YYYY-MM-DD`.
 - SINIC pad images named
   `{Insp_st_time}_{BoardBarcode}_{component_name}_{Array_id}_{Pad_id}.jpg`.
   The shipped template uses the equivalent
   `{csv_stem}_{component_name}_{Array_id}_{Pad_id}.jpg`.
+- Every CSV must contain at least one data row, and expected image names must be
+  unique across every CSV in the job.
+- Every expected image must be a regular file, have non-zero size, and be decodable
+  by OpenCV. The source snapshot must remain unchanged during validation and copy.
+
+The settle duration comes from `pipeline.source_settle_seconds`. Because the
+machine supplies neither a completion file nor an atomic folder rename, settle +
+contract validation is the implemented definition of "folder ready".
 
 ## CSV Required Columns
 
@@ -198,7 +277,7 @@ in `model_clients`:
   "required": true,
   "url": "http://127.0.0.1:8000/inference",
   "target_column": "anomaly_score",
-  "timeout_seconds": 300
+  "timeout_seconds": 25
 }
 ```
 
@@ -236,10 +315,10 @@ short distance first and disables anomaly and high-cover classification:
 "rule_order": ["short_distance", "high_vol", "low_vol", "high_paste"]
 ```
 
-Restart the merge server after changing the config. `rule_order` controls only
-classification; model execution and fail-safe requirements remain controlled by
-the corresponding `model_clients[].enabled` and `model_clients[].required`
-settings.
+Restart every running pipeline worker (and the compatibility API when used) after
+changing the config. `rule_order` controls only classification; model execution
+and fail-safe requirements remain controlled by the corresponding
+`model_clients[].enabled` and `model_clients[].required` settings.
 
 `is_pass` = `22` when `ai_defect_name` is empty/whitespace, else `23`.
 
@@ -247,14 +326,47 @@ Note rule 5 uses **`<` (less than)** the threshold.
 
 ## Output Files
 
-For each input CSV, three files are written:
+### Durable pipeline paths
 
 | File | Path | Contents |
 | --- | --- | --- |
-| Primary (`machine_return`) | `{external_output_root}/{csv}` | Source schema with `is_pass` updated; published atomically |
-| Primary (legacy layout) | `{external_output_root}/{job}/AI/{csv}` | Per `primary_csv_mode` (below) |
-| Backup | `{backup_output_root}/{year}/{month}/{job}/{csv}` | Original columns + `is_pass` |
-| Processed | `{backup_output_root}/{year}/{month}/{job}/{stem}_processed.csv` | Full AI schema |
+| Original source copy | `{backup_output_root}/{YYYY-MM-DD}/{job_id}/...` | Complete byte-verified source payload before inference; source files are never modified |
+| Optional staging copy | `{pipeline.staging_root}/{job_id}/...` | Separate local inference copy only when `staging_root` is set |
+| Result artifact | `{pipeline.result_root}/{job_id}/{attempt-id}/manifest.json` | Normal/fallback decision, row-aligned result codes, errors, timings, and counts |
+| Staged processed CSV | `{pipeline.result_root}/{job_id}/{attempt-id}/processed/{stem}_processed.csv` | Full AI/debug schema used by Publisher |
+| Primary | `{external_output_root}/{csv}` | Original CSV format with only `is_pass` replaced; atomic per file |
+| Primary with preserved job folder | `{external_output_root}/{job_id}/{csv}` | Used when `output.preserve_job_folder=true` |
+| Returned result backup | `{backup_output_root}/{YYYY-MM-DD}/{job_id}/ai_result/returned/{csv}` | Local copy of the machine-facing result |
+| Processed result backup | `{backup_output_root}/{YYYY-MM-DD}/{job_id}/ai_result/processed/{stem}_processed.csv` | Full AI/debug schema after Primary is visible |
+| Result manifest backup | `{backup_output_root}/{YYYY-MM-DD}/{job_id}/ai_result/manifest.json` | Durable outcome/reason/errors and CSV result codes |
+
+When `pipeline.staging_root` is `null` (the recommended default), the preserved
+original source copy is also the inference staging directory, avoiding a second
+full copy inside the 30-second budget. When it is set to a different local root,
+Ingest creates and verifies two complete atomic copies.
+
+Publisher writes **all Primary CSVs before any** returned/processed backup. A local
+result-backup failure leaves the state at `PRIMARY_RETURNED`; a later Publisher
+claim retries finalization without rerunning inference or changing the Primary.
+
+When the durable pipeline is enabled, startup validation requires
+`primary_csv_mode="is_pass_only"` and `primary_path_layout="machine_return"`.
+It uses the machine-return contract implemented by `SinicCsvOutput`: source
+encoding, delimiter, column order, quoting, and line endings are preserved while
+`is_pass` changes. The compatibility `/process` workflow can use its other modes
+only when the durable pipeline is disabled. Publisher also uses
+`output.preserve_job_folder` and `output.require_existing_is_pass`.
+
+### Compatibility `/process` paths
+
+The synchronous compatibility path retains its previous output layout:
+
+| File | Path |
+| --- | --- |
+| Primary (`machine_return`) | `{external_output_root}/{csv}` |
+| Primary (legacy layout) | `{external_output_root}/{job}/AI/{csv}` |
+| Backup | `{backup_output_root}/{year}/{month}/{job}/{csv}` |
+| Processed | `{backup_output_root}/{year}/{month}/{job}/{stem}_processed.csv` |
 
 `output.primary_csv_mode`:
 
@@ -263,10 +375,11 @@ For each input CSV, three files are written:
 - `full_ai_columns`: the full processed frame, including `img_name`, model score
   columns, `ai_defect_name`, and `is_pass`.
 
-The backup and `_processed.csv` are **unchanged by the mode**. The
-`*_processed.csv` carries the full AI schema and is intended for **debugging**.
+On the compatibility path, backup and `_processed.csv` are unchanged by the mode.
+The `*_processed.csv` carries the full AI schema and is intended for debugging.
 
-The per-job metrics row (`log/log.csv`) keeps its 18-column schema:
+The compatibility `/process` per-job metrics row (`log/log.csv`) keeps its
+18-column schema:
 `job_folder, img_numbers, request_start_at, request_end_at, anomaly_request_ms,
 paste_request_ms, distance_request_ms, compute_total_ms, request_latency_ms,
 pass_count, fail_count, anomaly_count, distance_count, low_vol_count,
@@ -294,9 +407,9 @@ baking environment-specific paths into a shared file.
     "image_name_template": "{csv_stem}_{component_name}_{Array_id}_{Pad_id}.jpg"
   },
   "model_clients": [
-    { "name": "anomaly",  "enabled": true,  "required": true,  "url": "http://127.0.0.1:8000/inference", "target_column": "anomaly_score",    "timeout_seconds": 300 },
-    { "name": "paste",    "enabled": false, "required": false, "url": "http://127.0.0.1:8001/inference", "target_column": "paste_pixels",     "timeout_seconds": 300 },
-    { "name": "distance", "enabled": true,  "required": true,  "url": "http://127.0.0.1:8002/inference", "target_column": "min_pad_distance", "timeout_seconds": 300 }
+    { "name": "anomaly",  "enabled": true,  "required": true,  "url": "http://127.0.0.1:8000/inference", "target_column": "anomaly_score",    "timeout_seconds": 25 },
+    { "name": "paste",    "enabled": false, "required": false, "url": "http://127.0.0.1:8001/inference", "target_column": "paste_pixels",     "timeout_seconds": 25 },
+    { "name": "distance", "enabled": true,  "required": true,  "url": "http://127.0.0.1:8002/inference", "target_column": "min_pad_distance", "timeout_seconds": 25 }
   ],
   "defect_rules": {
     "rule_order": [
@@ -322,6 +435,20 @@ baking environment-specific paths into a shared file.
     "scanner_http_timeout_grace_seconds": 5.0,
     "required_model_failure_policy": "fail_all_23"
   },
+  "pipeline": {
+    "enabled": true,
+    "watch_root": "D:/spi_ai/output/01/sfcTemp",
+    "database_path": "D:/Dre/JQ_SPI_02_AI_API/state/pipeline.sqlite3",
+    "staging_root": null,
+    "result_root": "D:/Dre/JQ_SPI_02_AI_API/pipeline_results",
+    "source_settle_seconds": 2.0,
+    "ingest_poll_interval_seconds": 0.25,
+    "inference_poll_interval_seconds": 0.05,
+    "publisher_poll_interval_seconds": 0.05,
+    "publisher_lease_seconds": 1.0,
+    "publisher_heartbeat_interval_seconds": 0.25,
+    "worker_lease_seconds": 60.0
+  },
   "logging": {
     "log_dir": "log", "system_log_file": "system", "request_log_file": "log.csv",
     "request_log_max_bytes": 52428800, "request_log_backup_count": 5
@@ -336,19 +463,39 @@ baking environment-specific paths into a shared file.
 }
 ```
 
-The top-level `watch_root` / `process_api_url` / `processed_registry_path` /
-`rescan_interval_ms` keys are read directly by `scan_jobs.py`.
+Pipeline settings:
 
-`primary_return_deadline_seconds` defaults to 30 seconds. In the current
-synchronous pipeline it is measured from the beginning of `/process`; model
-inference is cut off after subtracting `primary_publish_reserve_seconds`, leaving
-time to publish the all-23 fallback. The scanner waits for the deadline plus
-`scanner_http_timeout_grace_seconds`, so its transport timeout does not race the
-production deadline. Once the durable ingest worker is implemented, the same SLA
-will start at the persisted folder-ready timestamp and include copy/queue time.
+| Field | Meaning |
+| --- | --- |
+| `enabled` | Must be `true` or `app.pipeline` exits at startup |
+| `watch_root` | Shared root scanned by the new Ingest Worker; distinct from the legacy top-level key |
+| `database_path` | Local file-backed SQLite WAL database; never place it on SMB/network storage |
+| `staging_root` | `null` reuses the preserved original copy; otherwise creates `{staging_root}/{job_id}` |
+| `result_root` | Local transient result-manifest and processed-artifact root |
+| `source_settle_seconds` | Stable snapshot window before full CSV/image validation |
+| `*_poll_interval_seconds` | Delay between worker polling iterations |
+| `publisher_lease_seconds` | Short Primary claim lease; must fit inside the publish reserve |
+| `publisher_heartbeat_interval_seconds` | How often a live Publisher renews its short lease |
+| `worker_lease_seconds` | Ingest/inference/finalize lease; must exceed the deadline |
 
-Config is cached per process — **restart the server to pick up config changes**
-(the scanner re-reads its own config each loop).
+Publisher actively renews its short lease while building/publishing Primary files.
+If that process crashes, another Publisher can recover inside the reserved window.
+Ingest/inference use the longer `worker_lease_seconds`; deadline takeover still
+fences them at the publish cutoff.
+
+The top-level `watch_root`, `scanner_settle_seconds`, `process_api_url`,
+`processed_registry_path`, and `rescan_interval_ms` keys are legacy settings read
+by `scan_jobs.py`. Durable Ingest reads `pipeline.watch_root` and
+`pipeline.source_settle_seconds`.
+
+`primary_return_deadline_seconds` defaults to 30 seconds. The durable pipeline
+persists the deadline from validated `ready_at`; the synchronous `/process` path
+still measures from the beginning of the HTTP request. `scanner_http_timeout_grace_seconds`
+applies only to `scan_jobs.py`.
+
+Config is cached independently in each process. Restart all three workers (and the
+API when used) after changing settings. `scan_jobs.py` continues to load its own
+legacy configuration.
 
 ## How to Install
 
@@ -376,28 +523,130 @@ See the extras in `pyproject.toml` (`cuda`, `mac`, `analytics`, `paste`).
 ## How to Run
 
 ```bash
-# The merge API (this service)
-uv run python -m app.main            # binds server.host:port (default 127.0.0.1:5050)
+# Durable pipeline: run each command in a separate terminal/process
+uv run python -m app.pipeline ingest
+uv run python -m app.pipeline inference
+uv run python -m app.pipeline publisher
 
-# Model servers + scanner (Windows) — starts 5050, 8000, 8002, scanner
+# Process at most one claim and exit (diagnostics/tests)
+uv run python -m app.pipeline ingest --once
+uv run python -m app.pipeline inference --once --worker-id manual-inference
+uv run python -m app.pipeline publisher --once
+
+# Manually submit a historical date through the same durable pipeline
+uv run python -m app.pipeline ingest --once --date 2026-08-26
+
+# Explicit deployment config (AI_CONFIG_PATH remains supported)
+uv run python -m app.pipeline publisher --config D:/path/to/ai_server.json
+
+# Optional compatibility API; binds server.host:port (default 127.0.0.1:5050)
+uv run python -m app.main
+
+# Model servers + optional compatibility API; does not start scan_jobs.py
 02_api_services.bat
 ```
 
-The legacy entry point `uv run python ai_server_fastapi.py` is still available but
-deprecated.
+Windows convenience launchers for the three independent stages are:
+
+```bat
+03_pipeline_ingest.bat
+03_pipeline_inference.bat
+03_pipeline_publisher.bat
+```
+
+All Windows launchers call `resolve_python.bat`: an explicitly configured
+`PYTHON_EXE` wins, followed by `.venv`, the setup-created Conda environment, and
+finally Python on `PATH`. Python 3.12 is validated before startup. The launchers
+also default `AI_CONFIG_PATH` to the checked-in config. `02_api_services.bat` no
+longer starts the legacy scanner; `02_scan.bat` requires the explicit safety flag
+`SPI_ENABLE_LEGACY_SCANNER=1` and must be used only while durable Ingest is stopped.
+
+Start Publisher first, then required model services (`8000` and `8002`), Inference,
+and finally Ingest. Publisher must stay available even when models are down because
+it owns the deadline fallback.
+
+Each stage writes a separate system log derived from `logging.system_log_file`, for
+example `system.ingest`, `system.inference`, and `system.publisher` under
+`logging.log_dir`. The legacy entry point `uv run python ai_server_fastapi.py`
+remains available but is deprecated.
 
 ## Deployment / Operations
 
-- **Auto-restart**: `02_api_services.bat` launches the merge server via
-  `run_merge_server.bat`, which relaunches `python -m app.main` if it exits or
-  crashes. For a proper Windows service (auto-start on boot, crash recovery,
-  graceful stop), install it under **NSSM** instead:
-  `nssm install SPI_Merge <PYTHON_EXE> -m app.main` (set the working directory to
-  the repo root).
-- **Graceful shutdown**: the app manages a shared HTTP client via a FastAPI
-  lifespan; on SIGINT/SIGTERM (uvicorn) it finishes in-flight work and closes the
-  client cleanly.
-- **Metrics log rotation**: `log/log.csv` rotates at
+### Windows services with NSSM
+
+Use one service per worker so failure or restart of one stage does not stop the
+others. Example, from an elevated command prompt:
+
+```bat
+set REPO=D:\Dre\JQ_SPI_02_AI_API
+set PYTHON_EXE=%REPO%\.venv\Scripts\python.exe
+set CONFIG=D:\Dre\JQ_SPI_02_AI_API\config\ai_server.json
+
+nssm install SPI_Model_Anomaly "%PYTHON_EXE%" patchcore_api_trt.py --host 127.0.0.1 --port 8000
+nssm set SPI_Model_Anomaly AppDirectory "%REPO%"
+nssm set SPI_Model_Anomaly Start SERVICE_AUTO_START
+
+nssm install SPI_Model_Distance "%PYTHON_EXE%" distance_detection_api_trt.py --host 127.0.0.1 --port 8002
+nssm set SPI_Model_Distance AppDirectory "%REPO%"
+nssm set SPI_Model_Distance Start SERVICE_AUTO_START
+
+nssm install SPI_Pipeline_Ingest "%PYTHON_EXE%" -m app.pipeline ingest
+nssm set SPI_Pipeline_Ingest AppDirectory "%REPO%"
+nssm set SPI_Pipeline_Ingest AppEnvironmentExtra "AI_CONFIG_PATH=%CONFIG%"
+nssm set SPI_Pipeline_Ingest Start SERVICE_AUTO_START
+
+nssm install SPI_Pipeline_Inference "%PYTHON_EXE%" -m app.pipeline inference
+nssm set SPI_Pipeline_Inference AppDirectory "%REPO%"
+nssm set SPI_Pipeline_Inference AppEnvironmentExtra "AI_CONFIG_PATH=%CONFIG%"
+nssm set SPI_Pipeline_Inference Start SERVICE_AUTO_START
+
+nssm install SPI_Pipeline_Publisher "%PYTHON_EXE%" -m app.pipeline publisher
+nssm set SPI_Pipeline_Publisher AppDirectory "%REPO%"
+nssm set SPI_Pipeline_Publisher AppEnvironmentExtra "AI_CONFIG_PATH=%CONFIG%"
+nssm set SPI_Pipeline_Publisher Start SERVICE_AUTO_START
+
+nssm start SPI_Pipeline_Publisher
+nssm start SPI_Model_Anomaly
+nssm start SPI_Model_Distance
+nssm start SPI_Pipeline_Inference
+nssm start SPI_Pipeline_Ingest
+```
+
+If Python comes from Conda, set `PYTHON_EXE` to that environment's `python.exe`.
+Before starting Inference/Ingest for the first production run, confirm both model
+`/health` payloads report `status=healthy`; HTTP 200 alone is not sufficient while
+a TensorRT engine is still initializing.
+Configure NSSM stdout/stderr rotation as required by the plant's operations policy;
+application event logs are already written under `logging.log_dir`.
+
+Operational requirements and recovery behavior:
+
+- **Local durable state**: keep `pipeline.database_path`,
+  `paths.backup_output_root`, optional `pipeline.staging_root`, and
+  `pipeline.result_root` on the AIPC's local disk. SQLite WAL is not supported for
+  this design on the machine SMB share.
+- **Crash recovery**: claims use `BEGIN IMMEDIATE`, owner IDs, attempt counters,
+  and expiring leases. A restarted worker reclaims the earliest-deadline eligible
+  job. Publisher uses a short heartbeat-renewed lease so a crash can be recovered
+  inside the publish reserve. Atomic directories/manifests are reused when
+  byte-identical.
+- **At-least-once publication**: Primary CSV writes are atomic and deterministic,
+  but there is no multi-file transaction. A crash halfway through a multi-CSV job
+  can cause the retry to overwrite already returned CSVs with the same decisions.
+- **Primary before backup**: `PRIMARY_RETURNED` is persisted immediately after the
+  last Primary write. Local returned/processed backups run as a separate finalize
+  claim; failure there never reruns inference.
+- **Original before Primary**: Publisher never uses the live machine share as its
+  input. The complete local raw copy must be available first, even if unusually
+  slow local archival causes a soft-deadline miss.
+- **Source immutability**: a timestamp `job_id` is the SQLite primary key. Do not
+  modify or reuse a timestamp folder after it has passed readiness validation.
+- **API probes**: `/health` and `/ready` belong to the compatibility API and do not
+  currently report worker heartbeats or SQLite queue state.
+- **Graceful shutdown**: stop between claims when practical. Publisher failure is
+  recovered after `publisher_lease_seconds`; other stages use
+  `worker_lease_seconds` or the deadline cutoff.
+- **Compatibility metrics log rotation**: `log/log.csv` rotates at
   `logging.request_log_max_bytes` (default 50 MB) keeping
   `logging.request_log_backup_count` backups (`log.csv.1..N`); set
   `request_log_max_bytes: 0` to disable. No data is lost until the backup count is
@@ -405,7 +654,7 @@ deprecated.
 - **Config per environment**: keep deployment paths out of the shared repo by
   pointing `AI_CONFIG_PATH` at a machine-local config (template:
   `config/ai_server.example.json`).
-- **Scanner retry / dead-letter**: `scan_jobs.py` no longer re-posts a failing job
+- **Legacy scanner retry / dead-letter**: `scan_jobs.py` no longer re-posts a failing job
   on every tick. Client errors (4xx, e.g. a malformed CSV) are dead-lettered after
   `scanner_client_error_max_attempts` (default 2); server/transport errors (5xx or
   connection failures) get exponential backoff (`scanner_backoff_base_seconds` ..
@@ -420,10 +669,11 @@ deprecated.
 uv run pytest
 ```
 
-Unit tests (`tests/unit/`) cover the pure domain services and config; integration
-tests (`tests/integration/`) drive `ProcessJobUseCase` and the `/process` route
-using temporary directories and a fake model runner — **no real endpoints or
-production paths are required**.
+Unit tests (`tests/unit/`) cover ingest validation/atomic archive, SQLite claims and
+cutoff fencing, result manifests, inference fallback, Publisher ordering, domain
+services, and config. Integration tests drive both the compatibility `/process`
+route and all three durable worker stages with temporary local/share paths and fake
+model runners — no production paths or real endpoints are required.
 
 ## How to Format and Lint
 
@@ -443,14 +693,33 @@ linted/formatted yet — see "Known Behavior".
 
 ## Troubleshooting
 
+- **Worker exits immediately**: set `pipeline.enabled=true` and inspect its startup
+  preflight error. Ingest requires a readable `pipeline.watch_root`; every stage
+  probes its required local/output directories.
+- **No jobs reach `READY`**: inspect `system.ingest` for missing/empty/undecodable
+  expected images, duplicate image keys, CSV template errors, or a source snapshot
+  that keeps changing. The worker intentionally treats these as not-ready and
+  scans again.
+- **SQLite is locked or unreliable**: confirm `pipeline.database_path` is a local
+  AIPC file, not a UNC/SMB path, and that all workers use the same database.
+- **Job remains `PUBLISHING` or `PRIMARY_RETURNED`**: inspect `system.publisher`.
+  `PUBLISHING` normally indicates Primary/SMB retry; `PRIMARY_RETURNED` means the
+  machine result is already visible and only local `ai_result` finalization remains.
+- **Unexpected all-23 result**: inspect the backed-up `ai_result/manifest.json`.
+  `reason=publish_reserve_reached` means no durable inference result was committed
+  before the cutoff; `required_model_failure`, `required_model_timeout`, and
+  `images_exceed_threshold` identify the other fail-safe paths.
 - **Required-model fallback**: inspect `errors` and `reason`; missing or invalid
   keys for the SINIC image-name template intentionally return all rows as `23`.
 - **`400 CSV missing required columns`**: check the configured image-name
   template fields, normally `component_name`, `Array_id`, and `Pad_id`.
 - **`high cover` never fires**: `cover%` needs `paste_pixels` (paste model) and
   `pad_area` (needs `Width` + `Length`). Paste is disabled by default.
-- **Writes fail / `500`**: check `external_output_root` / `backup_output_root`
-  exist and are writable; output-write failures return a 500.
+- **Primary write fails**: check `external_output_root` and SMB availability. The
+  Publisher retains a recoverable `PUBLISHING` state and retries; the 30-second SLA
+  cannot be guaranteed during a network outage.
+- **Compatibility `/process` returns `500`**: check `external_output_root` and
+  `backup_output_root`; synchronous output failures return an HTTP error.
 - **Config errors on startup**: `config/ai_server.json` must be present and valid
   (or set `AI_CONFIG_PATH`).
 
@@ -462,21 +731,36 @@ linted/formatted yet — see "Known Behavior".
   `"enabled": true`, and restart the merge server.
 - **`short distance` uses `min_pad_distance < short_distance_threshold`** (less
   than), not greater than.
-- **`primary_csv_mode`** has two modes: `is_pass_only` (default) and
-  `full_ai_columns` (see Output Files). Backup and processed CSVs are unaffected.
+- **Compatibility `primary_csv_mode`** has two modes: `is_pass_only` (default) and
+  `full_ai_columns` (see Output Files). The durable Publisher always uses the
+  machine-return contract.
 - **`*_processed.csv`** contains the full AI schema and exists for **debugging**.
-- **Image count over `folder_images_num_threshold`**: inference is **skipped**,
-  every row is marked `is_pass = 23` (fail), the three CSVs are still written, and
-  the response is `{"status": "finished scanning", "skipped": true, "reason":
-  "images_exceed_threshold"}`.
+- **Image count over `folder_images_num_threshold`**: inference is skipped and every
+  row is marked `is_pass=23`. The durable path records
+  `reason=images_exceed_threshold` in its manifest; `/process` retains the legacy
+  `{"status": "finished scanning", "skipped": true, ...}` response.
 - **Required model failure policy**: an endpoint error, deadline timeout,
-  incomplete key set, or invalid scalar publishes an HTTP-200 fail-safe result
-  with every row set to `23`. Optional-model failures continue normally.
+  incomplete key set, or invalid scalar produces a fail-safe result with every row
+  set to `23`. Optional-model failures continue normally. On the durable path this
+  policy is recorded in the result manifest; on `/process` it is an HTTP-200 body.
+- **Durable and synchronous paths are separate**: `/process` does not enqueue into
+  SQLite, and the pipeline workers do not require the FastAPI server. Do not point
+  both `scan_jobs.py` and Ingest Worker at the same production share.
+- **Automatic Ingest scans only today's timestamp folders.** Historical and
+  cross-midnight recovery remains manual; use
+  `app.pipeline ingest --once --date YYYY-MM-DD`.
+- **No queue can guarantee normal AI output under overload.** Earliest-deadline
+  scheduling and cutoff takeover guarantee the configured all-23 decision path,
+  subject to AIPC and SMB availability.
+- **The SQLite database is job state, not an audit-event ledger.** Stage timestamps,
+  attempts, reasons, and leases are persisted; detailed evidence remains in the
+  stage-specific text logs and result manifest.
 - **`log/`, `backup/`, `data/`** and model weights are git-ignored.
-- **Binds `127.0.0.1` by default** (`server.host`): the only client is the
-  same-host scanner. Set `server.host` to a wider interface only if needed.
-- **`/process` offloads CPU/IO-bound work** (CSV read/write, classification) to a
-  thread pool, so `/health` and `/ready` stay responsive while a job runs.
+- **The compatibility API binds `127.0.0.1` by default** (`server.host`). Set it to
+  a wider interface only if a remote API client is intentionally allowed.
+- **Compatibility `/process` offloads CPU/IO-bound work** (CSV read/write and
+  classification) to a thread pool, so `/health` and `/ready` stay responsive while
+  a job runs.
 - **Output CSVs are written atomically** (temp file + `os.replace`), so a crash
   mid-write never leaves a partial CSV at the target path.
 - **Legacy code**: `ai_server_fastapi.py` (and the model servers / scanner) remain

@@ -18,8 +18,16 @@ import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlparse
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from app.core.errors import ConfigError
 
@@ -66,6 +74,14 @@ class PathConfig(BaseModel):
     external_output_root: str
     backup_output_root: str
 
+    @field_validator("external_output_root", "backup_output_root")
+    @classmethod
+    def _path_must_not_be_blank(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("path must not be blank")
+        return normalized
+
 
 class ProcessingConfig(BaseModel):
     """Job-processing guardrails and image discovery settings."""
@@ -97,7 +113,22 @@ class ModelClientConfig(BaseModel):
     required: bool = True
     url: str
     target_column: str
-    timeout_seconds: int = Field(default=300, gt=0)
+    timeout_seconds: float = Field(default=300, gt=0)
+
+    @field_validator("name", "url", "target_column")
+    @classmethod
+    def _identity_value_must_not_be_blank(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("model client value must not be blank")
+        return normalized
+
+    @model_validator(mode="after")
+    def _url_must_be_http(self) -> ModelClientConfig:
+        parsed = urlparse(self.url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("model client url must be an absolute HTTP(S) URL")
+        return self
 
 
 DefectRuleName = Literal[
@@ -172,9 +203,10 @@ class ReliabilityConfig(BaseModel):
     """Production deadline and fail-safe behavior.
 
     ``primary_return_deadline_seconds`` is the end-to-end target for making the
-    machine-facing primary CSV visible. The current synchronous API measures it
-    from the beginning of ``/process``; the future ingest worker will carry the
-    folder-ready timestamp so the same setting covers discovery/copy time too.
+    machine-facing primary CSV visible.  The durable pipeline measures it from
+    the ``ready_at`` timestamp established after CSV/image completeness and
+    stability validation.  The legacy synchronous API continues to measure it
+    from the beginning of ``/process``.
 
     ``primary_publish_reserve_seconds`` is held back from model inference so a
     fail-safe CSV still has time to be generated and published before the target.
@@ -196,6 +228,52 @@ class ReliabilityConfig(BaseModel):
                 "primary_return_deadline_seconds"
             )
         return self
+
+
+class PipelineConfig(BaseModel):
+    """Durable three-stage worker settings.
+
+    All state and transient artifacts live on the AIPC's local disk.  The
+    SQLite database must never be placed on the machine-facing SMB share.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    watch_root: str | None = None
+    database_path: str = "data/pipeline/jobs.sqlite3"
+    # ``None`` reuses the immutable raw backup as inference staging, avoiding a
+    # second full copy inside the 30-second production budget.
+    staging_root: str | None = None
+    result_root: str = "data/pipeline/results"
+    source_settle_seconds: float = Field(default=2.0, ge=0)
+    ingest_poll_interval_seconds: float = Field(default=0.25, gt=0)
+    inference_poll_interval_seconds: float = Field(default=0.05, gt=0)
+    publisher_poll_interval_seconds: float = Field(default=0.05, gt=0)
+    # Primary publication uses a short, actively renewed lease.  A second
+    # Publisher can therefore recover inside the reserved publish window if
+    # the owning process crashes.
+    publisher_lease_seconds: float = Field(default=1.0, gt=0)
+    publisher_heartbeat_interval_seconds: float = Field(default=0.25, gt=0)
+    worker_lease_seconds: float = Field(default=60.0, gt=0)
+
+    @field_validator("database_path", "result_root")
+    @classmethod
+    def _local_path_must_not_be_blank(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("pipeline path must not be blank")
+        return normalized
+
+    @field_validator("watch_root", "staging_root")
+    @classmethod
+    def _optional_path_must_not_be_blank(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("optional pipeline path must be null or non-blank")
+        return normalized
 
 
 class LoggingConfig(BaseModel):
@@ -232,7 +310,61 @@ class AppConfig(BaseModel):
     defect_rules: DefectRuleConfig
     output: OutputConfig = Field(default_factory=OutputConfig)
     reliability: ReliabilityConfig = Field(default_factory=ReliabilityConfig)
+    pipeline: PipelineConfig = Field(default_factory=PipelineConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
+
+    @model_validator(mode="after")
+    def _validate_pipeline_runtime_contract(self) -> AppConfig:
+        if self.pipeline.enabled and not (
+            self.pipeline.watch_root and self.pipeline.watch_root.strip()
+        ):
+            raise ValueError(
+                "pipeline.watch_root is required when the pipeline is enabled"
+            )
+        if (
+            self.pipeline.enabled
+            and self.pipeline.worker_lease_seconds
+            <= self.reliability.primary_return_deadline_seconds
+        ):
+            raise ValueError(
+                "pipeline.worker_lease_seconds must be greater than "
+                "reliability.primary_return_deadline_seconds"
+            )
+        if self.pipeline.enabled and (
+            self.pipeline.publisher_heartbeat_interval_seconds
+            >= self.pipeline.publisher_lease_seconds
+        ):
+            raise ValueError(
+                "pipeline.publisher_heartbeat_interval_seconds must be less than "
+                "pipeline.publisher_lease_seconds"
+            )
+        if self.pipeline.enabled and (
+            self.pipeline.publisher_lease_seconds
+            >= self.reliability.primary_publish_reserve_seconds
+        ):
+            raise ValueError(
+                "pipeline.publisher_lease_seconds must be less than "
+                "reliability.primary_publish_reserve_seconds"
+            )
+        if self.pipeline.enabled and not self.required_enabled_model_clients():
+            raise ValueError(
+                "an enabled pipeline requires at least one enabled, required model"
+            )
+        if self.pipeline.enabled and (
+            self.output.primary_csv_mode != "is_pass_only"
+            or self.output.primary_path_layout != "machine_return"
+        ):
+            raise ValueError(
+                "the durable pipeline requires output.primary_csv_mode="
+                "'is_pass_only' and output.primary_path_layout='machine_return'"
+            )
+        names = [client.name for client in self.model_clients]
+        if len(names) != len(set(names)):
+            raise ValueError("model client names must be unique")
+        target_columns = [client.target_column for client in self.model_clients]
+        if len(target_columns) != len(set(target_columns)):
+            raise ValueError("model client target_column values must be unique")
+        return self
 
     def enabled_model_clients(self) -> list[ModelClientConfig]:
         """Return only the model clients with ``enabled=True``."""
