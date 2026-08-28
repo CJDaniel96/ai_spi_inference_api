@@ -87,6 +87,21 @@ def test_model_services_launcher_starts_only_required_model_ports() -> None:
     )
 
 
+def test_model_services_launcher_forwards_multi_format_model_settings() -> None:
+    active_text = "\n".join(
+        _active_lines(_launcher("start_model_services.bat"))
+    ).lower()
+
+    assert "patchcore_model_path" in active_text
+    assert "distance_center_model_path" in active_text
+    assert "distance_pad_model_path" in active_text
+    assert "spi_model_device" in active_text
+    assert "--model-path" in active_text
+    assert "--center-model" in active_text
+    assert "--pad-model" in active_text
+    assert "--device" in active_text
+
+
 @pytest.mark.parametrize(
     "filename",
     [

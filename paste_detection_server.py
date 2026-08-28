@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import uvicorn
 from paste_inference import PasteDetectionInference
+from app.infrastructure.model_runtime import normalize_device
 
 
 class InferenceRequest(BaseModel):
@@ -27,8 +28,13 @@ class InferenceResponse(BaseModel):
 
 
 class PasteDetectionServer:
-    def __init__(self, yolo_model_path: str = "models/yolo_detection/paste.pt"):
+    def __init__(
+        self,
+        yolo_model_path: str = "models/yolo_detection/paste.pt",
+        device: str = "cuda:0",
+    ):
         self.yolo_model_path = yolo_model_path
+        self.device = normalize_device(device)
         self.inference_engine = None
         self.is_ready = False
 
@@ -36,7 +42,10 @@ class PasteDetectionServer:
         """Initialize the Paste Detection models (YOLO + Mobile SAM)"""
         try:
             print("Initializing Paste Detection inference engine...")
-            self.inference_engine = PasteDetectionInference(self.yolo_model_path)
+            self.inference_engine = PasteDetectionInference(
+                self.yolo_model_path,
+                device=self.device,
+            )
 
             print("Loading models into memory...")
             self.inference_engine.load_models()
@@ -122,7 +131,14 @@ async def health_check():
     """Health check endpoint"""
     return {
         "status": "healthy" if server_instance.is_ready else "initializing",
-        "model_ready": server_instance.is_ready
+        "model_ready": server_instance.is_ready,
+        "model": server_instance.yolo_model_path,
+        "format": (
+            server_instance.inference_engine.model_format
+            if server_instance.inference_engine is not None
+            else None
+        ),
+        "device": server_instance.device,
     }
 
 
@@ -164,13 +180,18 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Paste Detection Inference Server")
     parser.add_argument("--host", default="127.0.0.1", help="Host to bind to")
     parser.add_argument("--port", type=int, default=8001, help="Port to bind to")
-    parser.add_argument("--yolo-model", default="models/yolo_detection/paste.pt", help="Path to YOLO paste model")
+    parser.add_argument("--yolo-model", default="models/yolo_detection/paste.pt", help="Path to YOLO .pt, .onnx, or .engine model")
+    parser.add_argument("--device", default="cuda:0", help="cpu, cuda, cuda:N, or GPU index")
     parser.add_argument("--workers", type=int, default=1, help="Number of worker processes")
 
     args = parser.parse_args()
 
     # Update model path if provided
     server_instance.yolo_model_path = args.yolo_model
+    server_instance.device = normalize_device(args.device)
+
+    if args.workers != 1:
+        parser.error("GPU model services require --workers 1")
 
     print(f"Starting Paste Detection Inference Server...")
     print(f"YOLO Model: {args.yolo_model}")
@@ -178,9 +199,9 @@ if __name__ == "__main__":
     print(f"API docs at: http://{args.host}:{args.port}/docs")
 
     uvicorn.run(
-        "paste_detection_server:app",
+        app,
         host=args.host,
         port=args.port,
-        workers=args.workers,
+        workers=1,
         reload=False
     )

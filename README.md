@@ -521,6 +521,62 @@ CUDA-only packages (`pycuda`, `onnxruntime-gpu`, TensorRT) never install on macO
 See the extras in `pyproject.toml` (`cuda`, `tensorrt-export`, `mac`,
 `analytics`, `paste`).
 
+## Multi-format GPU inference
+
+The model services select their inference backend from the model filename:
+
+| Artifact | PatchCore backend | YOLO distance/paste backend | GPU setting |
+| --- | --- | --- | --- |
+| `.pt` | PyTorch | Ultralytics + PyTorch | `--device cuda:0` |
+| `.onnx` | ONNX Runtime | Ultralytics + ONNX Runtime | CUDAExecutionProvider |
+| `.engine` | TensorRT/pycuda | Ultralytics + TensorRT | CUDA only |
+
+TensorRT and pycuda are imported lazily, so they are not required when every
+selected model is `.pt` or `.onnx`. GPU ONNX inference requires the
+`onnxruntime-gpu` package and matching CUDA/cuDNN libraries. Startup fails
+instead of silently falling back to CPU when `--device cuda:N` is requested but
+the matching GPU provider is unavailable. Confirm the selected backend in each
+service's `/health` response.
+
+Distance YOLO examples (the center and pad models may use different formats):
+
+```bat
+python distance_detection_api_trt.py --center-model models\distance\center.pt --pad-model models\distance\pad.pt --device cuda:0
+python distance_detection_api_trt.py --center-model models\distance\center.onnx --pad-model models\distance\pad.onnx --device cuda:0
+python distance_detection_api_trt.py --center-model models\distance\center.engine --pad-model models\distance\pad.engine --device cuda:0
+```
+
+The distance service sends batches of eight. A YOLO ONNX graph must therefore
+have a dynamic batch dimension or a fixed batch of eight.
+
+PatchCore examples:
+
+```bat
+python patchcore_api_trt.py --model-path models\patchcore\model_runtime.onnx --device cuda:0 --input-size 256 256
+python patchcore_api_trt.py --model-path models\patchcore\model.pt --device cuda:0 --trust-pickle --preprocess imagenet --input-size 256 256 --center-crop 224 224
+python patchcore_api_trt.py --model-path models\patchcore\model_fp16.engine --device cuda:0
+```
+
+Only pass `--trust-pickle` for a trusted anomalib `.pt` artifact. A raw
+PatchCore state dictionary additionally needs the exact training architecture,
+for example `--backbone efficientnet_b5 --layers blocks.2 blocks.4`. PatchCore
+ONNX must consume NCHW RGB float32 `[0,1]` input and expose a scalar score per
+image; use `--score-output NAME` if its score output has a non-standard name.
+
+`start_model_services.bat` can select artifacts without editing source code:
+
+```bat
+set SPI_MODEL_DEVICE=cuda:0
+set PATCHCORE_MODEL_PATH=models\patchcore\model_runtime.onnx
+set DISTANCE_CENTER_MODEL_PATH=models\distance\center.onnx
+set DISTANCE_PAD_MODEL_PATH=models\distance\pad.onnx
+start_model_services.bat
+```
+
+For a trusted PatchCore `.pt`, also set the required runtime options, for
+example `set PATCHCORE_MODEL_ARGS=--trust-pickle --preprocess imagenet
+--input-size 256 256 --center-crop 224 224`.
+
 ## TensorRT Model Conversion Tool
 
 Build TensorRT engines on the target NVIDIA AIPC. TensorRT plans are tied to

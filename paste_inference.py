@@ -9,14 +9,28 @@ from ultralytics import YOLO
 from mobile_sam import sam_model_registry, SamAutomaticMaskGenerator, SamPredictor
 import matplotlib.pyplot as plt
 
+from app.infrastructure.model_runtime import (
+    detect_model_format,
+    normalize_device,
+    ultralytics_device,
+)
+
 
 class PasteDetectionInference:
-    def __init__(self, yolo_model_path: str):
+    def __init__(self, yolo_model_path: str, device: str = "cuda:0"):
         self.yolo_model_path = yolo_model_path
+        self.model_format = detect_model_format(yolo_model_path)
         self.yolo_model = None
         self.sam_model = None
         self.sam_predictor = None
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device_name = normalize_device(device)
+        if self.model_format == "engine" and self.device_name == "cpu":
+            raise RuntimeError("TensorRT .engine inference requires a CUDA device")
+        if self.device_name.startswith("cuda") and not torch.cuda.is_available():
+            raise RuntimeError(
+                f"Requested {self.device_name}, but torch.cuda.is_available() is false"
+            )
+        self.device = torch.device(self.device_name)
         self.models_loaded = False
 
     def load_models(self):
@@ -37,7 +51,17 @@ class PasteDetectionInference:
             raise FileNotFoundError(f"YOLO model not found: {self.yolo_model_path}")
 
         self.yolo_model = YOLO(self.yolo_model_path)
-        self.yolo_model.to(self.device)
+        try:
+            dummy = np.zeros((640, 640, 3), dtype=np.uint8)
+            self.yolo_model(
+                [dummy],
+                device=ultralytics_device(self.device_name),
+                verbose=False,
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"YOLO warm-up failed for {self.device_name}: {exc}"
+            ) from exc
 
         print("Loading Mobile SAM model...")
         # Load Mobile SAM model
@@ -144,7 +168,11 @@ class PasteDetectionInference:
 
             # Run YOLO detection
             yolo_start = time.time()
-            results = self.yolo_model(image_path, verbose=False)
+            results = self.yolo_model(
+                image_path,
+                device=ultralytics_device(self.device_name),
+                verbose=False,
+            )
 
             # Get closest bbox to center
             closest_bbox = self._get_center_closest_bbox(results, image_center)

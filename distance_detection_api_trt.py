@@ -10,6 +10,12 @@ import uvicorn
 import torch 
 from ultralytics import YOLO 
 import cv2  # type: ignore 
+
+from app.infrastructure.model_runtime import (
+    detect_model_format,
+    normalize_device,
+    ultralytics_device,
+)
  
 class InferenceRequest(BaseModel): 
     job_folder: str 
@@ -31,6 +37,7 @@ class DistanceDetectionInference:
         conf_threshold: float = 0.6, 
         closeness_threshold: float = 2.0, 
         iou_threshold: float = 0.5, 
+        device: str = "cuda:0",
     ) -> None: 
         self.center_model_path = center_model_path 
         self.pad_model_path = pad_model_path 
@@ -42,6 +49,9 @@ class DistanceDetectionInference:
         self.closeness_threshold = float(closeness_threshold) 
         # Skip pad boxes that overlap the selected center box with IoU >= this threshold 
         self.iou_threshold = float(iou_threshold) 
+        self.device = normalize_device(device)
+        self.center_model_format = None
+        self.pad_model_format = None
  
     def load(self) -> None: 
         if self.is_loaded: 
@@ -55,15 +65,21 @@ class DistanceDetectionInference:
             raise FileNotFoundError(f"Center model not found: {center_path}") 
         if not pad_path.exists(): 
             raise FileNotFoundError(f"Pad model not found: {pad_path}") 
+
+        self.center_model_format = detect_model_format(center_path)
+        self.pad_model_format = detect_model_format(pad_path)
+        if "engine" in {self.center_model_format, self.pad_model_format} and self.device == "cpu":
+            raise RuntimeError("TensorRT .engine inference requires a CUDA device")
+        if self.device.startswith("cuda") and not torch.cuda.is_available():
+            raise RuntimeError(
+                f"Requested {self.device}, but torch.cuda.is_available() is false"
+            )
  
         # Ultralytics handles loading .engine files automatically if file extension is .engine
         self.center_model = YOLO(str(center_path), task="detect") 
         self.pad_model = YOLO(str(pad_path), task="detect") 
  
-        if torch is not None and torch.cuda.is_available(): 
-            # For .engine files, they are typically already compiled for the GPU.
-            # But calling .to("cuda") generally ensures the YOLO wrapper is aware.
-            pass
+        inference_device = ultralytics_device(self.device)
 
         # --- WARM UP START ---
         print("Warming up models...")
@@ -73,11 +89,23 @@ class DistanceDetectionInference:
             dummy_batch = [np.zeros((640, 640, 3), dtype=np.uint8) for _ in range(8)]
             
             # Run a dummy inference (verbose=False keeps logs clean)
-            self.center_model(dummy_batch, conf=self.conf_threshold, verbose=False)
-            self.pad_model(dummy_batch, conf=self.conf_threshold, verbose=False)
+            self.center_model(
+                dummy_batch,
+                conf=self.conf_threshold,
+                device=inference_device,
+                verbose=False,
+            )
+            self.pad_model(
+                dummy_batch,
+                conf=self.conf_threshold,
+                device=inference_device,
+                verbose=False,
+            )
             print("Warm-up complete.")
         except Exception as e:
-            print(f"Warning: Model warm-up failed (startup will continue): {e}")
+            raise RuntimeError(
+                f"Model warm-up failed for {self.device}: {e}"
+            ) from e
         # --- WARM UP END ---
      
         self.is_loaded = True 
@@ -182,8 +210,19 @@ class DistanceDetectionInference:
         try:
             # Run inference on the full (padded) batch of 8
             # Note: We pass inference_imgs, which is always length 8 here
-            center_results_full = self.center_model(inference_imgs, conf=self.conf_threshold, verbose=False)
-            pad_results_full = self.pad_model(inference_imgs, conf=self.conf_threshold, verbose=False)
+            inference_device = ultralytics_device(self.device)
+            center_results_full = self.center_model(
+                inference_imgs,
+                conf=self.conf_threshold,
+                device=inference_device,
+                verbose=False,
+            )
+            pad_results_full = self.pad_model(
+                inference_imgs,
+                conf=self.conf_threshold,
+                device=inference_device,
+                verbose=False,
+            )
             
             # Slice the results back to the original size (remove dummy results)
             center_results_list = center_results_full[:original_batch_len]
@@ -321,6 +360,11 @@ def health() -> Dict[str, Any]:
     return { 
         "status": "healthy" if ready else "initializing", 
         "model_ready": bool(ready), 
+        "device": server_engine.device,
+        "center_model": server_engine.center_model_path,
+        "center_format": server_engine.center_model_format,
+        "pad_model": server_engine.pad_model_path,
+        "pad_format": server_engine.pad_model_format,
         "error": getattr(app.state, "startup_error", None), 
     } 
  
@@ -387,8 +431,9 @@ if __name__ == "__main__":  # pragma: no cover
     parser = argparse.ArgumentParser(description="Run Distance Detection Server") 
     parser.add_argument("--host", default="127.0.0.1", help="Host to bind") 
     parser.add_argument("--port", type=int, default=8002, help="Port to bind") 
-    parser.add_argument("--center-model", default="models/distance/center.engine", help="Path to center model") 
-    parser.add_argument("--pad-model", default="models/distance/pad.engine", help="Path to pad model") 
+    parser.add_argument("--center-model", default="models/distance/center.engine", help="Path to center .pt, .onnx, or .engine model")
+    parser.add_argument("--pad-model", default="models/distance/pad.engine", help="Path to pad .pt, .onnx, or .engine model")
+    parser.add_argument("--device", default="cuda:0", help="cpu, cuda, cuda:N, or GPU index")
     parser.add_argument("--conf-threshold", type=float, default=0.6, help="Confidence threshold for YOLO detections") 
     parser.add_argument("--closeness-threshold", type=float, default=2.0, help="Minimum edge distance to consider (px)") 
     parser.add_argument("--iou-threshold", type=float, default=0.5, help="IoU threshold to skip pad boxes overlapping the center bbox") 
@@ -400,11 +445,15 @@ if __name__ == "__main__":  # pragma: no cover
     server_engine.conf_threshold = float(args.conf_threshold) 
     server_engine.closeness_threshold = float(args.closeness_threshold) 
     server_engine.iou_threshold = float(args.iou_threshold) 
+    server_engine.device = normalize_device(args.device)
+
+    if args.workers != 1:
+        parser.error("GPU model services require --workers 1")
  
     uvicorn.run( 
-        "distance_detection_api_trt:app", 
+        app,
         host=args.host, 
         port=args.port, 
-        workers=args.workers, 
-        reload=True, 
+        workers=1,
+        reload=False,
     )
