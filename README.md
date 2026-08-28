@@ -518,7 +518,154 @@ uv sync --extra mac --group dev
 ```
 
 CUDA-only packages (`pycuda`, `onnxruntime-gpu`, TensorRT) never install on macOS.
-See the extras in `pyproject.toml` (`cuda`, `mac`, `analytics`, `paste`).
+See the extras in `pyproject.toml` (`cuda`, `tensorrt-export`, `mac`,
+`analytics`, `paste`).
+
+## TensorRT Model Conversion Tool
+
+Build TensorRT engines on the target NVIDIA AIPC. TensorRT plans are tied to
+the GPU architecture and TensorRT/CUDA runtime; do not build on a development
+PC and assume the plan is portable. The converter requires TensorRT 10.x except
+10.1.x and supports FP32/FP16. INT8 is deliberately excluded until a
+representative calibration set and SPI 22/23 decision-parity test are available.
+
+Install the optional converter dependencies in the normal CUDA environment:
+
+```bat
+pip install -r requirements-tensorrt-export.txt
+```
+
+TensorRT itself is installed separately from NVIDIA so it can match the AIPC
+driver/CUDA image. The tool imports converter dependencies lazily and does not
+change production worker startup.
+
+### YOLO `.pt` to `.engine`
+
+The Distance service currently pads center/pad inference to a fixed batch of 8,
+so the production defaults are FP16, batch 8, and 640x640:
+
+```bat
+python convert_to_tensorrt.py yolo ^
+  --input models\distance\pad.pt ^
+  --output models\distance\pad.engine ^
+  --task detect ^
+  --precision fp16 ^
+  --batch 8 ^
+  --imgsz 640 640 ^
+  --workspace-gib 4 ^
+  --save-onnx models\distance\pad.onnx
+```
+
+Add `--test-image D:\path\to\pad.jpg` to run a full padded inference batch
+after structural engine verification. The `.pt` route uses the pinned
+Ultralytics 8.3.187 exporter to produce ONNX, then uses this project's builder
+to create an exact TensorRT profile.
+
+### YOLO `.onnx` to `.engine`
+
+Ultralytics cannot re-export a loaded ONNX model. This route uses TensorRT's
+ONNX parser and writes the metadata prefix required by `YOLO(engine)`. An ONNX
+exported by Ultralytics normally contains names/task metadata. Otherwise provide
+them explicitly. When NMS metadata is also absent, declare the graph's real
+output as `raw` or `end2end`; this declaration never rewrites the graph:
+
+```bat
+python convert_to_tensorrt.py yolo ^
+  --input D:\models\center.onnx ^
+  --output models\distance\center.engine ^
+  --task detect ^
+  --class-names center ^
+  --onnx-output-contract raw ^
+  --precision fp16 ^
+  --batch 8 ^
+  --imgsz 640 640
+```
+
+For a dynamic ONNX, use an explicit profile. Height/width remain fixed for the
+current services:
+
+```bat
+python convert_to_tensorrt.py yolo ^
+  --input D:\models\center_dynamic.onnx ^
+  --output D:\models\center_dynamic.engine ^
+  --task detect --class-names center --onnx-output-contract raw ^
+  --dynamic --min-batch 1 --batch 4 --max-batch 8 ^
+  --imgsz 640 640
+```
+
+### PatchCore `.pt`/checkpoint to `.engine`
+
+PatchCore output is normalized to the current runtime contract:
+
+- one `input` tensor in NCHW RGB `[0,1]` format;
+- `anomaly_map` and `pred_score` outputs;
+- a dynamic batch profile of 1/8/8 by default;
+- a raw TensorRT plan without the Ultralytics metadata prefix.
+
+An anomalib-exported `model.pt` contains a Python-pickled module. Only load a
+trusted file and explicitly acknowledge that boundary. Standard anomalib 0.7
+preprocessing commonly resizes to 256, center-crops to 224, and applies
+ImageNet normalization; those operations must match training:
+
+```bat
+python convert_to_tensorrt.py patchcore ^
+  --input D:\models\patchcore\model.pt ^
+  --output models\patchcore\model_fp16.engine ^
+  --trust-pickle ^
+  --preprocess imagenet ^
+  --input-size 256 256 ^
+  --center-crop 224 224 ^
+  --dynamic --min-batch 1 --batch 8 --max-batch 8 ^
+  --precision fp16 ^
+  --save-onnx models\patchcore\model_runtime.onnx
+```
+
+For a Lightning/raw `state_dict`, architecture cannot be recovered from tensor
+weights. Supply the exact training values:
+
+```bat
+python convert_to_tensorrt.py patchcore ^
+  --input D:\models\patchcore\model.ckpt ^
+  --output models\patchcore\model_fp16.engine ^
+  --preprocess none ^
+  --input-size 256 256 ^
+  --backbone efficientnet_b5 ^
+  --layers blocks.2 blocks.4
+```
+
+`--preprocess none` matches the existing legacy runtime assumption, but is only
+correct when training also used unnormalized RGB `[0,1]`. The converter rejects
+an empty PatchCore memory bank and strictly loads state dictionaries.
+
+### PatchCore `.onnx` to `.engine`
+
+```bat
+python convert_to_tensorrt.py patchcore ^
+  --input D:\models\patchcore\model_runtime.onnx ^
+  --output models\patchcore\model_fp16.engine ^
+  --preprocess none ^
+  --input-size 256 256 ^
+  --dynamic --min-batch 1 --batch 8 --max-batch 8
+```
+
+An existing PatchCore ONNX is accepted only as a canonical runtime graph that
+already consumes NCHW RGB `[0,1]`, so it requires `--preprocess none`. The tool
+does not pretend to add ImageNet/custom normalization to an arbitrary graph;
+use the `.pt` route to embed those operations. A static batch-1 PatchCore ONNX
+is rejected for the current batch-8 API. Re-export a dynamic ONNX from `.pt`
+instead of editing only the ONNX input dimension.
+
+Every successful conversion writes `<model>.engine.json` with source/engine
+SHA256, exact profile and bindings, preprocessing contract, TensorRT/CUDA/GPU
+versions, and the requested/actual precision. Existing outputs are protected;
+use `--force` for an intentional atomic replacement.
+
+On Windows, `04_convert_to_tensorrt.bat` resolves the same project Python 3.12
+runtime as the service launchers and forwards all CLI arguments, for example:
+
+```bat
+04_convert_to_tensorrt.bat yolo --input pad.pt --output pad.engine --task detect
+```
 
 ## How to Run
 

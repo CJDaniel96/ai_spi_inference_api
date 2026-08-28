@@ -1,0 +1,11 @@
+# Model-conversion-only dependencies for the Windows/Linux NVIDIA AIPC.
+#
+# Install the normal CUDA environment first, then:
+#   pip install -r requirements-tensorrt-export.txt
+#
+# NVIDIA TensorRT is intentionally not pinned here. Install the TensorRT 10.x
+# Python package/build that matches the target AIPC driver and CUDA runtime;
+# this project rejects 10.1.x because Ultralytics 8.3.187 does not support it.
+
+onnx==1.17.0
+onnxslim>=0.1.59,<0.2

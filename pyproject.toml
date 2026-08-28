@@ -49,6 +49,16 @@ cuda = [
     "pycuda==2024.1; sys_platform != 'darwin'",
 ]
 
+# --- Offline model conversion on the NVIDIA AIPC -------------------------
+# TensorRT itself remains an NVIDIA-managed, out-of-band dependency because
+# its exact build must match the deployed driver/CUDA/runtime.  These packages
+# are only needed while producing ONNX/TensorRT artifacts; production workers
+# import none of them eagerly.
+tensorrt-export = [
+    "onnx==1.17.0; sys_platform != 'darwin'",
+    "onnxslim>=0.1.59,<0.2; sys_platform != 'darwin'",
+]
+
 # --- macOS / CPU-only development ----------------------------------------
 # CPU build of onnxruntime (never onnxruntime-gpu). Safe on Apple Silicon.
 mac = [
