@@ -16,6 +16,7 @@ import ast
 import hashlib
 import importlib
 import json
+import math
 import os
 import shutil
 import sys
@@ -126,7 +127,7 @@ class BuildResult:
     plan: bytes
     inspection: EngineInspection
     tensorrt_version: str
-    actual_precision: Precision
+    builder_precision_mode: Precision
 
 
 @dataclass(frozen=True)
@@ -218,6 +219,70 @@ def load_onnx_metadata(path: Path) -> dict[str, Any]:
     }
 
 
+def _onnx_model_tensors(model: Any) -> tuple[Any, ...]:
+    """Collect initializers and attribute tensors from every ONNX subgraph."""
+
+    tensors: list[Any] = []
+
+    def message_field(message: Any, field: str) -> Any | None:
+        if not hasattr(message, field):
+            return None
+        has_field = getattr(message, "HasField", None)
+        if callable(has_field):
+            try:
+                if not bool(has_field(field)):
+                    return None
+            except (TypeError, ValueError):
+                pass
+        return getattr(message, field)
+
+    def add_tensor(tensor: Any | None) -> None:
+        if tensor is not None:
+            tensors.append(tensor)
+
+    def add_sparse(sparse: Any | None) -> None:
+        if sparse is None:
+            return
+        add_tensor(getattr(sparse, "values", None))
+        add_tensor(getattr(sparse, "indices", None))
+
+    def visit_attributes(attributes: Any) -> None:
+        for attribute in attributes:
+            add_tensor(message_field(attribute, "t"))
+            for tensor in getattr(attribute, "tensors", ()):
+                add_tensor(tensor)
+            add_sparse(message_field(attribute, "sparse_tensor"))
+            for sparse in getattr(attribute, "sparse_tensors", ()):
+                add_sparse(sparse)
+            graph = message_field(attribute, "g")
+            if graph is not None:
+                visit_graph(graph)
+            for nested_graph in getattr(attribute, "graphs", ()):
+                visit_graph(nested_graph)
+
+    def visit_nodes(nodes: Any) -> None:
+        for node in nodes:
+            visit_attributes(getattr(node, "attribute", ()))
+
+    def visit_graph(graph: Any) -> None:
+        for tensor in getattr(graph, "initializer", ()):
+            add_tensor(tensor)
+        for sparse in getattr(graph, "sparse_initializer", ()):
+            add_sparse(sparse)
+        visit_nodes(getattr(graph, "node", ()))
+
+    visit_graph(model.graph)
+    for training_info in getattr(model, "training_info", ()):
+        for field in ("initialization", "algorithm"):
+            graph = message_field(training_info, field)
+            if graph is not None:
+                visit_graph(graph)
+    for function in getattr(model, "functions", ()):
+        visit_nodes(getattr(function, "node", ()))
+        visit_attributes(getattr(function, "attribute_proto", ()))
+    return tuple(tensors)
+
+
 def _onnx_external_data_files(path: Path) -> tuple[tuple[Path, Path], ...]:
     """Return safe ``(source, relative_location)`` external initializer files."""
 
@@ -233,9 +298,7 @@ def _onnx_external_data_files(path: Path) -> tuple[tuple[Path, Path], ...]:
     except Exception as exc:
         raise ConversionError(f"failed to inspect ONNX external data: {exc}") from exc
 
-    tensors = list(getattr(model.graph, "initializer", ()))
-    for sparse in getattr(model.graph, "sparse_initializer", ()):
-        tensors.extend((sparse.values, sparse.indices))
+    tensors = _onnx_model_tensors(model)
     external_marker = getattr(getattr(onnx, "TensorProto", object), "EXTERNAL", 1)
     source_root = path.parent.resolve()
     locations: dict[Path, Path] = {}
@@ -346,32 +409,226 @@ def _atomic_write_json(
     _atomic_write_bytes(path, encoded, overwrite=overwrite)
 
 
-def _atomic_copy_file(source: Path, target: Path, *, overwrite: bool) -> None:
-    if source.resolve() == target.resolve():
-        return
-    target.parent.mkdir(parents=True, exist_ok=True)
-    if target.exists() and not overwrite:
-        raise ConversionError(f"output already exists (use --force): {target}")
+def _stage_bytes(path: Path, payload: bytes) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
-        dir=target.parent,
-        prefix=f".{target.stem}.",
-        suffix=f"{target.suffix}.tmp",
+        dir=path.parent,
+        prefix=f".{path.stem}.",
+        suffix=f"{path.suffix}.staged",
     )
-    temporary_path = Path(temporary_name)
+    staged = Path(temporary_name)
     try:
-        with (
-            source.open("rb") as source_file,
-            os.fdopen(descriptor, "wb") as target_file,
-        ):
-            shutil.copyfileobj(source_file, target_file, length=1024 * 1024)
-            target_file.flush()
-            os.fsync(target_file.fileno())
-        if target.exists() and not overwrite:
-            raise ConversionError(f"output appeared during build: {target}")
-        os.replace(temporary_path, target)
-    except Exception:
-        temporary_path.unlink(missing_ok=True)
+        with os.fdopen(descriptor, "wb") as target:
+            target.write(payload)
+            target.flush()
+            os.fsync(target.fileno())
+    except BaseException:
+        staged.unlink(missing_ok=True)
         raise
+    return staged
+
+
+def _stage_copy(source: Path, destination: Path) -> Path:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=destination.parent,
+        prefix=f".{destination.stem}.",
+        suffix=f"{destination.suffix}.staged",
+    )
+    staged = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as destination_file:
+            with source.open("rb") as source_file:
+                shutil.copyfileobj(
+                    source_file,
+                    destination_file,
+                    length=1024 * 1024,
+                )
+                destination_file.flush()
+                os.fsync(destination_file.fileno())
+    except BaseException:
+        staged.unlink(missing_ok=True)
+        raise
+    return staged
+
+
+def _unused_backup_path(path: Path) -> Path:
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".rollback",
+    )
+    os.close(descriptor)
+    backup = Path(temporary_name)
+    backup.unlink()
+    return backup
+
+
+def _commit_staged_files(
+    staged: dict[Path, Path],
+    *,
+    overwrite: bool,
+    artifact_label: str,
+) -> None:
+    backups: dict[Path, Path] = {}
+    published: set[Path] = set()
+    try:
+        if overwrite:
+            for destination in staged:
+                if destination.exists():
+                    backup = _unused_backup_path(destination)
+                    # Register before the syscall so a Ctrl-C delivered after
+                    # the rename can still discover and restore this backup.
+                    backups[destination] = backup
+                    os.replace(destination, backup)
+        else:
+            for destination in staged:
+                if destination.exists():
+                    raise ConversionError(
+                        f"output appeared during build: {destination}"
+                    )
+
+        for destination, staged_path in staged.items():
+            if overwrite:
+                # Pre-registering is safe: rollback tolerates an absent target
+                # when interruption happens before os.replace starts.
+                published.add(destination)
+                os.replace(staged_path, destination)
+            else:
+                try:
+                    try:
+                        os.link(staged_path, destination)
+                    finally:
+                        # A Python signal may be delivered after the hard-link
+                        # syscall succeeds but before its next bytecode. Infer
+                        # success by inode so rollback does not miss the file.
+                        try:
+                            if os.path.samefile(staged_path, destination):
+                                published.add(destination)
+                        except OSError:
+                            pass
+                except FileExistsError as exc:
+                    raise ConversionError(
+                        f"output appeared during build: {destination}"
+                    ) from exc
+                if destination not in published:
+                    raise ConversionError(
+                        f"failed to verify published output: {destination}"
+                    )
+                staged_path.unlink()
+    except BaseException as exc:
+        # Reconcile non-force hard links from filesystem state. This closes
+        # the final bookkeeping window if interruption occurs while checking
+        # samefile() immediately after a successful os.link().
+        for destination, staged_path in staged.items():
+            if destination in backups or destination in published:
+                continue
+            try:
+                staged_stat = staged_path.stat()
+                destination_stat = destination.stat()
+            except OSError:
+                continue
+            if (
+                staged_stat.st_dev == destination_stat.st_dev
+                and staged_stat.st_ino == destination_stat.st_ino
+            ):
+                published.add(destination)
+        rollback_errors: list[str] = []
+        for destination in published - backups.keys():
+            try:
+                destination.unlink(missing_ok=True)
+            except OSError as rollback_exc:
+                rollback_errors.append(f"remove {destination}: {rollback_exc}")
+        for destination, backup in backups.items():
+            if backup.exists():
+                try:
+                    os.replace(backup, destination)
+                except OSError as rollback_exc:
+                    rollback_errors.append(
+                        f"restore {destination} from {backup}: {rollback_exc}"
+                    )
+        for staged_path in staged.values():
+            try:
+                staged_path.unlink(missing_ok=True)
+            except OSError as rollback_exc:
+                rollback_errors.append(f"remove {staged_path}: {rollback_exc}")
+        if rollback_errors:
+            raise ConversionError(
+                f"{artifact_label} publish failed and rollback was incomplete: "
+                + "; ".join(rollback_errors)
+            ) from exc
+        if not isinstance(exc, Exception):
+            raise
+        if isinstance(exc, ConversionError):
+            raise
+        raise ConversionError(
+            f"failed to publish {artifact_label}: {type(exc).__name__}: {exc}"
+        ) from exc
+    else:
+        for backup in backups.values():
+            try:
+                backup.unlink(missing_ok=True)
+            except OSError:
+                # The published set is already consistent. A stale hidden
+                # rollback file is safer than undoing a successful release.
+                pass
+        for staged_path in staged.values():
+            try:
+                staged_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def _publish_engine_and_manifest(
+    engine_path: Path,
+    engine_payload: bytes,
+    manifest_path: Path,
+    manifest: dict[str, Any],
+    *,
+    overwrite: bool,
+) -> None:
+    """Publish the engine/manifest pair with exception-safe rollback.
+
+    Two filesystem names cannot be switched in one portable atomic syscall.
+    Both files are therefore staged and fsynced first; intentional replacement
+    keeps same-directory rollback names until both switches succeed.  A normal
+    Python/filesystem error restores the previous pair instead of leaving a new
+    engine next to stale provenance.
+    """
+
+    if engine_path.resolve() == manifest_path.resolve():
+        raise ConversionError("engine and manifest paths must be different")
+    if engine_path.parent.resolve() != manifest_path.parent.resolve():
+        raise ConversionError("engine and manifest must share one output directory")
+    engine_path.parent.mkdir(parents=True, exist_ok=True)
+    if not overwrite:
+        for candidate in (engine_path, manifest_path):
+            if candidate.exists():
+                raise ConversionError(
+                    f"output already exists (use --force): {candidate}"
+                )
+
+    try:
+        manifest_payload = (
+            json.dumps(manifest, ensure_ascii=False, indent=2) + "\n"
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise ConversionError(
+            f"engine manifest is not JSON serializable: {exc}"
+        ) from exc
+    staged: dict[Path, Path] = {}
+    try:
+        staged[engine_path] = _stage_bytes(engine_path, engine_payload)
+        staged[manifest_path] = _stage_bytes(manifest_path, manifest_payload)
+    except BaseException:
+        for staged_path in staged.values():
+            staged_path.unlink(missing_ok=True)
+        raise
+    _commit_staged_files(
+        staged,
+        overwrite=overwrite,
+        artifact_label="engine/manifest pair",
+    )
 
 
 def _normalize_two_dimensions(values: Sequence[int], label: str) -> tuple[int, int]:
@@ -603,13 +860,47 @@ def _parser_error_text(parser: Any) -> str:
 
 
 def _set_workspace(config: Any, trt: Any, workspace_gib: float) -> None:
-    if workspace_gib <= 0:
-        raise ConversionError("--workspace-gib must be greater than zero")
-    workspace_bytes = int(workspace_gib * (1 << 30))
+    if not math.isfinite(workspace_gib) or workspace_gib <= 0:
+        raise ConversionError("--workspace-gib must be finite and greater than zero")
+    try:
+        workspace_bytes = int(workspace_gib * (1 << 30))
+    except (OverflowError, ValueError) as exc:
+        raise ConversionError(
+            "--workspace-gib resolves outside the supported byte range"
+        ) from exc
+    if workspace_bytes < 1 or workspace_bytes > sys.maxsize:
+        raise ConversionError(
+            "--workspace-gib resolves outside the supported byte range "
+            f"1..{sys.maxsize}"
+        )
     if hasattr(config, "set_memory_pool_limit"):
-        config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, workspace_bytes)
+        try:
+            config.set_memory_pool_limit(
+                trt.MemoryPoolType.WORKSPACE,
+                workspace_bytes,
+            )
+            if hasattr(config, "get_memory_pool_limit"):
+                configured = int(
+                    config.get_memory_pool_limit(trt.MemoryPoolType.WORKSPACE)
+                )
+                if configured != workspace_bytes:
+                    raise ConversionError(
+                        "TensorRT did not accept the requested workspace limit: "
+                        f"requested {workspace_bytes} bytes, configured {configured}"
+                    )
+        except ConversionError:
+            raise
+        except Exception as exc:
+            raise ConversionError(
+                f"TensorRT rejected the workspace limit: {exc}"
+            ) from exc
     elif hasattr(config, "max_workspace_size"):
-        config.max_workspace_size = workspace_bytes
+        try:
+            config.max_workspace_size = workspace_bytes
+        except Exception as exc:
+            raise ConversionError(
+                f"TensorRT rejected the workspace limit: {exc}"
+            ) from exc
     else:
         raise ConversionError("TensorRT builder config has no workspace API")
 
@@ -679,7 +970,6 @@ def _is_supported_runtime_float_dtype(dtype: str) -> bool:
 
 def _validate_patchcore_output_contract(
     inspection: EngineInspection,
-    profile: ShapeProfile,
 ) -> None:
     outputs = {tensor.name: tensor for tensor in inspection.outputs}
     anomaly_map = outputs.get("anomaly_map")
@@ -688,11 +978,11 @@ def _validate_patchcore_output_contract(
         raise ConversionError(
             "verified PatchCore engine must contain anomaly_map and pred_score outputs"
         )
-    if len(anomaly_map.shape) != 4 or anomaly_map.shape[1] not in (1, -1):
+    if len(anomaly_map.shape) != 4 or anomaly_map.shape[1] != 1:
         raise ConversionError(
             "PatchCore anomaly_map must have batch-first shape [B,1,H,W]"
         )
-    if any(dimension <= 0 for dimension in anomaly_map.shape[1:]):
+    if anomaly_map.shape[2] <= 0 or anomaly_map.shape[3] <= 0:
         raise ConversionError(
             "current PatchCore runtime requires fixed anomaly-map C/H/W dimensions"
         )
@@ -744,7 +1034,7 @@ def _validate_engine_contract(
                 "current PatchCore runtime supports a dynamic batch only; input "
                 "C/H/W dimensions must be fixed"
             )
-        _validate_patchcore_output_contract(inspection, profile)
+        _validate_patchcore_output_contract(inspection)
     elif not output_names:
         raise ConversionError("verified YOLO engine has no outputs")
     input_info = inspection.inputs[0]
@@ -819,7 +1109,7 @@ def build_tensorrt_plan(
         if isinstance(profile_index, int) and profile_index < 0:
             raise ConversionError("TensorRT rejected the optimization profile")
 
-    actual_precision: Precision = precision
+    builder_precision_mode: Precision = precision
     if precision == "fp16":
         if not bool(builder.platform_has_fast_fp16):
             if not allow_fp32_fallback:
@@ -827,9 +1117,18 @@ def build_tensorrt_plan(
                     "GPU does not report fast FP16 support; use --precision fp32 or "
                     "explicitly pass --allow-fp32-fallback"
                 )
-            actual_precision = "fp32"
+            builder_precision_mode = "fp32"
         else:
             config.set_flag(trt.BuilderFlag.FP16)
+    if (
+        builder_precision_mode == "fp32"
+        and hasattr(
+            getattr(trt, "BuilderFlag", object),
+            "TF32",
+        )
+        and hasattr(config, "clear_flag")
+    ):
+        config.clear_flag(trt.BuilderFlag.TF32)
 
     if hasattr(builder, "build_serialized_network"):
         serialized = builder.build_serialized_network(network, config)
@@ -858,8 +1157,60 @@ def build_tensorrt_plan(
         plan=plan,
         inspection=inspection,
         tensorrt_version=str(trt.__version__),
-        actual_precision=actual_precision,
+        builder_precision_mode=builder_precision_mode,
     )
+
+
+def _normalize_yolo_names(value: Any) -> dict[int, str]:
+    if isinstance(value, (list, tuple)):
+        items = list(enumerate(value))
+    elif isinstance(value, dict):
+        items = []
+        for key, name in value.items():
+            if isinstance(key, bool):
+                raise ConversionError("YOLO class-name indices must be integers")
+            if isinstance(key, int):
+                index = key
+            elif isinstance(key, str) and key.strip().isdigit():
+                index = int(key.strip())
+            else:
+                raise ConversionError(f"YOLO class-name index is invalid: {key!r}")
+            items.append((index, name))
+    else:
+        raise ConversionError("YOLO class-name metadata must be a list or mapping")
+    if not items:
+        raise ConversionError("YOLO class-name metadata cannot be empty")
+    normalized: dict[int, str] = {}
+    for index, name in items:
+        if not isinstance(name, str) or not name.strip():
+            raise ConversionError(
+                f"YOLO class name at index {index} must be a non-empty string"
+            )
+        if index in normalized:
+            raise ConversionError(f"YOLO class-name index is duplicated: {index}")
+        normalized[index] = name
+    expected = list(range(len(normalized)))
+    if sorted(normalized) != expected:
+        raise ConversionError(
+            "YOLO class-name indices must be contiguous and start at zero"
+        )
+    return {index: normalized[index] for index in expected}
+
+
+def _yolo_metadata_integer(value: Any, field: str) -> int:
+    if isinstance(value, bool):
+        raise ConversionError(f"YOLO {field} metadata must be an integer")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if math.isfinite(value) and value.is_integer():
+            return int(value)
+        raise ConversionError(f"YOLO {field} metadata must be an integer")
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.isdigit():
+            return int(stripped)
+    raise ConversionError(f"YOLO {field} metadata must be an integer")
 
 
 def _prepare_yolo_metadata(
@@ -875,35 +1226,62 @@ def _prepare_yolo_metadata(
 ) -> dict[str, Any]:
     prepared = dict(metadata)
     detected_task = prepared.get("task")
+    supported_tasks = {"detect", "segment", "pose", "classify", "obb"}
     if task == "auto":
-        if not isinstance(detected_task, str) or not detected_task:
+        if not isinstance(detected_task, str) or detected_task not in supported_tasks:
             raise ConversionError(
-                "YOLO ONNX has no task metadata; pass --task explicitly"
+                "YOLO ONNX task metadata is missing or unsupported; pass --task "
+                "explicitly"
             )
     else:
+        if task not in supported_tasks:
+            raise ConversionError(f"unsupported YOLO task: {task}")
         prepared["task"] = task
 
     if class_names:
         prepared["names"] = {index: name for index, name in enumerate(class_names)}
-    if not prepared.get("names"):
+    if "names" not in prepared:
         raise ConversionError(
             "YOLO ONNX has no class-name metadata; pass --class-names NAME [NAME ...]"
         )
+    prepared["names"] = _normalize_yolo_names(prepared["names"])
 
-    prepared["stride"] = int(prepared.get("stride") or stride)
+    prepared_stride = _yolo_metadata_integer(
+        prepared["stride"]
+        if "stride" in prepared and prepared["stride"] is not None
+        else stride,
+        "stride",
+    )
+    channels = _yolo_metadata_integer(
+        prepared["channels"]
+        if "channels" in prepared and prepared["channels"] is not None
+        else 3,
+        "channels",
+    )
+    if prepared_stride <= 0:
+        raise ConversionError("YOLO stride metadata must be positive")
+    if channels != 3:
+        raise ConversionError(
+            "current YOLO runtime requires three input channels; "
+            f"metadata has {channels}"
+        )
+    prepared["stride"] = prepared_stride
     prepared["batch"] = batch
     prepared["imgsz"] = [image_size[0], image_size[1]]
-    prepared["channels"] = int(prepared.get("channels") or 3)
+    prepared["channels"] = channels
     export_args = prepared.get("args")
     if not isinstance(export_args, dict):
         export_args = {}
     export_args = dict(export_args)
     export_args["dynamic"] = dynamic
     if nms is not None:
-        if "nms" in export_args and bool(export_args["nms"]) != nms:
-            raise ConversionError(
-                "requested YOLO output contract conflicts with ONNX metadata"
-            )
+        if "nms" in export_args:
+            if not isinstance(export_args["nms"], bool):
+                raise ConversionError("YOLO args.nms metadata must be boolean")
+            if export_args["nms"] != nms:
+                raise ConversionError(
+                    "requested YOLO output contract conflicts with ONNX metadata"
+                )
         export_args["nms"] = nms
     elif "nms" not in export_args:
         raise ConversionError(
@@ -911,7 +1289,8 @@ def _prepare_yolo_metadata(
             "pass --onnx-output-contract raw or end2end"
         )
     else:
-        export_args["nms"] = bool(export_args["nms"])
+        if not isinstance(export_args["nms"], bool):
+            raise ConversionError("YOLO args.nms metadata must be boolean")
     prepared["args"] = export_args
     try:
         # JSON round-tripping normalizes integer class-name keys before the
@@ -1295,22 +1674,255 @@ def _patchcore_preprocessing(
     custom_std: Sequence[float] | None,
 ) -> tuple[tuple[float, float, float] | None, tuple[float, float, float] | None]:
     if mode == "none":
-        if custom_mean or custom_std:
+        if custom_mean is not None or custom_std is not None:
             raise ConversionError("--mean/--std require --preprocess custom")
         return None, None
     if mode == "imagenet":
-        if custom_mean or custom_std:
+        if custom_mean is not None or custom_std is not None:
             raise ConversionError("--mean/--std require --preprocess custom")
         return _IMAGENET_MEAN, _IMAGENET_STD
+    if mode != "custom":
+        raise ConversionError(f"unsupported PatchCore preprocessing mode: {mode}")
     if custom_mean is None or custom_std is None:
         raise ConversionError("custom preprocessing requires both --mean and --std")
     if len(custom_mean) != 3 or len(custom_std) != 3:
         raise ConversionError("--mean and --std each require exactly three values")
     mean = tuple(float(value) for value in custom_mean)
     std = tuple(float(value) for value in custom_std)
+    if not all(math.isfinite(value) for value in (*mean, *std)):
+        raise ConversionError("--mean and --std values must be finite")
     if any(value <= 0 for value in std):
         raise ConversionError("all --std values must be positive")
     return mean, std  # type: ignore[return-value]
+
+
+def _metadata_transform_size(
+    transform: dict[str, Any],
+    transform_name: str,
+) -> tuple[int, int]:
+    try:
+        height = int(transform["height"])
+        width = int(transform["width"])
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        raise ConversionError(
+            f"PatchCore artifact {transform_name} has invalid height/width metadata"
+        ) from exc
+    if height <= 0 or width <= 0:
+        raise ConversionError(
+            f"PatchCore artifact {transform_name} height/width must be positive"
+        )
+    return height, width
+
+
+def _metadata_transform_triplet(
+    transform: dict[str, Any],
+    field: str,
+) -> tuple[float, float, float]:
+    values = transform.get(field)
+    if not isinstance(values, (list, tuple)) or len(values) != 3:
+        raise ConversionError(
+            f"PatchCore artifact Normalize.{field} must contain three values"
+        )
+    try:
+        result = tuple(float(value) for value in values)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ConversionError(
+            f"PatchCore artifact Normalize.{field} contains invalid values"
+        ) from exc
+    if not all(math.isfinite(value) for value in result):
+        raise ConversionError(
+            f"PatchCore artifact Normalize.{field} values must be finite"
+        )
+    return result  # type: ignore[return-value]
+
+
+def _patchcore_transform_from_metadata(
+    metadata: dict[str, Any],
+) -> PatchCoreTransform | None:
+    """Recover the eval transform serialized by anomalib 0.7.
+
+    A canonical anomalib Torch export treats ``metadata['transform']`` as the
+    inference contract.  Only operations that can be represented by the
+    current SPI runtime/export wrapper are accepted; silently ignoring another
+    evaluation transform would change anomaly scores.
+    """
+
+    serialized = metadata.get("transform")
+    if serialized is None:
+        return None
+    if not isinstance(serialized, (dict, list, tuple)):
+        raise ConversionError("PatchCore artifact transform metadata is malformed")
+
+    transforms: list[tuple[str, dict[str, Any]]] = []
+
+    def walk(value: Any) -> None:
+        if isinstance(value, dict):
+            class_name = value.get("__class_fullname__")
+            if isinstance(class_name, str) and class_name:
+                transforms.append((class_name.rsplit(".", 1)[-1], value))
+            for nested in value.values():
+                if isinstance(nested, (dict, list, tuple)):
+                    walk(nested)
+        elif isinstance(value, (list, tuple)):
+            for nested in value:
+                walk(nested)
+
+    walk(serialized)
+    if not transforms:
+        raise ConversionError(
+            "PatchCore artifact transform metadata contains no serialized transforms"
+        )
+
+    allowed_containers = {"Compose", "ToTensorV2"}
+    supported_operations = {"Resize", "CenterCrop", "Normalize", "ToFloat"}
+    unsupported = [
+        name
+        for name, _ in transforms
+        if name not in allowed_containers | supported_operations
+    ]
+    for name, transform in transforms:
+        if name not in allowed_containers | supported_operations:
+            continue
+        try:
+            probability = float(transform.get("p", 1.0))
+        except (TypeError, ValueError, OverflowError):
+            unsupported.append(f"{name}(invalid p)")
+            continue
+        always_apply = transform.get("always_apply", False) is True
+        if not always_apply and (
+            not math.isfinite(probability) or not math.isclose(probability, 1.0)
+        ):
+            unsupported.append(f"{name}(p={probability})")
+
+    def exactly_one(name: str) -> dict[str, Any] | None:
+        matches = [value for found, value in transforms if found == name]
+        if len(matches) > 1:
+            raise ConversionError(
+                f"PatchCore artifact contains multiple {name} transforms"
+            )
+        return matches[0] if matches else None
+
+    resize_node = exactly_one("Resize")
+    crop_node = exactly_one("CenterCrop")
+    normalize_node = exactly_one("Normalize")
+    to_float_node = exactly_one("ToFloat")
+    resize = _metadata_transform_size(resize_node, "Resize") if resize_node else None
+    if resize_node is not None:
+        try:
+            interpolation = int(resize_node.get("interpolation", 1))
+        except (TypeError, ValueError, OverflowError):
+            unsupported.append("Resize(invalid interpolation)")
+        else:
+            if interpolation != 1:
+                unsupported.append(f"Resize(interpolation={interpolation})")
+    center_crop = (
+        _metadata_transform_size(crop_node, "CenterCrop") if crop_node else None
+    )
+    mean: tuple[float, float, float] | None = None
+    std: tuple[float, float, float] | None = None
+    if normalize_node is not None:
+        mean = _metadata_transform_triplet(normalize_node, "mean")
+        std = _metadata_transform_triplet(normalize_node, "std")
+        if any(value <= 0 for value in std):
+            raise ConversionError(
+                "PatchCore artifact Normalize.std values must be positive"
+            )
+        try:
+            max_pixel_value = float(normalize_node.get("max_pixel_value", 255.0))
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ConversionError(
+                "PatchCore artifact Normalize.max_pixel_value is invalid"
+            ) from exc
+        if not math.isfinite(max_pixel_value) or not math.isclose(
+            max_pixel_value,
+            255.0,
+        ):
+            unsupported.append(f"Normalize(max_pixel_value={max_pixel_value})")
+    if to_float_node is not None:
+        try:
+            max_value = float(to_float_node.get("max_value", 255.0))
+        except (TypeError, ValueError, OverflowError):
+            unsupported.append("ToFloat(invalid max_value)")
+        else:
+            if not math.isfinite(max_value) or not math.isclose(max_value, 255.0):
+                unsupported.append(f"ToFloat(max_value={max_value})")
+    if normalize_node is not None and to_float_node is not None:
+        unsupported.append("Normalize+ToFloat")
+    elif normalize_node is None and to_float_node is None:
+        unsupported.append("missing Normalize/ToFloat")
+
+    return PatchCoreTransform(
+        resize=resize,
+        center_crop=center_crop,
+        mean=mean,
+        std=std,
+        unsupported=tuple(unsupported),
+    )
+
+
+def _validate_patchcore_artifact_transform(
+    metadata: dict[str, Any],
+    *,
+    engine_input_size: tuple[int, int],
+    model_input_size: tuple[int, int],
+    center_crop: tuple[int, int] | None,
+    mean: tuple[float, float, float] | None,
+    std: tuple[float, float, float] | None,
+    ignore_artifact_transform: bool,
+) -> PatchCoreTransform | None:
+    if "transform" not in metadata:
+        return None
+    if ignore_artifact_transform:
+        return None
+
+    transform = _patchcore_transform_from_metadata(metadata)
+    if transform is None:
+        return None
+    if transform.unsupported:
+        raise ConversionError(
+            "PatchCore artifact contains unsupported evaluation transforms: "
+            + ", ".join(transform.unsupported)
+            + ". Use --ignore-artifact-transform only after independently "
+            "validating preprocessing parity."
+        )
+    if transform.resize is not None and transform.resize != engine_input_size:
+        raise ConversionError(
+            f"PatchCore artifact Resize is {transform.resize}, but --input-size "
+            f"is {engine_input_size}"
+        )
+    if transform.center_crop != center_crop:
+        raise ConversionError(
+            f"PatchCore artifact CenterCrop is {transform.center_crop}, but the "
+            f"requested --center-crop is {center_crop}"
+        )
+    artifact_model_size = transform.center_crop or transform.resize or engine_input_size
+    if artifact_model_size != model_input_size:
+        raise ConversionError(
+            f"PatchCore artifact preprocessing produces {artifact_model_size}, "
+            f"but --model-input-size is {model_input_size}"
+        )
+
+    def triplets_match(
+        left: tuple[float, float, float] | None,
+        right: tuple[float, float, float] | None,
+    ) -> bool:
+        if left is None or right is None:
+            return left is right
+        return all(
+            math.isclose(left_value, right_value, rel_tol=1e-7, abs_tol=1e-9)
+            for left_value, right_value in zip(left, right, strict=True)
+        )
+
+    if not triplets_match(transform.mean, mean) or not triplets_match(
+        transform.std,
+        std,
+    ):
+        raise ConversionError(
+            "PatchCore artifact Normalize mean/std does not match --preprocess; "
+            "use the training transform values or explicitly pass "
+            "--ignore-artifact-transform after a parity test"
+        )
+    return transform
 
 
 def _export_patchcore_pt_to_onnx(
@@ -1330,6 +1942,7 @@ def _export_patchcore_pt_to_onnx(
     dynamic: bool,
     opset: int,
     export_device: str,
+    ignore_artifact_transform: bool,
 ) -> dict[str, Any]:
     torch = _require_module(
         "torch",
@@ -1348,6 +1961,25 @@ def _export_patchcore_pt_to_onnx(
         layers=layers,
         num_neighbors=num_neighbors,
     )
+    validated_transform = _validate_patchcore_artifact_transform(
+        artifact_metadata,
+        engine_input_size=engine_input_size,
+        model_input_size=model_input_size,
+        center_crop=center_crop,
+        mean=mean,
+        std=std,
+        ignore_artifact_transform=ignore_artifact_transform,
+    )
+    artifact_metadata = dict(artifact_metadata)
+    artifact_metadata["converter_transform_validation"] = {
+        "artifact_transform_present": "transform" in artifact_metadata,
+        "ignored_by_operator": bool(
+            ignore_artifact_transform and "transform" in artifact_metadata
+        ),
+        "validated_contract": (
+            asdict(validated_transform) if validated_transform is not None else None
+        ),
+    }
     model = model.to(export_device).eval()
     wrapper = _make_patchcore_export_wrapper(
         torch,
@@ -1456,7 +2088,11 @@ def _manifest_payload(
         "engine_sha256": engine_sha256 or _sha256(output),
         "engine_format": engine_format,
         "requested_precision": requested_precision,
-        "actual_precision": build.actual_precision,
+        "builder_precision_mode": build.builder_precision_mode,
+        "precision_note": (
+            "TensorRT builder mode; individual layers may use a supported "
+            "higher-precision fallback"
+        ),
         "workspace_gib": workspace_gib,
         "profile": asdict(profile),
         "io_tensors": [asdict(tensor) for tensor in build.inspection.tensors],
@@ -1466,37 +2102,79 @@ def _manifest_payload(
     }
 
 
-def _copy_optional_onnx(source: Path, target: Path | None, *, force: bool) -> None:
+def _copy_optional_onnx(
+    source: Path,
+    target: Path | None,
+    *,
+    force: bool,
+    forbidden_targets: Sequence[Path] = (),
+) -> None:
     if target is None:
         return
     if target.suffix.lower() != ".onnx":
         raise ConversionError("--save-onnx path must end in .onnx")
     external_files = _onnx_external_data_files(source)
-    if not force:
-        copies = [
-            (source, target),
-            *(
-                (external_source, target.parent / relative)
-                for external_source, relative in external_files
-            ),
-        ]
-        for copy_source, copy_target in copies:
-            if (
-                copy_target.exists()
-                and copy_target.resolve() != copy_source.resolve()
-            ):
-                raise ConversionError(
-                    f"output already exists (use --force): {copy_target}"
-                )
-    for external_source, relative in external_files:
-        _atomic_copy_file(
-            external_source,
-            target.parent / relative,
-            overwrite=force,
-        )
+    target_root = target.parent.resolve()
+    forbidden = {path.resolve() for path in forbidden_targets}
+    copies = [
+        (source, target),
+        *(
+            (external_source, target.parent / relative)
+            for external_source, relative in external_files
+        ),
+    ]
+    destinations: dict[Path, Path] = {}
+    for copy_source, copy_target in copies:
+        destination = copy_target.resolve()
+        try:
+            destination.relative_to(target_root)
+        except ValueError as exc:
+            raise ConversionError(
+                f"ONNX retained output escapes its destination directory: {copy_target}"
+            ) from exc
+        if destination in forbidden:
+            raise ConversionError(
+                "ONNX external-data destination conflicts with another output: "
+                f"{copy_target}"
+            )
+        previous_source = destinations.get(destination)
+        if previous_source is not None:
+            raise ConversionError(
+                "ONNX retained outputs resolve to the same destination: "
+                f"{copy_target} (also used by {previous_source})"
+            )
+        destinations[destination] = copy_source
+        if not force and copy_target.exists() and destination != copy_source.resolve():
+            raise ConversionError(f"output already exists (use --force): {copy_target}")
+
+    # Stage every external initializer before changing any retained artifact.
     # Publish the ONNX protobuf last so readers never observe a graph whose
     # external initializers have not been copied yet.
-    _atomic_copy_file(source, target, overwrite=force)
+    publish_order = [
+        *(
+            (external_source, target.parent / relative)
+            for external_source, relative in external_files
+        ),
+        (source, target),
+    ]
+    staged: dict[Path, Path] = {}
+    try:
+        for copy_source, copy_target in publish_order:
+            if copy_source.resolve() == copy_target.resolve():
+                continue
+            staged[copy_target] = _stage_copy(copy_source, copy_target)
+    except BaseException:
+        for staged_path in staged.values():
+            try:
+                staged_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
+    _commit_staged_files(
+        staged,
+        overwrite=force,
+        artifact_label="retained ONNX set",
+    )
 
 
 def _verify_yolo_inference(
@@ -1632,6 +2310,7 @@ def convert_yolo(args: argparse.Namespace) -> tuple[Path, Path]:
             onnx_path,
             args.save_onnx.resolve() if args.save_onnx else None,
             force=args.force,
+            forbidden_targets=(output, manifest_path),
         )
         manifest = _manifest_payload(
             kind="yolo",
@@ -1649,8 +2328,13 @@ def convert_yolo(args: argparse.Namespace) -> tuple[Path, Path]:
             onnx_metadata=metadata,
             engine_sha256=_sha256_bytes(payload),
         )
-        _atomic_write_bytes(output, payload, overwrite=args.force)
-        _atomic_write_json(manifest_path, manifest, overwrite=args.force)
+        _publish_engine_and_manifest(
+            output,
+            payload,
+            manifest_path,
+            manifest,
+            overwrite=args.force,
+        )
     return output, manifest_path
 
 
@@ -1711,6 +2395,11 @@ def convert_patchcore(args: argparse.Namespace) -> tuple[Path, Path]:
         temporary_root = Path(directory)
         artifact_metadata: dict[str, Any] = {}
         if source.suffix.lower() == ".onnx":
+            if args.ignore_artifact_transform:
+                raise ConversionError(
+                    "--ignore-artifact-transform applies only to a PatchCore .pt/"
+                    ".pth/.ckpt artifact that contains anomalib transform metadata"
+                )
             if args.preprocess != "none":
                 raise ConversionError(
                     "an existing PatchCore ONNX graph cannot be safely rewritten "
@@ -1743,6 +2432,7 @@ def convert_patchcore(args: argparse.Namespace) -> tuple[Path, Path]:
                 dynamic=args.dynamic,
                 opset=args.opset,
                 export_device=args.export_device,
+                ignore_artifact_transform=args.ignore_artifact_transform,
             )
 
         build = build_tensorrt_plan(
@@ -1759,6 +2449,7 @@ def convert_patchcore(args: argparse.Namespace) -> tuple[Path, Path]:
             onnx_path,
             args.save_onnx.resolve() if args.save_onnx else None,
             force=args.force,
+            forbidden_targets=(output, manifest_path),
         )
         mean, std = _patchcore_preprocessing(
             args.preprocess,
@@ -1788,13 +2479,23 @@ def convert_patchcore(args: argparse.Namespace) -> tuple[Path, Path]:
             onnx_metadata=artifact_metadata,
             engine_sha256=_sha256_bytes(build.plan),
         )
-        _atomic_write_bytes(output, build.plan, overwrite=args.force)
-        _atomic_write_json(manifest_path, manifest, overwrite=args.force)
+        _publish_engine_and_manifest(
+            output,
+            build.plan,
+            manifest_path,
+            manifest,
+            overwrite=args.force,
+        )
     return output, manifest_path
 
 
 def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--input", type=Path, required=True, help="source model")
+    parser.add_argument(
+        "--input",
+        type=Path,
+        required=True,
+        help="trusted source model (.pt/.ckpt/TorchScript may execute code)",
+    )
     parser.add_argument(
         "--output",
         type=Path,
@@ -1946,7 +2647,15 @@ def build_parser() -> argparse.ArgumentParser:
     patchcore.add_argument(
         "--trust-pickle",
         action="store_true",
-        help="allow trusted Python-pickled anomalib module checkpoints",
+        help="allow a trusted Python-pickled anomalib module checkpoint",
+    )
+    patchcore.add_argument(
+        "--ignore-artifact-transform",
+        action="store_true",
+        help=(
+            "override anomalib .pt transform metadata only after an independent "
+            "preprocessing/decision-parity test"
+        ),
     )
     patchcore.add_argument(
         "--backbone",
@@ -1984,8 +2693,8 @@ def _print_result(output: Path, manifest: Path) -> None:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    if args.workspace_gib <= 0:
-        parser.error("--workspace-gib must be greater than zero")
+    if not math.isfinite(args.workspace_gib) or args.workspace_gib <= 0:
+        parser.error("--workspace-gib must be finite and greater than zero")
     if args.opset <= 0:
         parser.error("--opset must be positive")
     if getattr(args, "stride", 1) <= 0:

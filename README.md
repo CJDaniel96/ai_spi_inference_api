@@ -528,6 +528,9 @@ the GPU architecture and TensorRT/CUDA runtime; do not build on a development
 PC and assume the plan is portable. The converter requires TensorRT 10.x except
 10.1.x and supports FP32/FP16. INT8 is deliberately excluded until a
 representative calibration set and SPI 22/23 decision-parity test are available.
+Treat every model artifact as executable input: only convert trusted `.pt`,
+`.pth`, `.ckpt`, TorchScript, and ONNX files. In particular, both Ultralytics
+and Python-pickled anomalib checkpoints may execute code while loading.
 
 Install the optional converter dependencies in the normal CUDA environment:
 
@@ -605,7 +608,10 @@ PatchCore output is normalized to the current runtime contract:
 An anomalib-exported `model.pt` contains a Python-pickled module. Only load a
 trusted file and explicitly acknowledge that boundary. Standard anomalib 0.7
 preprocessing commonly resizes to 256, center-crops to 224, and applies
-ImageNet normalization; those operations must match training:
+ImageNet normalization; those operations must match training. For a canonical
+anomalib export, the converter reads its authoritative `metadata.transform` and
+rejects a conflicting Resize, CenterCrop, Normalize/ToFloat, or unsupported
+evaluation operation:
 
 ```bat
 python convert_to_tensorrt.py patchcore ^
@@ -619,6 +625,11 @@ python convert_to_tensorrt.py patchcore ^
   --precision fp16 ^
   --save-onnx models\patchcore\model_runtime.onnx
 ```
+
+`--ignore-artifact-transform` is an explicit escape hatch for a trusted `.pt`
+whose metadata cannot be represented by this tool. Use it only after comparing
+PyTorch and TensorRT scores plus final 22/23 decisions on a representative
+dataset; the override is recorded in the manifest.
 
 For a Lightning/raw `state_dict`, architecture cannot be recovered from tensor
 weights. Supply the exact training values:
@@ -657,8 +668,12 @@ instead of editing only the ONNX input dimension.
 
 Every successful conversion writes `<model>.engine.json` with source/engine
 SHA256, exact profile and bindings, preprocessing contract, TensorRT/CUDA/GPU
-versions, and the requested/actual precision. Existing outputs are protected;
-use `--force` for an intentional atomic replacement.
+versions, requested precision, and the enabled TensorRT builder precision mode.
+TensorRT may still select a higher-precision tactic for an individual FP16
+layer, so this is intentionally not labelled as the exact per-layer precision.
+Existing outputs are protected; use `--force` for an intentional replacement.
+The engine and manifest are staged together and restored as a pair if either
+filesystem switch fails.
 
 On Windows, `04_convert_to_tensorrt.bat` resolves the same project Python 3.12
 runtime as the service launchers and forwards all CLI arguments, for example:
