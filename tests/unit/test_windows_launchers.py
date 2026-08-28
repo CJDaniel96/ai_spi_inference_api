@@ -139,3 +139,12 @@ def test_tensorrt_converter_launcher_forwards_all_arguments() -> None:
     assert 'call "%~dp0resolve_python.bat"' in active_text
     assert '"%python_exe%" "%~dp0convert_to_tensorrt.py" %*' in active_text
     assert "-m app.pipeline" not in active_text
+
+
+def test_python_resolver_avoids_fragile_batch_labels() -> None:
+    active_text = "\n".join(_active_lines(_launcher("resolve_python.bat"))).lower()
+
+    assert "goto " not in active_text
+    assert ":validate_python" not in active_text
+    assert ".venv\\scripts\\python.exe" in active_text
+    assert "sys.version_info[:2] == (3, 12)" in active_text
