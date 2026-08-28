@@ -1,7 +1,8 @@
 @echo off
 setlocal enableextensions
 
-REM Change to this script's directory so module imports resolve
+REM Compatibility-only scanner.  Never run it together with Stage 01 because
+REM both would monitor the same machine share.
 cd /d "%~dp0"
 
 if /i not "%SPI_ENABLE_LEGACY_SCANNER%"=="1" (
@@ -14,7 +15,6 @@ call "%~dp0resolve_python.bat"
 if errorlevel 1 exit /b 1
 if not defined AI_CONFIG_PATH set "AI_CONFIG_PATH=%~dp0config\ai_server.json"
 
-REM Scan Jobs
-start "SPI_02_Scan" "%PYTHON_EXE%" scan_jobs.py
+start "SPI_Legacy_Scan" "%PYTHON_EXE%" scan_jobs.py
 
 endlocal

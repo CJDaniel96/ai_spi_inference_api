@@ -77,7 +77,7 @@ analytics = [
 # --- Optional: paste-detection server (port 8001) ------------------------
 # paste_inference.py imports MobileSAM, which is only available as a git
 # dependency. Kept opt-in because git sources complicate universal locking and
-# the 8001 service is currently disabled in 02_api_services.bat.
+# the 8001 service is currently disabled in start_model_services.bat.
 # TODO: confirm whether the paste-detection service is still required.
 paste = [
     "mobile-sam",

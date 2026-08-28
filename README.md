@@ -675,11 +675,11 @@ Existing outputs are protected; use `--force` for an intentional replacement.
 The engine and manifest are staged together and restored as a pair if either
 filesystem switch fails.
 
-On Windows, `04_convert_to_tensorrt.bat` resolves the same project Python 3.12
+On Windows, `convert_to_tensorrt.bat` resolves the same project Python 3.12
 runtime as the service launchers and forwards all CLI arguments, for example:
 
 ```bat
-04_convert_to_tensorrt.bat yolo --input pad.pt --output pad.engine --task detect
+convert_to_tensorrt.bat yolo --input pad.pt --output pad.engine --task detect
 ```
 
 ## How to Run
@@ -704,28 +704,46 @@ uv run python -m app.pipeline publisher --config D:/path/to/ai_server.json
 # Optional compatibility API; binds server.host:port (default 127.0.0.1:5050)
 uv run python -m app.main
 
-# Model servers + optional compatibility API; does not start scan_jobs.py
-02_api_services.bat
+# Required model servers only; does not start the 5050 API or scan_jobs.py
+start_model_services.bat
+
+# Optional synchronous compatibility API on port 5050
+start_legacy_api.bat
 ```
 
-Windows convenience launchers for the three independent stages are:
+The Windows launcher numbers describe the **data-flow stages**, and each launcher
+runs as an independent foreground process:
 
 ```bat
-03_pipeline_ingest.bat
-03_pipeline_inference.bat
+01_pipeline_ingest.bat
+02_pipeline_inference.bat
 03_pipeline_publisher.bat
 ```
+
+| Launcher | Responsibility | Does not do |
+| --- | --- | --- |
+| `01_pipeline_ingest.bat` | Monitor today's timestamp folders, validate every CSV/image, and preserve immutable raw input | AI inference or machine return |
+| `02_pipeline_inference.bat` | Claim durable ready jobs and write a deadline-fenced result manifest | Scan the SPI share or publish Primary CSVs |
+| `03_pipeline_publisher.bat` | Publish Primary CSVs first, apply all-23 deadline fallback when needed, then save returned/processed backups | Monitor new folders or invoke model inference |
+
+All three forward optional CLI arguments. For example,
+`01_pipeline_ingest.bat --once --date 2026-08-26` submits one historical-date
+job, and `02_pipeline_inference.bat --once --worker-id manual-inference` claims at
+most one inference job.
 
 All Windows launchers call `resolve_python.bat`: an explicitly configured
 `PYTHON_EXE` wins, followed by `.venv`, the setup-created Conda environment, and
 finally Python on `PATH`. Python 3.12 is validated before startup. The launchers
-also default `AI_CONFIG_PATH` to the checked-in config. `02_api_services.bat` no
-longer starts the legacy scanner; `02_scan.bat` requires the explicit safety flag
-`SPI_ENABLE_LEGACY_SCANNER=1` and must be used only while durable Ingest is stopped.
+also default `AI_CONFIG_PATH` to the checked-in config. `start_model_services.bat`
+starts only ports `8000` and `8002`. `legacy_scan.bat` requires the explicit safety
+flag `SPI_ENABLE_LEGACY_SCANNER=1` and must be used only while Stage 01 is stopped.
+The unnumbered compatibility and utility launchers are deliberately outside the
+three-stage production data flow.
 
-Start Publisher first, then required model services (`8000` and `8002`), Inference,
-and finally Ingest. Publisher must stay available even when models are down because
-it owns the deadline fallback.
+The numbers are not the production boot order. Start Stage 03 Publisher first,
+then required model services (`8000` and `8002`) and wait until both are healthy,
+then start Stage 02 Inference, and finally Stage 01 Ingest. Publisher must stay
+available even when models are down because it owns the deadline fallback.
 
 Each stage writes a separate system log derived from `logging.system_log_file`, for
 example `system.ingest`, `system.inference`, and `system.publisher` under
@@ -752,26 +770,26 @@ nssm install SPI_Model_Distance "%PYTHON_EXE%" distance_detection_api_trt.py --h
 nssm set SPI_Model_Distance AppDirectory "%REPO%"
 nssm set SPI_Model_Distance Start SERVICE_AUTO_START
 
-nssm install SPI_Pipeline_Ingest "%PYTHON_EXE%" -m app.pipeline ingest
-nssm set SPI_Pipeline_Ingest AppDirectory "%REPO%"
-nssm set SPI_Pipeline_Ingest AppEnvironmentExtra "AI_CONFIG_PATH=%CONFIG%"
-nssm set SPI_Pipeline_Ingest Start SERVICE_AUTO_START
+nssm install SPI_01_Ingest "%PYTHON_EXE%" -m app.pipeline ingest
+nssm set SPI_01_Ingest AppDirectory "%REPO%"
+nssm set SPI_01_Ingest AppEnvironmentExtra "AI_CONFIG_PATH=%CONFIG%"
+nssm set SPI_01_Ingest Start SERVICE_AUTO_START
 
-nssm install SPI_Pipeline_Inference "%PYTHON_EXE%" -m app.pipeline inference
-nssm set SPI_Pipeline_Inference AppDirectory "%REPO%"
-nssm set SPI_Pipeline_Inference AppEnvironmentExtra "AI_CONFIG_PATH=%CONFIG%"
-nssm set SPI_Pipeline_Inference Start SERVICE_AUTO_START
+nssm install SPI_02_Inference "%PYTHON_EXE%" -m app.pipeline inference
+nssm set SPI_02_Inference AppDirectory "%REPO%"
+nssm set SPI_02_Inference AppEnvironmentExtra "AI_CONFIG_PATH=%CONFIG%"
+nssm set SPI_02_Inference Start SERVICE_AUTO_START
 
-nssm install SPI_Pipeline_Publisher "%PYTHON_EXE%" -m app.pipeline publisher
-nssm set SPI_Pipeline_Publisher AppDirectory "%REPO%"
-nssm set SPI_Pipeline_Publisher AppEnvironmentExtra "AI_CONFIG_PATH=%CONFIG%"
-nssm set SPI_Pipeline_Publisher Start SERVICE_AUTO_START
+nssm install SPI_03_Publisher "%PYTHON_EXE%" -m app.pipeline publisher
+nssm set SPI_03_Publisher AppDirectory "%REPO%"
+nssm set SPI_03_Publisher AppEnvironmentExtra "AI_CONFIG_PATH=%CONFIG%"
+nssm set SPI_03_Publisher Start SERVICE_AUTO_START
 
-nssm start SPI_Pipeline_Publisher
+nssm start SPI_03_Publisher
 nssm start SPI_Model_Anomaly
 nssm start SPI_Model_Distance
-nssm start SPI_Pipeline_Inference
-nssm start SPI_Pipeline_Ingest
+nssm start SPI_02_Inference
+nssm start SPI_01_Ingest
 ```
 
 If Python comes from Conda, set `PYTHON_EXE` to that environment's `python.exe`.
