@@ -30,7 +30,7 @@ def project_path(value: str) -> Path:
 
 def load_settings(path: Path) -> dict:
     settings = json.loads(path.read_text(encoding="utf-8"))
-    for key in ("site", "factory", "line", "station_id", "output_path", "state_path"):
+    for key in ("site", "factory", "line", "station_id", "output_path"):
         if not isinstance(settings.get(key), str) or not settings[key].strip():
             raise ValueError(f"Configure {key} in {path}")
     if float(settings.get("poll_seconds", 30)) <= 0:
@@ -134,89 +134,53 @@ def export_once(database: Path, settings: dict) -> int:
             "SELECT job_id, original_backup_folder FROM pipeline_jobs "
             "WHERE status = 'DONE' ORDER BY completed_at, job_id"
         ).fetchall()
-    state_path = project_path(settings["state_path"])
-    state_path.parent.mkdir(parents=True, exist_ok=True)
     count = 0
     failures = 0
-    with sqlite3.connect(state_path, timeout=60) as state:
-        state.execute(
-            "CREATE TABLE IF NOT EXISTS exports (export_key TEXT PRIMARY KEY)"
-        )
-        for job_id, backup in jobs:
-            try:
-                root = project_path(backup) / "ai_result"
-                manifest = json.loads(
-                    (root / "manifest.json").read_text(encoding="utf-8")
+    for job_id, backup in jobs:
+        try:
+            root = project_path(backup) / "ai_result"
+            manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+            if manifest["job_id"] != job_id:
+                raise ValueError("Backup manifest job ID mismatch")
+            date_folder = datetime.strptime(job_id, "%Y%m%d%H%M%S").strftime("%Y-%m-%d")
+            for item in manifest["csv_results"]:
+                source_name = item["source_csv"]
+                filename = Path(item["processed_csv"]).name
+                source = safe_child(root / "processed", filename)
+                archived = safe_child(root / "exported", filename)
+                if not source.exists():
+                    if archived.is_file():
+                        continue
+                    raise FileNotFoundError(
+                        f"Missing processed and exported CSV: {source}"
+                    )
+                if archived.exists():
+                    raise FileExistsError(
+                        f"Refusing to overwrite exported backup: {archived}"
+                    )
+                groups = convert_rows(
+                    source, job_id, source_name, settings, item["result_codes"]
                 )
-                if manifest["job_id"] != job_id:
-                    raise ValueError("Backup manifest job ID mismatch")
-                date_folder = datetime.strptime(job_id, "%Y%m%d%H%M%S").strftime(
-                    "%Y-%m-%d"
-                )
-                for item in manifest["csv_results"]:
-                    source_name = item["source_csv"]
-                    # Each source and suffix is independently checkpointed: retrying
-                    # OK after failure does not republish an already committed NG.
-                    key = json.dumps([job_id, source_name], ensure_ascii=False)
-                    state.execute("BEGIN IMMEDIATE")
-                    try:
-                        done = {
-                            suffix
-                            for suffix in ("NG", "OK")
-                            if state.execute(
-                                "SELECT 1 FROM exports WHERE export_key = ?",
-                                (key + suffix,),
-                            ).fetchone()
-                        }
-                        if len(done) == 2:
-                            state.commit()
-                            continue
-                        source = safe_child(
-                            root / "processed", Path(item["processed_csv"]).name
-                        )
-                        groups = convert_rows(
-                            source, job_id, source_name, settings, item["result_codes"]
-                        )
-                        token = hashlib.sha256(key.encode()).hexdigest()[:16]
-                        label = "_".join(
-                            settings[k] for k in ("site", "factory", "line")
-                        )
-                        label = re.sub(r"[^\w-]", "-", label)
-                        for suffix, rows in groups.items():
-                            if suffix in done:
-                                continue
-                            # A source token avoids collisions for multi-CSV jobs.
-                            name = f"{job_id}_{token}_{label}_SPI_{suffix}.csv"
-                            destination = (
-                                project_path(settings["output_path"])
-                                / date_folder
-                                / name
-                            )
-                            atomic_csv(destination, rows)
-                            state.execute(
-                                "INSERT INTO exports VALUES (?)", (key + suffix,)
-                            )
-                            state.commit()
-                            count += 1
-                            LOG.info("Exported %s (%d rows)", destination, len(rows))
-                            # Reacquire the lock and recheck in case another exporter
-                            # completed the remaining suffix while the lock was free.
-                            state.execute("BEGIN IMMEDIATE")
-                            done = {
-                                s
-                                for s in ("NG", "OK")
-                                if state.execute(
-                                    "SELECT 1 FROM exports WHERE export_key = ?",
-                                    (key + s,),
-                                ).fetchone()
-                            }
-                        state.commit()
-                    except Exception:
-                        state.rollback()
-                        raise
-            except Exception:
-                failures += 1
-                LOG.exception("Export failed for job %s; will retry next scan", job_id)
+                key = json.dumps([job_id, source_name], ensure_ascii=False)
+                token = hashlib.sha256(key.encode()).hexdigest()[:16]
+                label = "_".join(settings[k] for k in ("site", "factory", "line"))
+                label = re.sub(r"[^\w-]", "-", label)
+                # Prepare the archive directory before publishing. Move only after
+                # both complete CSVs are visible; failures retain the input to retry.
+                archived.parent.mkdir(parents=True, exist_ok=True)
+                for suffix, rows in groups.items():
+                    name = f"{job_id}_{token}_{label}_SPI_{suffix}.csv"
+                    destination = (
+                        project_path(settings["output_path"]) / date_folder / name
+                    )
+                    atomic_csv(destination, rows)
+                    count += 1
+                    LOG.info("Exported %s (%d rows)", destination, len(rows))
+                source.rename(archived)
+                LOG.info("Moved processed backup to %s", archived)
+        except Exception:
+            failures += 1
+            LOG.exception("Export failed for job %s; will retry next scan", job_id)
     if failures:
         raise RuntimeError(f"{failures} job(s) failed export")
     return count
@@ -241,8 +205,6 @@ def main() -> int:
         settings = load_settings(args.config)
         pipeline = json.loads(args.pipeline_config.read_text(encoding="utf-8"))
         database = project_path(pipeline["pipeline"]["database_path"])
-        if project_path(settings["state_path"]).resolve() == database.resolve():
-            raise ValueError("Export state_path must differ from pipeline database")
         while True:
             try:
                 export_once(database, settings)

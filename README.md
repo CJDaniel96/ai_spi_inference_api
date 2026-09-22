@@ -1007,15 +1007,19 @@ linted/formatted yet — see "Known Behavior".
 
 `04_pipeline_db_export.bat` starts an independent exporter after the three-stage
 pipeline. It reads only `DONE` jobs from the pipeline SQLite database and consumes
-`ai_result/processed/*_processed.csv` using the backed-up manifest. It never moves
-source files, runs inference, or changes the pipeline job state.
+`ai_result/processed/*_processed.csv` using the backed-up manifest. After both output CSVs are published, it moves the processed CSV to
+`ai_result/exported/` in the same job backup. Original SPI input, returned CSVs,
+and the manifest remain in place. It never runs inference or changes pipeline
+job state. The manifest retains its original processed relative path; after
+export, locate that CSV by basename under `ai_result/exported/`.
 
 Configure `config/db_export.json`. The checked-in site/factory are `SX`, and
 line/station_id are `SPI`; the MiNiFi watch root is
 `D:\Project\AMR\Result\TEMP\spi`. `--pipeline-config` selects the pipeline JSON
 (default: `AI_CONFIG_PATH`, or `config/ai_server.json`). All relative data paths
-resolve under the project root. Keep `state_path` on local disk, separate from the
-pipeline database and the MiNiFi watch folder.
+resolve under the project root. There is no export registry database or
+`state_path` setting. The existing pipeline database is queried read-only to
+select completed jobs; it is not used to record exports.
 
 ```bat
 04_pipeline_db_export.bat
@@ -1049,13 +1053,31 @@ product metadata. Each CSV is written to a temporary `.tmp` file and atomically
 renamed. Configure MiNiFi to collect `*.csv` recursively and exclude temporary
 files. The exporter only creates files; MiNiFi remains responsible for upload.
 
-A separate SQLite registry checkpoints each published suffix, so ordinary
-restarts or removal of an uploaded file do not recreate it. Preserve this state
-file across deployments. A crash between publication and registry commit can
-replay a file: DB ingestion should deduplicate/upsert by the stable `uuid`.
-This is not an exactly-once delivery guarantee. Changing output configuration
-does not automatically replay historical exports. Each scan considers all DONE
-jobs, including jobs completed before the exporter was installed.
+File movement determines what remains to export:
+
+```text
+ai_result/processed/{stem}_processed.csv   # Pending export
+    -> write complete NG and OK CSVs to the MiNiFi folder
+ai_result/exported/{stem}_processed.csv    # Retained backup after successful export
+```
+
+MiNiFi can consume and delete the output CSVs. Once a source has moved to
+`exported/`, later scans skip it even when those output files no longer exist.
+Run only one Stage 04 process per pipeline. Existing archived files are never
+intentionally overwritten; a source/archive collision is reported as an error.
+Missing files in both locations are also reported rather than silently skipped.
+
+If output or the final move fails, the source stays in `processed/` for retry.
+A partial publication or a crash before the move can therefore replay a CSV
+already consumed by MiNiFi. UUIDs remain stable so DB ingestion can deduplicate
+or upsert those rows; file movement does not guarantee exactly-once delivery.
+
+All existing DONE jobs with pending processed files are eligible, including
+historical jobs. On upgrade from the export-registry version, the old
+`db_export.sqlite3` is ignored (not deleted), so files previously exported but
+still in `processed/` will be exported again. To avoid that replay, move only
+known, already-exported processed files into each job's `ai_result/exported/`
+before starting this version. Retain the original filenames.
 
 Failures are logged to the console and retried on the next scan (30 seconds by
 default); `--once` exits nonzero on failure. Statistics CSV generation and DAT

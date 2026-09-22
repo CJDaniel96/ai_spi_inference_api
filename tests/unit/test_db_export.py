@@ -16,7 +16,6 @@ def export_case(tmp_path):
         line="TEST",
         station_id="TEST",
         output_path=str(tmp_path / "upload"),
-        state_path=str(tmp_path / "export.db"),
     )
     database = tmp_path / "pipeline.db"
     root = tmp_path / "backup" / "ai_result"
@@ -75,7 +74,9 @@ def test_export_schema_codes_nulls_and_no_reexport_after_consumption(export_case
     for path in outputs:
         path.unlink()
     assert db_export.export_once(database, settings) == 0
-    assert source.read_bytes() == before
+    assert not source.exists()
+    assert (source.parent.parent / "exported" / source.name).read_bytes() == before
+    assert sorted(p.name for p in database.parent.glob("*.db")) == ["pipeline.db"]
     assert not list(db_export.project_path(settings["output_path"]).rglob("*.csv"))
 
 
@@ -94,8 +95,8 @@ def test_invalid_or_mismatched_codes_fail_without_output(export_case):
     assert not list(db_export.project_path(settings["output_path"]).rglob("*.csv"))
 
 
-def test_partial_publish_retry_preserves_committed_suffix(export_case, monkeypatch):
-    database, settings, _, _ = export_case
+def test_partial_publish_keeps_input_for_retry(export_case, monkeypatch):
+    database, settings, source, _ = export_case
     original = db_export.atomic_csv
 
     def fail_ok(path, rows):
@@ -107,10 +108,14 @@ def test_partial_publish_retry_preserves_committed_suffix(export_case, monkeypat
     with pytest.raises(RuntimeError):
         db_export.export_once(database, settings)
     ng_path = next(db_export.project_path(settings["output_path"]).rglob("*_NG.csv"))
+    original_uuid = read_rows(ng_path)[0]["uuid"]
+    assert source.exists()
+    assert not (source.parent.parent / "exported" / source.name).exists()
     ng_path.unlink()  # MiNiFi has consumed it.
     monkeypatch.setattr(db_export, "atomic_csv", original)
-    assert db_export.export_once(database, settings) == 1
-    assert not ng_path.exists()
+    assert db_export.export_once(database, settings) == 2
+    assert read_rows(ng_path)[0]["uuid"] == original_uuid
+    assert not source.exists()
 
 
 def test_uuid_stable_and_numeric_codes(export_case):
@@ -182,3 +187,52 @@ def test_cli_once_uses_config(export_case, tmp_path):
     )
     assert result.returncode == 0, result.stderr
     assert db_export.export_once(database, settings) == 0
+
+
+def test_archive_collision_fails_without_overwriting_or_publishing(export_case):
+    database, settings, source, _ = export_case
+    archived = source.parent.parent / "exported" / source.name
+    archived.parent.mkdir()
+    archived.write_text("previous backup")
+    with pytest.raises(RuntimeError):
+        db_export.export_once(database, settings)
+    assert source.exists()
+    assert archived.read_text() == "previous backup"
+    assert not list(db_export.project_path(settings["output_path"]).rglob("*.csv"))
+
+
+def test_missing_source_and_archive_is_reported(export_case):
+    database, settings, source, _ = export_case
+    source.unlink()
+    with pytest.raises(RuntimeError):
+        db_export.export_once(database, settings)
+
+
+def test_failed_move_keeps_source_and_retries(export_case, monkeypatch):
+    database, settings, source, _ = export_case
+    original = type(source).rename
+
+    def fail_move(*args):
+        raise OSError("simulated move failure")
+
+    monkeypatch.setattr(type(source), "rename", fail_move)
+    with pytest.raises(RuntimeError):
+        db_export.export_once(database, settings)
+    assert source.is_file()
+    monkeypatch.setattr(type(source), "rename", original)
+    assert db_export.export_once(database, settings) == 2
+    assert not source.exists()
+    assert (source.parent.parent / "exported" / source.name).is_file()
+
+
+def test_settings_do_not_require_export_database(tmp_path):
+    settings = dict(
+        site="SX",
+        factory="SX",
+        line="SPI",
+        station_id="SPI",
+        output_path=str(tmp_path / "upload"),
+    )
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(settings))
+    assert db_export.load_settings(path) == settings

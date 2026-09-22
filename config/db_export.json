@@ -4,6 +4,5 @@
   "line": "SPI",
   "station_id": "SPI",
   "output_path": "D:\\Project\\AMR\\Result\\TEMP\\spi",
-  "state_path": "state/db_export.sqlite3",
   "poll_seconds": 30
 }
