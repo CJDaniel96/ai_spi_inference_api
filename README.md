@@ -1002,3 +1002,61 @@ linted/formatted yet — see "Known Behavior".
 - **Legacy code**: `ai_server_fastapi.py` (and the model servers / scanner) remain
   for the legacy entry point and are excluded from Ruff/mypy. The new `app/` entry
   point has no runtime dependency on `ai_server_fastapi.py`.
+
+## Optional Stage 04: MiNiFi database CSV export (no DAT)
+
+`04_pipeline_db_export.bat` starts an independent exporter after the three-stage
+pipeline. It reads only `DONE` jobs from the pipeline SQLite database and consumes
+`ai_result/processed/*_processed.csv` using the backed-up manifest. It never moves
+source files, runs inference, or changes the pipeline job state.
+
+Configure `config/db_export.json`. The checked-in site/factory are `SX`, and
+line/station_id are `SPI`; the MiNiFi watch root is
+`D:\Project\AMR\Result\TEMP\spi`. `--pipeline-config` selects the pipeline JSON
+(default: `AI_CONFIG_PATH`, or `config/ai_server.json`). All relative data paths
+resolve under the project root. Keep `state_path` on local disk, separate from the
+pipeline database and the MiNiFi watch folder.
+
+```bat
+04_pipeline_db_export.bat
+04_pipeline_db_export.bat --once
+04_pipeline_db_export.bat --config config\db_export.json
+```
+
+The output preserves the existing other-site `DB_COLUMNS` names and order, with
+UTF-8 encoding and a header. Each source yields NG and OK files (including a
+header-only file when a group is empty). `is_pass=22` is OK; `is_pass=23` is NG.
+Blank defect names on 23 rows become `AI_SKIP` in the export only. Invalid codes
+or disagreements with the manifest fail the job export and are retried.
+
+SPI/AI columns are copied with the existing `CSV_RENAME_MAP`. Site metadata comes
+from configuration; product and carrier_sn are preserved if present, otherwise
+blank. All `dat_*` fields, including `dat_filename`, are blank. No DAT file is
+read or awaited. CSV empty fields must be mapped to NULL as appropriate by the
+existing importer; DB required-field compatibility must be checked there.
+Identifiers are read as strings to retain leading zeros. Row UUIDs are stable
+for the configured site/line/station, job, source CSV, and row ordinal.
+
+Output layout:
+
+```text
+{output_path}/{YYYY-MM-DD}/{job_id}_{source_token}_{site}_{factory}_{line}_SPI_NG.csv
+{output_path}/{YYYY-MM-DD}/{job_id}_{source_token}_{site}_{factory}_{line}_SPI_OK.csv
+```
+
+The source token avoids collisions when a job contains multiple CSVs; it is not
+product metadata. Each CSV is written to a temporary `.tmp` file and atomically
+renamed. Configure MiNiFi to collect `*.csv` recursively and exclude temporary
+files. The exporter only creates files; MiNiFi remains responsible for upload.
+
+A separate SQLite registry checkpoints each published suffix, so ordinary
+restarts or removal of an uploaded file do not recreate it. Preserve this state
+file across deployments. A crash between publication and registry commit can
+replay a file: DB ingestion should deduplicate/upsert by the stable `uuid`.
+This is not an exactly-once delivery guarantee. Changing output configuration
+does not automatically replay historical exports. Each scan considers all DONE
+jobs, including jobs completed before the exporter was installed.
+
+Failures are logged to the console and retried on the next scan (30 seconds by
+default); `--once` exits nonzero on failure. Statistics CSV generation and DAT
+integration from the other site's script are not part of Stage 04.

@@ -1,0 +1,171 @@
+{
+  "input": "/Users/daniel/Projects/ai_spi_inference_api/output/docx/AI_SPI_Inference_API_\u865b\u64ec\u74b0\u5883\u8207\u96e2\u7ddaAIPC\u90e8\u7f72\u624b\u518a.docx",
+  "fonts_by_char_count": {
+    "Heiti TC": 13696,
+    "Consolas": 6159
+  },
+  "direct_run_formatting_runs": 504,
+  "direct_paragraph_formatting_paragraphs": 451,
+  "heading_like_paragraphs_not_heading_style": [
+    {
+      "para_index": 5,
+      "text": "\u90e8\u7f72\u8207\u7dad\u904b\u624b\u518a",
+      "style": "Normal"
+    },
+    {
+      "para_index": 6,
+      "text": "AI SPI Inference API",
+      "style": "Normal"
+    },
+    {
+      "para_index": 7,
+      "text": "\u865b\u64ec\u74b0\u5883\u6e96\u5099\u3001\u96e2\u7dda AIPC \u642c\u904b\u3001\u8a2d\u5b9a\u3001\u90e8\u7f72\u8207\u7591\u96e3\u6392\u89e3",
+      "style": "Normal"
+    },
+    {
+      "para_index": 105,
+      "text": "\u4f9b\u61c9\u93c8\u6ce8\u610f  \u6df7\u7528 PyPI \u8207\u984d\u5916 index \u6642\uff0c\u61c9\u5728\u53d7\u63a7\u5b7f\u751f\u6a5f\u5b8c\u6210\u89e3\u6790\u4e26\u4fdd\u7559\u6a94\u6848\u96dc\u6e4a\u3002\u96e2\u7dda AIPC \u4e00\u5f8b\u4f7f\u7528 --no-index\uff0c\u907f\u514d\u4efb\u4f55\u672a\u6838\u51c6\u4f86\u6e90\u3002",
+      "style": "Normal"
+    },
+    {
+      "para_index": 138,
+      "text": "\u89e3\u5305\u5f8c\u4e0d\u8981\u79fb\u52d5  conda-unpack \u5b8c\u6210\u5f8c\uff0c\u8a72\u74b0\u5883\u8996\u70ba\u56fa\u5b9a\u5728\u76ee\u524d\u8def\u5f91\u3002\u82e5\u4f4d\u7f6e\u932f\u8aa4\uff0c\u522a\u9664\u9019\u500b\u89e3\u5305\u526f\u672c\u4e26\u5f9e\u539f\u59cb zip \u91cd\u65b0\u89e3\u5230\u6b63\u78ba\u4f4d\u7f6e\uff0c\u4e0d\u8981\u518d\u642c\u8cc7\u6599\u593e\u3002",
+      "style": "Normal"
+    },
+    {
+      "para_index": 270,
+      "text": "\u75c7\u72c0\uff1aresolve_python.bat \u627e\u5230 .venv\uff0c\u4f46\u7acb\u5373\u9000\u51fa\uff1b\u6216 uv \u8aaa requires-python \u4e0d\u76f8\u5bb9\u3002",
+      "style": "Normal"
+    },
+    {
+      "para_index": 271,
+      "text": "\u539f\u56e0\uff1a\u74b0\u5883\u4e0d\u662f 3.12\u3002\u6b64\u5de5\u4f5c\u5340\u76ee\u524d\u7684 .venv \u5be6\u969b\u70ba Python 3.10\uff0c\u662f\u53ef\u91cd\u73fe\u7684\u5178\u578b\u60c5\u6cc1\u3002",
+      "style": "Normal"
+    },
+    {
+      "para_index": 272,
+      "text": "\u8655\u7406\uff1a\u505c\u6b62\u4f7f\u7528\u8a72\u74b0\u5883\uff0c\u6539\u540d\u4fdd\u7559\u5f8c\u4ee5 Python 3.12 \u91cd\u5efa\uff1b\u6216\u660e\u78ba set PYTHON_EXE \u6307\u5411\u6b63\u78ba\u74b0\u5883\u3002\u4e0d\u8981\u628a\u820a .venv \u8907\u88fd\u5230 AIPC\u3002",
+      "style": "Normal"
+    },
+    {
+      "para_index": 274,
+      "text": "\u75c7\u72c0\uff1acache miss\u3001No solution found\u3001failed to fetch\uff0c\u6216\u96e2\u7dda\u91cd\u5efa\u5931\u6557\u3002",
+      "style": "Normal"
+    },
+    {
+      "para_index": 278,
+      "text": "\u75c7\u72c0\uff1a\u67d0\u5957\u4ef6\u53ea\u6709 sdist\uff0c\u6216 wheel tag \u4e0d\u7b26 cp312/win_amd64\u3002",
+      "style": "Normal"
+    },
+    {
+      "para_index": 279,
+      "text": "\u539f\u56e0\uff1awheelhouse \u5728 macOS/Linux \u6216\u4e0d\u540c Python \u5efa\u7acb\uff1bPyCUDA/TensorRT \u7b49\u539f\u751f\u5957\u4ef6\u6c92\u6709\u9069\u914d wheel\u3002",
+      "style": "Normal"
+    },
+    {
+      "para_index": 282,
+      "text": "\u75c7\u72c0\uff1aimport torch\u3001onnxruntime\u3001tensorrt\u3001pycuda \u6216 cv2 \u5931\u6557\u3002",
+      "style": "Normal"
+    },
+    {
+      "para_index": 283,
+      "text": "\u539f\u56e0\uff1aVC++ runtime\u3001CUDA/cuDNN/TensorRT DLL \u7f3a\u5931\uff0cPATH \u9806\u5e8f\u932f\uff0c\u6216 32/64 \u4f4d\u5143\u4e0d\u4e00\u81f4\u3002",
+      "style": "Normal"
+    },
+    {
+      "para_index": 284,
+      "text": "\u8655\u7406\uff1a\u6aa2\u67e5 nvidia-smi\u3001where \u5c0d\u61c9 DLL\u3001\u7cfb\u7d71 PATH \u8207\u5b89\u88dd\u7248\u672c\uff1b\u91cd\u958b\u6a5f\u5f8c\u518d\u6e2c\u3002\u4e0d\u8981\u9760\u628a\u4e0d\u660e DLL \u8907\u88fd\u9032\u5c08\u6848\u76ee\u9304\u89e3\u6c7a\u3002",
+      "style": "Normal"
+    },
+    {
+      "para_index": 286,
+      "text": "\u75c7\u72c0\uff1atorch \u53ef import\uff0c\u4f46\u6a21\u578b\u4f7f\u7528 cuda:0 \u5931\u6557\u3002",
+      "style": "Normal"
+    },
+    {
+      "para_index": 287,
+      "text": "\u539f\u56e0\uff1a\u88dd\u5230 CPU wheel\u3001driver \u4e0d\u652f\u63f4\u3001GPU \u4e0d\u53ef\u898b\uff0c\u6216\u670d\u52d9\u5e33\u865f\u74b0\u5883\u4e0d\u540c\u3002",
+      "style": "Normal"
+    },
+    {
+      "para_index": 290,
+      "text": "\u75c7\u72c0\uff1aavailable providers \u53ea\u6709 CPUExecutionProvider\uff1b\u5c08\u6848\u5728 cuda:N \u555f\u52d5\u6642\u62d2\u7d55\u9ed8\u9ed8\u56de CPU\u3002",
+      "style": "Normal"
+    },
+    {
+      "para_index": 291,
+      "text": "\u539f\u56e0\uff1a\u88dd\u5230 onnxruntime \u800c\u975e onnxruntime-gpu\uff0c\u6216 CUDA/cuDNN DLL \u4e0d\u76f8\u5bb9\u3002",
+      "style": "Normal"
+    },
+    {
+      "para_index": 294,
+      "text": "\u75c7\u72c0\uff1a\u7248\u672c\u3001magic tag\u3001compute capability\u3001binding/profile \u6216 engine validity \u932f\u8aa4\u3002",
+      "style": "Normal"
+    },
+    {
+      "para_index": 295,
+      "text": "\u539f\u56e0\uff1aengine \u5728\u5176\u4ed6 OS/GPU/TensorRT \u5efa\u7acb\u3001runtime \u5347\u7d1a\u3001\u6a94\u6848\u640d\u58de\uff0c\u6216\u7528\u5230 10.1.x\u3002",
+      "style": "Normal"
+    }
+  ],
+  "examples": {
+    "direct_paragraph_formatting": [
+      {
+        "para_index": 1,
+        "text": "",
+        "style": "Normal"
+      },
+      {
+        "para_index": 2,
+        "text": "",
+        "style": "Normal"
+      },
+      {
+        "para_index": 3,
+        "text": "",
+        "style": "Normal"
+      },
+      {
+        "para_index": 4,
+        "text": "",
+        "style": "Normal"
+      },
+      {
+        "para_index": 5,
+        "text": "\u90e8\u7f72\u8207\u7dad\u904b\u624b\u518a",
+        "style": "Normal"
+      }
+    ],
+    "direct_run_formatting": [
+      {
+        "para_index": 5,
+        "run_text": "\u90e8\u7f72\u8207\u7dad\u904b\u624b\u518a",
+        "style": "Normal"
+      },
+      {
+        "para_index": 6,
+        "run_text": "AI SPI Inference API",
+        "style": "Normal"
+      },
+      {
+        "para_index": 7,
+        "run_text": "\u865b\u64ec\u74b0\u5883\u6e96\u5099\u3001\u96e2\u7dda AIPC \u642c\u904b\u3001\u8a2d\u5b9a\u3001\u90e8\u7f72\u8207\u7591\u96e3\u6392\u89e3",
+        "style": "Normal"
+      },
+      {
+        "para_index": 8,
+        "run_text": "\u6db5\u84cb Conda\u3001uv\u3001Python venv \u8207 Windows \u670d\u52d9\u5316\u90e8\u7f72",
+        "style": "Normal"
+      },
+      {
+        "para_index": 10,
+        "run_text": "\u672c\u624b\u518a\u4ee5\u5c08\u6848\u76ee\u524d\u7684 README\u3001pyproject.toml\u3001uv.lock\u3001Windows \u555f\u52d5\u5668\u3001\u8a2d\u5b9a\u9a57\u8b49\u7a0b\u5f0f\u8207\u74b0\u5883\u6aa2\u67e5\u8173\u672c\u70ba\u6e96\u3002",
+        "style": "Normal"
+      }
+    ]
+  },
+  "notes": [
+    "Direct formatting is not always wrong, but it often causes inconsistent output when templates change.",
+    "Heading-like paragraphs not using Heading styles can break TOC and accessibility."
+  ]
+}
