@@ -1005,21 +1005,28 @@ linted/formatted yet — see "Known Behavior".
 
 ## Optional Stage 04: MiNiFi database CSV export (no DAT)
 
-`04_pipeline_db_export.bat` starts an independent exporter after the three-stage
-pipeline. It reads only `DONE` jobs from the pipeline SQLite database and consumes
-`ai_result/processed/*_processed.csv` using the backed-up manifest. After both output CSVs are published, it moves the processed CSV to
-`ai_result/exported/` in the same job backup. Original SPI input, returned CSVs,
-and the manifest remain in place. It never runs inference or changes pipeline
-job state. The manifest retains its original processed relative path; after
-export, locate that CSV by basename under `ai_result/exported/`.
+`04_pipeline_db_export.bat` scans the `input_path` configured in
+`config/db_export.json` recursively for `*_processed.csv`. No pipeline database,
+export database, or DAT file is required. `--pipeline-config` and `state_path`
+are no longer used. Example configuration:
 
-Configure `config/db_export.json`. The checked-in site/factory are `SX`, and
-line/station_id are `SPI`; the MiNiFi watch root is
-`D:\Project\AMR\Result\TEMP\spi`. `--pipeline-config` selects the pipeline JSON
-(default: `AI_CONFIG_PATH`, or `config/ai_server.json`). All relative data paths
-resolve under the project root. There is no export registry database or
-`state_path` setting. The existing pipeline database is queried read-only to
-select completed jobs; it is not used to record exports.
+```json
+{
+  "site": "SX",
+  "factory": "SX",
+  "line": "SPI",
+  "station_id": "SPI",
+  "input_path": "D:/Dre/JQ_SPI_02_AI_API/backup",
+  "output_path": "D:/Project/AMR/Result/TEMP/spi",
+  "poll_seconds": 30,
+  "source_settle_seconds": 2
+}
+```
+
+Set `input_path` to a folder containing processed CSVs, or to the root of a tree
+of date/job folders. It must already exist. Relative paths resolve under the
+project root. The default above is the existing pipeline backup root; change it
+for a different site layout. `output_path` is the folder MiNiFi watches.
 
 ```bat
 04_pipeline_db_export.bat
@@ -1027,58 +1034,70 @@ select completed jobs; it is not used to record exports.
 04_pipeline_db_export.bat --config config\db_export.json
 ```
 
-The output preserves the existing other-site `DB_COLUMNS` names and order, with
-UTF-8 encoding and a header. Each source yields NG and OK files (including a
-header-only file when a group is empty). `is_pass=22` is OK; `is_pass=23` is NG.
-Blank defect names on 23 rows become `AI_SKIP` in the export only. Invalid codes
-or disagreements with the manifest fail the job export and are retried.
+For standalone files, a valid 14-digit timestamp (`YYYYMMDDHHmmss`) must appear
+in the filename or a folder name between the file and `input_path` (inclusive).
+No product or barcode is inferred from directory names. If a processed folder
+has a sibling `manifest.json`, the exporter uses its job ID, source filename,
+and result codes for validation. For our `ai_result/processed/` layout it waits
+for that manifest, which Stage 03 writes after finishing the processed copies.
+It no longer checks the pipeline's DONE state.
 
-SPI/AI columns are copied with the existing `CSV_RENAME_MAP`. Site metadata comes
-from configuration; product and carrier_sn are preserved if present, otherwise
-blank. All `dat_*` fields, including `dat_filename`, are blank. No DAT file is
-read or awaited. CSV empty fields must be mapped to NULL as appropriate by the
-existing importer; DB required-field compatibility must be checked there.
-Identifiers are read as strings to retain leading zeros. Row UUIDs are stable
-for the configured site/line/station, job, source CSV, and row ordinal.
+Files modified within `source_settle_seconds` are deferred; a size/mtime change
+during reading also defers the file. Producers should write to a temporary
+non-CSV file and atomically rename it when complete. A settle delay alone cannot
+prove that an arbitrary external writer has finished. `--once` makes one scan,
+so recently written files may be deferred to a later run.
 
-Output layout:
+The output preserves the other site's 72 `DB_COLUMNS` names and order, with
+UTF-8 encoding and a header. Each source yields NG and OK files (header-only
+when a group is empty). `is_pass=22` is OK; `is_pass=23` is NG. Blank defect names
+on 23 rows become `AI_SKIP` in the export only. Invalid codes and mismatches
+with an available manifest fail that file, which remains pending for retry.
+
+SPI/AI columns use the existing `CSV_RENAME_MAP`. Site metadata comes from
+configuration. Product and carrier_sn are preserved if present, otherwise
+blank. All `dat_*` fields, including `dat_filename`, are blank. The DB importer
+must handle empty fields appropriately. Identifiers are read as strings to
+retain leading zeros. UUIDs are stable for site/line/station, job, source path
+relative to `input_path`, and row ordinal. Changing the input root can change
+UUIDs and output filenames for the same file.
 
 ```text
 {output_path}/{YYYY-MM-DD}/{job_id}_{source_token}_{site}_{factory}_{line}_SPI_NG.csv
 {output_path}/{YYYY-MM-DD}/{job_id}_{source_token}_{site}_{factory}_{line}_SPI_OK.csv
 ```
 
-The source token avoids collisions when a job contains multiple CSVs; it is not
-product metadata. Each CSV is written to a temporary `.tmp` file and atomically
-renamed. Configure MiNiFi to collect `*.csv` recursively and exclude temporary
-files. The exporter only creates files; MiNiFi remains responsible for upload.
+The source token avoids collisions for multiple sources. Each CSV is written to
+a temporary `.tmp` file and atomically renamed. Configure MiNiFi to collect
+`*.csv` recursively and exclude temporary files. MiNiFi uploads and deletes
+those output files; Stage 04 does not perform the upload.
 
-File movement determines what remains to export:
+After both output CSVs are published, the source moves into an `exported`
+archive. For a folder named `processed`, `exported` is its sibling; otherwise
+it is a subfolder of the source's containing folder:
 
 ```text
-ai_result/processed/{stem}_processed.csv   # Pending export
-    -> write complete NG and OK CSVs to the MiNiFi folder
-ai_result/exported/{stem}_processed.csv    # Retained backup after successful export
+job/ai_result/processed/board_processed.csv -> job/ai_result/exported/board_processed.csv
+incoming/20260922123000_processed.csv -> incoming/exported/20260922123000_processed.csv
 ```
 
-MiNiFi can consume and delete the output CSVs. Once a source has moved to
-`exported/`, later scans skip it even when those output files no longer exist.
-Run only one Stage 04 process per pipeline. Existing archived files are never
-intentionally overwritten; a source/archive collision is reported as an error.
-Missing files in both locations are also reported rather than silently skipped.
+Scans prune all `exported` folders, symlink directories, and the configured output
+folder if it is under the input root. The input must not be inside the MiNiFi
+output folder or an `exported` folder. Original SPI input and returned CSVs stay
+in place. A manifest retains its original processed path; locate an exported
+source by basename in the archive instead.
 
-If output or the final move fails, the source stays in `processed/` for retry.
-A partial publication or a crash before the move can therefore replay a CSV
-already consumed by MiNiFi. UUIDs remain stable so DB ingestion can deduplicate
-or upsert those rows; file movement does not guarantee exactly-once delivery.
+Run one Stage 04 process per input tree. Archive collisions are errors; existing
+backups are not intentionally overwritten. Output or move failures retain the
+source for retry, so partial publication or a crash before the move can replay
+a CSV already consumed by MiNiFi. Use stable UUIDs for DB deduplication/upsert;
+file movement is not an exactly-once delivery guarantee.
 
-All existing DONE jobs with pending processed files are eligible, including
-historical jobs. On upgrade from the export-registry version, the old
-`db_export.sqlite3` is ignored (not deleted), so files previously exported but
-still in `processed/` will be exported again. To avoid that replay, move only
-known, already-exported processed files into each job's `ai_result/exported/`
-before starting this version. Retain the original filenames.
+All matching pending files, including historical files, are eligible. Old
+`db_export.sqlite3` files are ignored, not deleted. Files exported by that old
+version but still in the input tree will be exported again; move known,
+already-exported files into their corresponding `exported` folders before
+starting this version if replay is not desired.
 
-Failures are logged to the console and retried on the next scan (30 seconds by
-default); `--once` exits nonzero on failure. Statistics CSV generation and DAT
-integration from the other site's script are not part of Stage 04.
+Failures are logged to the console and retried on the next scan; `--once` exits
+nonzero on failure. Statistics CSV generation is outside Stage 04's scope.

@@ -4,5 +4,7 @@
   "line": "SPI",
   "station_id": "SPI",
   "output_path": "D:\\Project\\AMR\\Result\\TEMP\\spi",
-  "poll_seconds": 30
+  "poll_seconds": 30,
+  "input_path": "D:/Dre/JQ_SPI_02_AI_API/backup",
+  "source_settle_seconds": 2
 }
