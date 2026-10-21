@@ -6,10 +6,12 @@ import asyncio
 import time
 
 import pandas as pd
+import pytest
 
 from app.application.services.pipeline_inference_service import (
     PipelineInferenceService,
 )
+from app.application.services.pipeline_publisher_service import PipelinePublisherService
 from app.core.config import (
     AppConfig,
     DefectRuleConfig,
@@ -132,6 +134,87 @@ def test_required_model_error_creates_all_23_fallback(tmp_path) -> None:
     assert manifest.reason == "required_model_failure"
     assert manifest.csv_results[0].result_codes == (23,)
     assert manifest.errors == ("distance unavailable",)
+
+
+@pytest.mark.parametrize("image_count", [60, 61])
+def test_default_image_limit_controls_inference_and_machine_return(
+    tmp_path, image_count: int
+) -> None:
+    job = tmp_path / "20260817093032"
+    job.mkdir()
+    for part, numbers in enumerate(
+        (range(image_count // 2), range(image_count // 2, image_count))
+    ):
+        pd.DataFrame(
+            [
+                {
+                    "serial_no": f"{number:04d}",
+                    "Array_id": 1,
+                    "Pad_no": number,
+                    "is_pass": 0,
+                }
+                for number in numbers
+            ]
+        ).to_csv(job / f"board_{part}.csv", index=False)
+    for number in range(image_count):
+        (job / f"0_{number}.jpg").write_bytes(b"image")
+    originals = {path.name: path.read_bytes() for path in job.glob("*.csv")}
+    calls = []
+
+    async def runner(config, job_folder, **kwargs):
+        calls.append(job_folder)
+        return [
+            ModelInferenceResult(
+                name=name,
+                target_column=column,
+                results={f"0_{number}.jpg": value for number in range(image_count)},
+                request_ms=1,
+            )
+            for name, column, value in (
+                ("anomaly", "anomaly_score", 0.1),
+                ("distance", "min_pad_distance", 10.0),
+            )
+        ]
+
+    config = _config(tmp_path)
+    service = PipelineInferenceService(
+        config=config,
+        result_root=tmp_path / "artifacts",
+        model_client_runner=runner,
+        clock=lambda: 100.0,
+    )
+    manifest, manifest_path = asyncio.run(
+        service.prepare(job_id=job.name, staged_folder=job, deadline_at=130.0)
+    )
+
+    if image_count == 60:
+        assert calls == [str(job)]
+        assert manifest.outcome is PipelineOutcome.NORMAL
+        assert manifest.reason is None
+        expected_code = 22
+    else:
+        assert calls == []
+        assert manifest.outcome is PipelineOutcome.FALLBACK
+        assert manifest.reason == "images_exceed_threshold"
+        assert manifest.model_timings_ms == {}
+        assert manifest.counts == {"pass_count": 0, "fail_count": image_count}
+        expected_code = 23
+
+    publisher = PipelinePublisherService(config=config, clock=lambda: 101.0)
+    published = publisher.publish_primary(
+        staged_folder=job,
+        manifest_path=manifest_path,
+        ready_at=100.0,
+        deadline_at=130.0,
+    )
+    assert len(published.paths) == 2
+    for path in published.paths:
+        expected = pd.read_csv(job / path.name, dtype=str, keep_default_na=False)
+        expected["is_pass"] = str(expected_code)
+        pd.testing.assert_frame_equal(
+            pd.read_csv(path, dtype=str, keep_default_na=False), expected
+        )
+        assert (job / path.name).read_bytes() == originals[path.name]
 
 
 def test_inference_timeout_creates_fallback_before_deadline(tmp_path) -> None:

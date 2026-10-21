@@ -88,7 +88,7 @@ class ProcessingConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    folder_images_num_threshold: int = 500
+    folder_images_num_threshold: int = 60
     image_extensions: list[str] = Field(
         default_factory=lambda: list(_DEFAULT_IMAGE_EXTENSIONS)
     )

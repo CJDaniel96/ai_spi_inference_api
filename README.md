@@ -401,7 +401,7 @@ baking environment-specific paths into a shared file.
     "backup_output_root": "D:/Dre/JQ_SPI_02_AI_API/backup"
   },
   "processing": {
-    "folder_images_num_threshold": 500,
+    "folder_images_num_threshold": 60,
     "image_extensions": [".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif"],
     "image_name_source_column": null,
     "image_name_template": "{csv_stem}_{component_name}_{Array_id}_{Pad_id}.jpg"
@@ -872,6 +872,17 @@ Operational requirements and recovery behavior:
 - **Primary before backup**: `PRIMARY_RETURNED` is persisted immediately after the
   last Primary write. Local returned/processed backups run as a separate finalize
   claim; failure there never reruns inference.
+- **Failed result backups**: a missing artifact makes only the post-primary backup
+  terminal (`FAILED`, with `primary_returned_at` preserved). Other backup errors
+  retry up to five total attempts with 5/10/20/40-second delays persisted in their
+  leases, so restarts cannot bypass backoff and later backups can proceed. Missing
+  processed-file errors include both source and destination paths. Inspect a job
+  with `python -m app.tools.pipeline_backup_recovery --database PATH --job-id ID`.
+  After restoring the original artifact files, add `--retry-backup` to validate
+  their decisions, save a consistent SQLite snapshot, and queue **only** its local
+  backup again. This requires `FAILED` and a recorded Primary return; it never
+  resets the job to inference or republishes machine CSVs. Keep result artifacts
+  until their local backup has completed.
 - **Original before Primary**: Publisher never uses the live machine share as its
   input. The complete local raw copy must be available first, even if unusually
   slow local archival causes a soft-deadline miss.
@@ -971,10 +982,19 @@ linted/formatted yet — see "Known Behavior".
   `full_ai_columns` (see Output Files). The durable Publisher always uses the
   machine-return contract.
 - **`*_processed.csv`** contains the full AI schema and exists for **debugging**.
-- **Image count over `folder_images_num_threshold`**: inference is skipped and every
-  row is marked `is_pass=23`. The durable path records
+- **Image count over `folder_images_num_threshold` (default 60)**: folders with
+  60 or fewer images proceed to inference; folders with 61 or more skip all model
+  calls and return every CSV row as `is_pass=23`. The count covers the whole job
+  folder, including subfolders, using `processing.image_extensions`.
+  The durable path records
   `reason=images_exceed_threshold` in its manifest; `/process` retains the legacy
   `{"status": "finished scanning", "skipped": true, ...}` response.
+  To apply this limit on an existing AIPC, set
+  `processing.folder_images_num_threshold` to `60` in its active config
+  (`AI_CONFIG_PATH`, or `config/ai_server.json` when unset) and restart Stage 02
+  Inference. Restart the API instead when using the compatibility `/process`
+  flow. The durable path still validates and archives source data before returning
+  NG; the limit removes model inference time, not source-transfer or backup time.
 - **Required model failure policy**: an endpoint error, deadline timeout,
   incomplete key set, or invalid scalar produces a fail-safe result with every row
   set to `23`. Optional-model failures continue normally. On the durable path this

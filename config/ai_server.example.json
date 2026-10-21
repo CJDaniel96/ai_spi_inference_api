@@ -8,7 +8,7 @@
     "backup_output_root": "D:/path/to/output/backup"
   },
   "processing": {
-    "folder_images_num_threshold": 500,
+    "folder_images_num_threshold": 60,
     "image_extensions": [".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif"],
     "image_name_source_column": null,
     "image_name_template": "{csv_stem}_{component_name}_{Array_id}_{Pad_id}.jpg"

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+import sqlite3
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
@@ -224,6 +225,12 @@ def test_three_independent_stages_survive_source_deletion(
     assert backup_pending.status is PipelineJobStatus.PRIMARY_RETURNED
     assert backup_pending.publish_attempts == publish_attempts
     assert primary_path.read_bytes() == primary_payload
+    assert publisher.run_once() is False  # Backoff survives between worker ticks.
+    with sqlite3.connect(repository.database_path) as connection:
+        # Simulate the retry delay elapsing without sleeping in the test.
+        connection.execute(
+            "UPDATE pipeline_jobs SET lease_until = 0 WHERE job_id = ?", (_JOB_ID,)
+        )
 
     monkeypatch.setattr(
         publisher._publisher,

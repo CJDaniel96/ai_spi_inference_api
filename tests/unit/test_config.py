@@ -77,10 +77,12 @@ def _write_config(tmp_path: Path, data: dict[str, Any]) -> Path:
 def test_loads_real_repo_config() -> None:
     """The shipped ``config/ai_server.json`` loads and validates."""
     config = load_config(_REAL_CONFIG_PATH)
+    configured = json.loads(_REAL_CONFIG_PATH.read_text(encoding="utf-8"))
+    configured_paths = configured["paths"]
 
     assert isinstance(config, AppConfig)
-    assert config.paths.external_output_root == "D:/Dre/JQ_SPI_02_AI_API/data"
-    assert config.paths.backup_output_root == "D:/Dre/JQ_SPI_02_AI_API/backup"
+    assert config.paths.external_output_root == configured_paths["external_output_root"]
+    assert config.paths.backup_output_root == configured_paths["backup_output_root"]
     assert config.defect_rules.anomaly_threshold == 0.9
     assert config.defect_rules.short_distance_threshold == 6.8
     assert config.defect_rules.rule_order == [
@@ -91,12 +93,12 @@ def test_loads_real_repo_config() -> None:
         "short_distance",
         "high_paste",
     ]
-    assert config.processing.folder_images_num_threshold == 500
+    assert config.processing.folder_images_num_threshold == 60
     assert config.reliability.primary_return_deadline_seconds == 30.0
     assert config.reliability.primary_publish_reserve_seconds == 5.0
     assert config.reliability.required_model_failure_policy == "fail_all_23"
     assert config.pipeline.enabled is True
-    assert config.pipeline.database_path.endswith("state/pipeline.sqlite3")
+    assert config.pipeline.database_path == configured["pipeline"]["database_path"]
     assert config.pipeline.staging_root is None
     assert config.pipeline.source_settle_seconds == 2.0
     assert config.pipeline.publisher_poll_interval_seconds == 0.05

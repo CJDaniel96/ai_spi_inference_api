@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import filecmp
 import logging
 import shutil
 import time
@@ -94,6 +95,7 @@ class PipelinePublisherService:
         """Archive returned and processed CSVs after primary is already visible."""
         manifest = PipelineResultManifest.read(manifest_path)
         result_root = original_backup_folder / "ai_result"
+        manifest_backup = result_root / "manifest.json"
         returned_writer = SinicCsvOutput(
             result_root / "returned",
             preserve_job_folder=False,
@@ -111,11 +113,37 @@ class PipelinePublisherService:
             processed_destination = (
                 result_root / "processed" / Path(csv_result.processed_csv).name
             )
+            if not processed_source.is_file():
+                raise FileNotFoundError(
+                    f"Processed result CSV is missing: {processed_source}; "
+                    f"backup destination: {processed_destination}"
+                )
+            exported = result_root / "exported" / processed_destination.name
+            if exported.is_file():
+                if (
+                    manifest_backup.is_file()
+                    and PipelineResultManifest.read(manifest_backup) == manifest
+                    and filecmp.cmp(processed_source, exported, shallow=False)
+                ):
+                    # Stage 04 already archived this exact backup. Recreating
+                    # processed/ would enqueue a duplicate database export.
+                    written.append(exported)
+                    continue
+                raise FileExistsError(
+                    f"Exported backup differs from this result: {exported}; "
+                    f"processed source: {processed_source}"
+                )
             processed_destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(processed_source, processed_destination)
+            try:
+                shutil.copy2(processed_source, processed_destination)
+            except OSError as exc:
+                exc.add_note(
+                    f"processed_source={processed_source} "
+                    f"processed_destination={processed_destination}"
+                )
+                raise
             written.append(processed_destination)
 
-        manifest_backup = result_root / "manifest.json"
         manifest.write_atomic(manifest_backup)
         written.append(manifest_backup)
         self._logger.info(

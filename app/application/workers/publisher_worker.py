@@ -25,6 +25,9 @@ from app.infrastructure.repositories.pipeline_job_repository import (
     PipelineLeaseLostError,
 )
 
+_MAX_FINALIZE_ATTEMPTS = 5
+_FINALIZE_RETRY_BASE_SECONDS = 5.0
+
 
 class _RawBackupNotReadyError(RuntimeError):
     """Publisher selected the fallback before Stage 1 completed its fence."""
@@ -202,11 +205,45 @@ class PublisherWorker:
                 exc,
             )
             try:
-                self._repository.release_lease(
-                    job_id=job.job_id,
-                    worker_id=self._worker_id,
-                    reason=f"result_backup_error: {exc}",
-                )
+                if (
+                    isinstance(exc, FileNotFoundError)
+                    or job.finalize_attempts >= _MAX_FINALIZE_ATTEMPTS
+                ):
+                    reason = (
+                        "result_backup_missing_file"
+                        if isinstance(exc, FileNotFoundError)
+                        else "result_backup_retries_exhausted"
+                    )
+                    self._repository.mark_failed(
+                        job_id=job.job_id,
+                        worker_id=self._worker_id,
+                        reason=f"{reason}: {exc}",
+                    )
+                    self._logger.error(
+                        "event=pipeline.publisher.result_backup_failed job_id=%s "
+                        "reason=%s attempts=%d primary_already_returned=True",
+                        job.job_id,
+                        reason,
+                        job.finalize_attempts,
+                    )
+                else:
+                    delay = _FINALIZE_RETRY_BASE_SECONDS * (
+                        2 ** (job.finalize_attempts - 1)
+                    )
+                    # Keep the durable lease until the retry becomes eligible.
+                    # Other jobs can finalize meanwhile; restarts preserve the delay.
+                    self._repository.renew_lease(
+                        job_id=job.job_id,
+                        worker_id=self._worker_id,
+                        lease_seconds=delay,
+                    )
+                    self._logger.warning(
+                        "event=pipeline.publisher.result_backup_retry job_id=%s "
+                        "attempts=%d retry_after_seconds=%.3f",
+                        job.job_id,
+                        job.finalize_attempts,
+                        delay,
+                    )
             except PipelineLeaseLostError:
                 pass
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pandas as pd
+import pytest
 
 from app.application.services.pipeline_publisher_service import (
     PipelinePublisherService,
@@ -95,3 +96,24 @@ def test_primary_is_visible_before_local_result_backup(tmp_path) -> None:
         "is_pass"
     ].tolist() == [22, 23]
     assert (staged / "ai_result" / "manifest.json").exists()
+
+    processed = staged / "ai_result" / "processed" / "board_processed.csv"
+    exported = staged / "ai_result" / "exported" / processed.name
+    exported.parent.mkdir()
+    processed.rename(exported)
+    retried = service.write_local_result_backup(
+        staged_folder=staged,
+        original_backup_folder=staged,
+        manifest_path=manifest_path,
+    )
+    assert exported in retried
+    assert not processed.exists()
+    assert exported.read_text() == "is_pass\n22\n23\n"
+    exported.write_text("is_pass\n23\n23\n", encoding="utf-8")
+    with pytest.raises(FileExistsError, match="Exported backup differs"):
+        service.write_local_result_backup(
+            staged_folder=staged,
+            original_backup_folder=staged,
+            manifest_path=manifest_path,
+        )
+    assert not processed.exists()
