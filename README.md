@@ -1048,6 +1048,16 @@ of date/job folders. It must already exist. Relative paths resolve under the
 project root. The default above is the existing pipeline backup root; change it
 for a different site layout. `output_path` is the folder MiNiFi watches.
 
+For the three-stage pipeline, use `paths.backup_output_root` as `input_path`.
+Stage 03 publishes its completed copies under
+`{backup_root}/{date}/{job_id}/ai_result/processed/`. Keep
+`pipeline.result_root` separate: its `{job_id}/{generation}/processed/` files
+are retained inference artifacts needed by Publisher and backup recovery.
+Stage 04 rejects that timestamp/UUID layout, including before a manifest is
+written, without exporting or moving its CSVs. Pointing an older exporter at
+the result root can move these files into the generation's `exported/` folder
+and cause Stage 03's `result_backup_missing_file` error.
+
 ```bat
 04_pipeline_db_export.bat
 04_pipeline_db_export.bat --once

@@ -181,6 +181,20 @@ def export_once(settings: dict) -> int:
     failures = 0
     for source in pending_sources(input_root, output_root):
         try:
+            generation = source.parent.parent
+            if (
+                source.parent.name == "processed"
+                and re.fullmatch(r"[0-9a-f]{32}", generation.name)
+                and re.fullmatch(r"\d{14}", generation.parent.name)
+            ):
+                # Stage 02/03 retain these artifacts for Publisher recovery.
+                # Guard the layout even before its final manifest is visible.
+                raise ValueError(
+                    f"Refusing to export inference artifact: {source}. "
+                    "Set input_path to paths.backup_output_root "
+                    "(the tree containing ai_result/processed), "
+                    "not pipeline.result_root."
+                )
             # Our publisher writes the manifest last. Wait for it before reading
             # its processed backup; generic standalone CSV folders need no manifest.
             if (

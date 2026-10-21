@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from app import db_export
 from app.application.services.ingest_service import IngestService
 from app.application.services.pipeline_inference_service import (
     PipelineInferenceService,
@@ -153,6 +154,74 @@ def _publisher_worker(config, repository, *, runner=_good_runner) -> PublisherWo
         fallback_builder=fallback_builder,
         worker_id="publisher",
     )
+
+
+def test_exporter_preserves_inference_artifacts_and_consumes_only_backups(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    source = _create_source(tmp_path)
+    ingest = IngestService(image_name_template=_TEMPLATE)
+    archived = ingest.archive(
+        ingest.validate(source), backup_root=Path(config.paths.backup_output_root)
+    )
+    service = PipelineInferenceService(
+        config=config,
+        result_root=Path(config.pipeline.result_root),
+        model_client_runner=_good_runner,
+    )
+    manifest, manifest_path = asyncio.run(
+        service.prepare(
+            job_id=_JOB_ID,
+            staged_folder=archived.staged_folder,
+            deadline_at=archived.deadline_at.timestamp(),
+        )
+    )
+    processed = manifest_path.parent / manifest.csv_results[0].processed_csv
+    original = processed.read_bytes()
+    settings = dict(
+        site="SX",
+        factory="SX",
+        line="SPI",
+        station_id="SPI",
+        input_path=config.pipeline.result_root,
+        output_path=str(tmp_path / "export-output"),
+        source_settle_seconds=0,
+    )
+    with pytest.raises(RuntimeError, match="failed export"):
+        db_export.export_once(settings)
+    assert processed.read_bytes() == original
+
+    publisher = PipelinePublisherService(config=config)
+    publisher.publish_primary(
+        staged_folder=archived.staged_folder,
+        manifest_path=manifest_path,
+        ready_at=archived.ready_at.timestamp(),
+        deadline_at=archived.deadline_at.timestamp(),
+    )
+    primary = tmp_path / "machine-return" / _CSV_NAME
+    primary_payload = primary.read_bytes()
+    publisher.write_local_result_backup(
+        staged_folder=archived.staged_folder,
+        original_backup_folder=archived.original_backup_folder,
+        manifest_path=manifest_path,
+    )
+    settings["input_path"] = config.paths.backup_output_root
+    assert db_export.export_once(settings) == 2
+    assert processed.read_bytes() == original
+    exported = (
+        archived.original_backup_folder / "ai_result" / "exported" / processed.name
+    )
+    assert exported.read_bytes() == original
+
+    publisher.write_local_result_backup(
+        staged_folder=archived.staged_folder,
+        original_backup_folder=archived.original_backup_folder,
+        manifest_path=manifest_path,
+    )
+    assert primary.read_bytes() == primary_payload
+    assert processed.read_bytes() == original
+    assert db_export.export_once(settings) == 0
 
 
 def test_three_independent_stages_survive_source_deletion(

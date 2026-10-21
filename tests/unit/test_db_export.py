@@ -79,6 +79,57 @@ def test_pipeline_backup_without_final_manifest_waits(export_case):
     assert source.exists()
 
 
+@pytest.mark.parametrize("input_level", ["results", "generation", "processed"])
+@pytest.mark.parametrize("has_manifest", [False, True])
+def test_inference_artifacts_are_not_exported_or_moved(
+    tmp_path, caplog, input_level, has_manifest
+):
+    results = tmp_path / "results"
+    generation = results / "20261021171427" / "0783736a17704ae6b5232f97647b29bc"
+    processed = generation / "processed"
+    processed.mkdir(parents=True)
+    source = processed / "20261021171427_SA9569AD01H056_processed.csv"
+    original = "is_pass\n22\n23\n"
+    source.write_text(original)
+    if has_manifest:
+        (generation / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "job_id": "20261021171427",
+                    "csv_results": [
+                        {
+                            "source_csv": "20261021171427_SA9569AD01H056.CSV",
+                            "processed_csv": f"processed/{source.name}",
+                            "result_codes": [22, 23],
+                        }
+                    ],
+                }
+            )
+        )
+    settings = dict(
+        site="SX",
+        factory="SX",
+        line="SPI",
+        station_id="SPI",
+        input_path=str(
+            {"results": results, "generation": generation, "processed": processed}[
+                input_level
+            ]
+        ),
+        output_path=str(tmp_path / "upload"),
+        source_settle_seconds=0,
+    )
+
+    with pytest.raises(RuntimeError, match="1 file\\(s\\) failed export"):
+        db_export.export_once(settings)
+
+    assert "Refusing to export inference artifact" in caplog.text
+    assert "paths.backup_output_root" in caplog.text
+    assert source.read_text() == original
+    assert not (generation / "exported").exists()
+    assert not (tmp_path / "upload").exists()
+
+
 def test_invalid_or_mismatched_codes_fail_without_output(export_case):
     database, settings, source, _ = export_case
     source.write_text("is_pass\n22\n22\n23\n")
