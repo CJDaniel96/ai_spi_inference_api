@@ -148,3 +148,10 @@ def test_python_resolver_avoids_fragile_batch_labels() -> None:
     assert ":validate_python" not in active_text
     assert ".venv\\scripts\\python.exe" in active_text
     assert "sys.version_info[:2] == (3, 12)" in active_text
+
+
+def test_statistics_launcher_uses_config_defaults_and_forwards_arguments() -> None:
+    active_text = "\n".join(_active_lines(_launcher("05_spi_statistics.bat"))).lower()
+    assert 'call "%~dp0resolve_python.bat"' in active_text
+    assert '"%python_exe%" -m app.tools.spi_statistics %*' in active_text
+    assert "--input" not in active_text

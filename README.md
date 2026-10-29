@@ -1023,20 +1023,29 @@ linted/formatted yet — see "Known Behavior".
   for the legacy entry point and are excluded from Ruff/mypy. The new `app/` entry
   point has no runtime dependency on `ai_server_fastapi.py`.
 
-## Offline SPI statistics
+## SPI statistics
 
-`05_spi_statistics.bat` (or `python -m app.tools.spi_statistics`) reads a collected
-folder of manifests, pipeline SQLite snapshots, stage logs, and optional machine
-events. It exports job details, daily/overall percentiles, image-count groups,
+`05_spi_statistics.bat` (or `python -m app.tools.spi_statistics`) reads the result,
+SQLite, backup/staging, and log locations from `--config` when `--input` is omitted.
+The default config is `AI_CONFIG_PATH` or `config/ai_server.json`; relative data
+paths resolve under the project root, matching the workers. Live SQLite is read
+through a consistent backup snapshot. Use `--input` to retain offline folder mode.
+It exports job details, daily/overall percentiles, image-count groups,
 model request timings, manifest candidates, and data-quality issues as UTF-8-BOM
-CSVs. It uses only the Python standard library and leaves input evidence intact.
+CSVs. It uses only the Python standard library and does not modify source DB data.
 Missing timestamps/counts stay blank; multiple inference attempts are not counted
 as multiple jobs. See [the Chinese usage guide](docs/spi_statistics.md) for required
 evidence, metric definitions, and the optional SPI/OP event CSV.
 
 ```bat
-05_spi_statistics.bat --input "D:\SPI_Statistics\SPI01" --output "D:\SPI_Statistics\reports\SPI01" --machine-id SPI01 --image-threshold 60
+05_spi_statistics.bat --config "config\ai_server.json" --output "D:\SPI_Statistics\reports\SPI01" --machine-id SPI01
 ```
+
+Add `--start "2026-10-29 08:00:00" --end "2026-10-29 20:00:00"` to limit the
+report to a time interval (inclusive start, exclusive end; UTC+8 when no timezone
+is supplied). `--time-field` selects the timestamp; `auto` prefers source-ready
+time, while `job_timestamp` explicitly selects the timestamp encoded in the job ID.
+Unknown filter times are excluded and counted; omitted bounds retain all jobs.
 
 ## Optional Stage 04: MiNiFi database CSV export (no DAT)
 

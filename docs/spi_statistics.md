@@ -1,12 +1,36 @@
-# SPI 離線統計工具
+# SPI 統計工具（Config／離線資料夾）
 
-將一台機器的現場資料放入同一個資料夾，以 Python 匯出適合 Excel、Power BI 或 Python 分析的 CSV。遞迴讀取子資料夾，不必把原本的備份結構攤平。
+依現有 `config/ai_server.json` 直接讀取一台機器的 manifest、SQLite、log 等位置，匯出適合 Excel、Power BI 或 Python 分析的 CSV。也支援將已蒐集的資料放進資料夾離線分析。兩種模式都遞迴讀取子資料夾，不必把時間戳／推論版本資料夾攤平。
 
 本工具只使用 Python 標準函式庫，支援 Python 3.10 以上，可獨立複製 `app/tools/spi_statistics.py` 執行。專案內的 Windows 啟動器沿用專案的 Python 3.12 選擇方式。
 
-工具不啟動模型、呼叫機台、修改設定或搬動輸入檔；SQLite 先連同 WAL 複製至暫存目錄再查詢，避免 SQLite 在原資料夾產生共享記憶體檔。DB 裡記載的遠端或絕對路徑只拿來比對，不會前往讀取。
+工具不啟動模型、呼叫機台、修改設定或搬動資料。Config 模式透過唯讀連線及 SQLite 備份機制產生一致快照，再查詢暫存資料庫；不改動來源 DB 的資料或結構。離線資料夾模式先將已蒐集的 DB／WAL 複製至暫存目錄再查詢，避免在證據資料夾產生 SQLite 共享記憶體檔。DB 工作紀錄裡的絕對路徑只拿來比對，不會額外前往讀取；Config 模式的掃描位置則以使用者指定的設定為準。
 
-## 1. 準備資料
+## 1. 資料來源
+
+### Config 模式（現場直接執行）
+
+不需要搬移原有資料。未指定 `--input` 時，工具讀取以下設定：
+
+| Config 欄位 | 用途 |
+|---|---|
+| `pipeline.result_root` | 遞迴讀取 `result/時間戳/manifest.json`、`result/時間戳/推論版本/manifest.json` 等結構 |
+| `pipeline.database_path` | 讀取唯一指定的 Pipeline SQLite，不會把同一目錄其他 DB 混入 |
+| `paths.backup_output_root` | 遞迴讀取原始 CSV／影像備份與 `ai_result/manifest.json`，補足影像數及發布證據 |
+| `pipeline.staging_root` | 設定非空時，也納入本機暫存資料目錄 |
+| `logging.log_dir` | 系統及請求 log 所在目錄 |
+| `logging.system_log_file` | 系統 log 基底檔名，包含 Ingest／Inference／Publisher 的階段檔與數字輪替檔 |
+| `logging.request_log_file` | 舊版請求 CSV 檔名及數字輪替檔，如 `metrics.csv.1` |
+| `processing.folder_images_num_threshold` | 補足影像閾值 |
+| `processing.image_extensions` | 計算原始影像數的副檔名 |
+
+例如 `system_log_file=system.log` 會讀取 `system.log`、`system.ingest.log`、`system.inference.log`、`system.publisher.log` 與它們的 `.1`、`.2` 等輪替檔。只讀取設定匹配的 log，不會任意混入其他 log。
+
+相對路徑沿用正式 Worker 的規則：**以專案根目錄為基準，不是 config 所在目錄，也不是終端機當前目錄**。獨立複製工具或使用另一份現場資料時，可加 `--project-root "D:\SPI專案"` 指定基準；絕對路徑直接使用。Windows 的 `D:/...` 或 UNC 路徑需在能存取該路徑的 Windows 機器執行；移到其他作業系統分析時，使用離線模式或改寫統計用 config 的位置。
+
+重疊的 result／backup／staging 位置只掃描一次；同內容 manifest 仍會去重。缺少的來源會記錄於 `issues.csv`，其餘可讀的資料繼續輸出。直接讀取運行中的資料時，尚在處理的工作可能沒有結果或完整時間，欄位會保留空白，之後可重跑補齊。
+
+### 離線資料夾模式
 
 每次執行只處理**同一台機器**的資料；多台機器請分開執行，指定不同 `--machine-id`，之後依此欄位合併報表。同一個資料夾內相同 `job_id` 視為同一工作，不可混入獨立重播實驗或不同機台的相同 ID。
 
@@ -47,7 +71,7 @@ statistics_input/
 | SPI Alarm 數 | `events.csv` 的 `spi_alarm_count`；不會把 CSV 列數自動當成 Alarm 數 |
 | 機台送出、讀取、OP 確認時間 | `events.csv` |
 
-從運行中的 SQLite 蒐集資料時，請用 SQLite 備份功能產生一致的單檔快照；或停止相關 Worker 後再複製。若提供的是既有 WAL 模式檔案組，請保留相同時間點的 `.sqlite3` 與 `.sqlite3-wal`，勿只複製主檔而漏掉尚未 checkpoint 的紀錄。工具會讀取提供的 WAL，但無法修復蒐集時已不一致的檔案組。
+自行蒐集 SQLite 給離線模式時，請用 SQLite 備份功能產生一致的單檔快照；或停止相關 Worker 後再複製。若提供的是既有 WAL 模式檔案組，請保留相同時間點的 `.sqlite3` 與 `.sqlite3-wal`，勿只複製主檔而漏掉尚未 checkpoint 的紀錄。工具會讀取提供的 WAL，但無法修復蒐集時已不一致的檔案組。Config 模式會自動使用 SQLite 備份機制，無需手動蒐集主檔／WAL。
 
 原始影像備份若漏複製，會造成影像數低估。工具會忽略 `ai_result` 下的產物，且當影像少於 manifest 列數時標示可能不完整、不採用該影像數；這不是對完整性的全面保證，仍須提供完整備份。若只想節省影像複製量，可先取得每份工作的正確影像數，填入 `events.csv`。
 
@@ -55,17 +79,39 @@ statistics_input/
 
 在專案根目錄執行，路徑有空白時保留雙引號：
 
+**推薦：依 config 的原有資料位置統計。**
+
+```bat
+05_spi_statistics.bat --config "config\ai_server.json" --output "D:\SPI統計結果" --machine-id SPI01
+```
+
+也可以直接雙擊或執行：
+
+```bat
+05_spi_statistics.bat
+```
+
+未指定 `--config` 且未指定 `--input` 時，依序使用環境變數 `AI_CONFIG_PATH`、專案的 `config/ai_server.json`。未指定 `--output` 時，輸出至專案的 `statistics_output`。執行結果會列出實際使用的 config、掃描來源及報表路徑。
+
+跨平台執行：
+
+```bash
+python app/tools/spi_statistics.py --config ./config/ai_server.json --output ./statistics_output --machine-id SPI01
+```
+
+**離線資料夾仍可使用原本指令：**
+
 ```bat
 05_spi_statistics.bat --input "D:\SPI_Statistics\SPI01" --output "D:\SPI_Statistics\reports\SPI01" --machine-id SPI01 --image-threshold 60
 ```
 
-若使用當時產線設定：
+若離線資料夾同時提供當時產線設定：
 
 ```bat
 05_spi_statistics.bat --input "D:\SPI_Statistics\SPI01" --output "D:\SPI_Statistics\reports\SPI01" --machine-id SPI01 --config "D:\SPI_Statistics\SPI01\ai_server.json"
 ```
 
-也可以在專案根目錄自行建立 `statistics_input`，放入資料後直接雙擊 `05_spi_statistics.bat`；結果輸出至 `statistics_output`。雙擊模式**沒有預設閾值**，若要補足閾值請改用上面的參數。
+指定 `--input` 後，只掃描該資料夾；此時 `--config` 僅提供閾值與副檔名，不會追蹤其原本的產線位置。離線模式未指定 config 時也不會自動載入開發機設定。
 
 跨平台或獨立執行：
 
@@ -75,7 +121,49 @@ python app/tools/spi_statistics.py --input ./statistics_input --output ./statist
 
 `--image-threshold` 與 `--config` 同時指定時，前者優先作為缺漏值的補值。manifest 的超閾值錯誤文字或事件 CSV 提供的逐筆閾值，優先於全域補值；若歷史證據互相衝突，會寫入 `issues.csv`。不會默默採用目前開發機的設定或預設 60。
 
-輸出路徑可以是輸入資料夾的子目錄，掃描會排除該輸出目錄。輸出不能等於輸入，亦不能是輸入的父目錄。再次執行會覆寫六份同名報表；輸入資料不變。
+輸出路徑可以是來源資料夾的子目錄，掃描會排除該輸出目錄。輸出不能等於任何來源或是來源的父目錄。再次執行會覆寫六份同名報表。
+
+### 指定統計時間段
+
+加上 `--start`、`--end` 後，逐筆明細、摘要、影像分組、模型耗時與 manifest 候選清單，都只納入符合區間的工作。不加參數時維持全部工作，也可只給開始或結束時間。
+
+例如只統計 2026-10-29 的 08:00 至 20:00：
+
+```bat
+05_spi_statistics.bat --config "config\ai_server.json" --output "D:\SPI統計結果\20261029_day" --machine-id SPI01 --start "2026-10-29 08:00:00" --end "2026-10-29 20:00:00"
+```
+
+整天統計用下一天的零時作為結束，避免漏掉最後一秒內的小數時間：
+
+```bat
+05_spi_statistics.bat --config "config\ai_server.json" --start 2026-10-29 --end 2026-10-30
+```
+
+區間採 **開始包含、結束不包含**：上例包含 `2026-10-29 00:00:00`，排除 `2026-10-30 00:00:00`。參數沒有時區時採 UTC+8，也接受 `2026-10-29T08:00:00+08:00` 或 UTC 的 `Z` 格式。開始必須早於結束。
+
+`--time-field` 可選擇要比較的時間：
+
+| 值 | 說明 |
+|---|---|
+| `auto`（預設） | 優先 `ready_at`，缺少時依序採 `request_start_at`、`spi_sent_at`、`manifest_created_at`，與原本報表日期的選取規則一致 |
+| `ready_at` | 嚴格依資料完整驗證通過時間；沒有此欄的 manifest-only 工作不納入 |
+| `primary_returned_at` | 依回傳檔發布完成時間 |
+| `manifest_created_at` | 依 manifest 建立時間 |
+| `job_timestamp` | 將 14 碼 `job_id` 視為 UTC+8 的 `YYYYMMDDHHMMSS`；適合依原工作時間戳篩選歷史重播資料。這只是篩選依據，不用來計算傳輸或推論耗時 |
+
+也可使用 `--help` 列出的其他已記錄時間欄位，例如 `spi_read_at`、`op_confirm_at`、`completed_at`。明確指定欄位後不會自動改用其他時間。
+
+依時間戳工作資料夾選取一天的例子：
+
+```bat
+05_spi_statistics.bat --config "config\ai_server.json" --start 2026-10-29 --end 2026-10-30 --time-field job_timestamp
+```
+
+`jobs.csv` 的 `selection_time_field`、`selection_at` 保留每筆實際使用的時間，日期分組也跟隨這個時間。`summary.csv`／`image_buckets.csv` 記錄篩選欄位、起訖時間，以及全來源可識別工作數、區間外數、缺少篩選時間數。所有耗時與比例的統計分母只包含篩選後工作。
+
+有時間篩選時，缺少所選時間的工作會排除並寫入 `issues.csv`；未篩選時則仍保留。`issues.csv` 保留整次掃描的診斷，可能包含區間外或時間未知的資料問題，這些診斷不加入統計分母。有效資料中沒有工作符合區間時仍輸出空明細與零筆摘要，回傳成功。
+
+時間參數篩選的是報表工作範圍；工具仍會掃描來源以合併 manifest、SQLite 與 log，不會憑資料夾名稱推測其他時間欄位而略過來源掃描。
 
 ## 3. 輸出檔案
 
@@ -118,6 +206,7 @@ python app/tools/spi_statistics.py --input ./statistics_input --output ./statist
 | `threshold_source`／`threshold_evidence` | 閾值的資料來源、用數量比較或由超閾值原因確認 |
 | `manifest_selection` | 最終候選的選擇依據；`single_unverified` 表示唯一但未證明已發布，`ambiguous` 表示無法判定 |
 | `manifest_fingerprint` | 對照候選清單的內容指紋 |
+| `selection_time_field`／`selection_at` | 本次篩選與分日使用的實際時間欄位及值 |
 | `field_sources` | JSON 格式的逐欄來源；其餘 `*_sources` 保留檔案路徑或行號 |
 | `missing_fields`／`data_issues` | 缺少的時間／數量欄位及這份工作的資料問題 |
 
@@ -131,14 +220,14 @@ python app/tools/spi_statistics.py --input ./statistics_input --output ./statist
 - 每個耗時統計都有自己的 `*_n`，分位數與超過 3／5 秒比例只使用該欄有效樣本；比較採嚴格大於。P50／P95／P99 採排序後線性插值。
 - 正常結果不代表整份工作 OK；`normal_result_jobs` 表示正常跑完決策，仍可能包含 AI 判 NG。fallback NG 與模型判 NG 不混為一談。
 - `total_jobs` 是提供資料中可識別的唯一工作數，包含尚未回傳與缺少結果的工作。沒有出現在輸入證據裡的生產板，工具無法得知；此分母不是機台總產量。
-- 日期依 `ready_at`、舊版 request 開始、機台送出、manifest 建立的順序選取，並記錄 `report_date_source`。無時間則為 `unknown`，不從資料夾名稱臆測日期。
+- 預設日期依 `ready_at`、舊版 request 開始、機台送出、manifest 建立的順序選取；明確指定 `--time-field` 時，改以該時間分日，並記錄 `report_date_source`。無時間則為 `unknown`；只有明確指定 `job_timestamp` 才解析工作 ID 的時間。
 - 多模型並行，`model_timings.csv` 是各模型的請求牆鐘耗時，不能相加當成整體推論時間，也不是純 GPU 運算時間。舊版 log 人工補出的零耗時不輸出成模型測量值。
 - 最終 manifest 優先依 SQLite 指向的檔案識別，其次 `ai_result` 發布備份及可唯一匹配的 Publisher 證據。無法確認的多份候選不取最新一份猜測，而是保留候選清單、清空結果列數與模型耗時。
 - 舊版 log 多次請求相同 job 時，以最新 request CSV 為明細，`legacy_request_count` 保留請求數。多次請求無法安全對應 Publisher 耗時時不拼接。相同 job 同時出現 Pipeline 與 `/process` 證據時，只採 Pipeline 並列出警示。
 
 ## 5. 選用的 events.csv
 
-可放在輸入資料夾任意位置自動讀取，或以 `--events "D:\events.csv"` 指定。欄名固定為英文，`job_id` 必填，其餘可留空；CSV 必須為 UTF-8（可含 BOM）。
+Config 模式可用 `--events "D:\events.csv"` 指定機台／OP 事件。也可將 `events.csv` 放在設定的 result／backup／staging 目錄內自動讀取。離線模式可放在輸入資料夾任意位置。欄名固定為英文，`job_id` 必填，其餘可留空；CSV 必須為 UTF-8（可含 BOM）。
 
 ```csv
 machine_id,job_id,spi_sent_at,spi_read_at,op_confirm_at,spi_alarm_count,image_count,image_threshold
@@ -147,7 +236,7 @@ SPI01,20261021111223,2026-10-21T14:07:30.000+08:00,2026-10-21T14:07:36.800+08:00
 
 上述為欄位示例，不是正式現場紀錄。`spi_sent_at` 建議固定採機台「本次資料送出完成」事件；若現場選擇開始送出時間，整批資料要保持一致，避免混用起點。跨機器比較前先核對時鐘。
 
-所有 ISO 時間必須帶時區（如 `+08:00` 或 `Z`），也接受 Unix 秒。沒有時區、負耗時與非有限數字不會猜測補值；負耗時會列入問題清單並排除該區間。`late_after_op_s` 本身允許負值，代表 AI 結果較早被讀取。
+事件資料內的 ISO 時間必須帶時區（如 `+08:00` 或 `Z`），也接受 Unix 秒。沒有時區、負耗時與非有限數字不會猜測補值；負耗時會列入問題清單並排除該區間。`late_after_op_s` 本身允許負值，代表 AI 結果較早被讀取。CLI 的 `--start`／`--end` 另有明確的 UTC+8 預設規則。
 
 同一 job 可以有多列以補齊不同欄位，但同一欄有衝突值時不採用外部值並記錄問題。機台標籤若填寫，必須與 `--machine-id` 一致。事件資料與系統證據衝突時保留系統證據並標示問題。
 

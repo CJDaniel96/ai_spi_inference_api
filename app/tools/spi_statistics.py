@@ -1,7 +1,8 @@
 """Export offline SPI evidence to Excel-friendly CSVs using only the stdlib.
 
 Run ``python app/tools/spi_statistics.py --help`` or see docs/spi_statistics.md.
-Input files are never modified and embedded production paths are never followed.
+Config mode reads configured locations; folder mode reads only collected evidence.
+Database contents are never modified and embedded job paths are never followed.
 """
 
 from __future__ import annotations
@@ -16,9 +17,10 @@ import re
 import shutil
 import sqlite3
 import tempfile
+import time
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 UTC = timezone.utc  # noqa: UP017 -- standalone tool also supports Python 3.10
@@ -46,6 +48,8 @@ JOB_COLUMNS = [
     "execution_mode",
     "report_date",
     "report_date_source",
+    "selection_time_field",
+    "selection_at",
     "status",
     "state_reason",
     "publication_evidence",
@@ -196,6 +200,10 @@ class Evidence:
         self.raw_roots: dict[str, set[Path]] = defaultdict(set)
         self.image_counts: dict[Path, int] = defaultdict(int)
         self.source_jobs: dict[str, str] = {}
+        self.log_files: set[Path] = set()
+        self.request_log_files: set[Path] = set()
+        self.database_files: set[Path] = set()
+        self.live_database = False
 
     def issue(
         self, source: Any, message: str, job_id: str = "", severity: str = "warning"
@@ -204,23 +212,47 @@ class Evidence:
             dict(severity=severity, job_id=job_id, source=str(source), message=message)
         )
 
-    def discover(self) -> None:
-        for directory, dirs, names in os.walk(self.root, followlinks=False):
-            dirs[:] = sorted(
-                d
-                for d in dirs
-                if not (Path(directory) / d).is_symlink()
-                and (Path(directory) / d).resolve() != self.output
-            )
-            self.files.extend(
-                Path(directory) / n
-                for n in sorted(names)
-                if not (Path(directory) / n).is_symlink()
-            )
+    def discover(self, sources: list[Path] | None = None) -> None:
+        found: set[Path] = set()
+        for source in sources if sources is not None else [self.root]:
+            if source.is_symlink():
+                self.issue(source, "Symbolic-link evidence source ignored")
+                continue
+            if source.is_file():
+                found.add(source.resolve())
+                continue
+            if not source.is_dir():
+                self.issue(source, "Configured source does not exist")
+                continue
+            for directory, dirs, names in os.walk(
+                source,
+                followlinks=False,
+                onerror=lambda exc: self.issue(
+                    exc.filename, f"Cannot scan directory: {exc}", severity="error"
+                ),
+            ):
+                dirs[:] = sorted(
+                    d
+                    for d in dirs
+                    if not (Path(directory) / d).is_symlink()
+                    and (Path(directory) / d).resolve() != self.output
+                )
+                found.update(
+                    (Path(directory) / n).resolve()
+                    for n in names
+                    if not (Path(directory) / n).is_symlink()
+                )
+        self.files = sorted(found)
         for path in self.files:
             try:
                 lower = path.name.lower()
-                if path.suffix.lower() == ".json":
+                if path in self.database_files:
+                    self.read_database(path)
+                elif path in self.log_files:
+                    self.read_log(path)
+                elif path in self.request_log_files:
+                    self.read_csv(path)
+                elif path.suffix.lower() == ".json":
                     self.read_json(path)
                 elif path.suffix.lower() in {".sqlite3", ".sqlite", ".db"}:
                     self.read_database(path)
@@ -253,8 +285,6 @@ class Evidence:
         for path in self.files:
             if path.suffix.lower() in self.extensions:
                 for parent in path.parents:
-                    if parent == self.root.parent:
-                        break
                     if (
                         parent in roots
                         and "ai_result" not in path.relative_to(parent).parts
@@ -330,14 +360,35 @@ class Evidence:
             self.states[job_id].append((data, str(path)))
 
     def read_database(self, path: Path) -> None:
-        # SQLite may create/update -shm even with mode=ro. Open a temporary copy,
-        # including the supplied WAL, so the evidence folder stays untouched.
+        # Live sources require SQLite backup, not separate copies of changing
+        # DB/WAL files. Collected offline evidence keeps its no-sidecar-write mode.
         with tempfile.TemporaryDirectory(prefix="spi-statistics-") as temporary:
             copied = Path(temporary) / path.name
-            shutil.copyfile(path, copied)
-            wal = path.with_name(path.name + "-wal")
-            if wal.is_file() and not wal.is_symlink():
-                shutil.copyfile(wal, copied.with_name(copied.name + "-wal"))
+            if self.live_database:
+                source = sqlite3.connect(
+                    f"{path.as_uri()}?mode=ro", uri=True, timeout=5
+                )
+                try:
+                    target = sqlite3.connect(copied)
+                    try:
+                        deadline = time.monotonic() + 30
+
+                        def progress(_status, _remaining, _total):
+                            if time.monotonic() > deadline:
+                                raise TimeoutError(
+                                    "SQLite snapshot exceeded 30 seconds"
+                                )
+
+                        source.backup(target, pages=256, progress=progress, sleep=0.05)
+                    finally:
+                        target.close()
+                finally:
+                    source.close()
+            else:
+                shutil.copyfile(path, copied)
+                wal = path.with_name(path.name + "-wal")
+                if wal.is_file() and not wal.is_symlink():
+                    shutil.copyfile(wal, copied.with_name(copied.name + "-wal"))
             connection = sqlite3.connect(
                 f"{copied.as_uri()}?mode=ro", uri=True, timeout=5
             )
@@ -974,19 +1025,97 @@ def write_csv(path: Path, rows: list[dict], columns: list[str]) -> None:
         writer.writerows(rows)
 
 
-def export(evidence: Evidence) -> dict:
+def range_boundary(value: str) -> float:
+    """CLI boundaries without a timezone use the report's UTC+8 timezone."""
+    parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=TZ8)
+    return parsed.timestamp()
+
+
+def selection_time(row: dict, field: str) -> tuple[str, float | None]:
+    if field == "auto":
+        field = row.get("report_date_source") or "unknown"
+    if field == "job_timestamp":
+        job_id = row["job_id"]
+        if not re.fullmatch(r"\d{14}", job_id):
+            return field, None
+        try:
+            return field, datetime.strptime(job_id, "%Y%m%d%H%M%S").replace(
+                tzinfo=TZ8
+            ).timestamp()
+        except ValueError:
+            return field, None
+    return field, timestamp(row.get(field))
+
+
+def export(
+    evidence: Evidence,
+    *,
+    start: float | None = None,
+    end: float | None = None,
+    time_field: str = "auto",
+) -> dict:
+    if start is not None and end is not None and start >= end:
+        raise ValueError("--start must be earlier than --end (end is exclusive)")
     rows, models, candidates = evidence.build()
+    available_jobs = len(rows)
+    selected, outside_range, missing_time = [], 0, 0
+    for row in rows:
+        field, instant = selection_time(row, time_field)
+        row["selection_time_field"] = field
+        row["selection_at"] = format_time(instant)
+        row["report_date"] = (
+            datetime.fromtimestamp(instant, TZ8).date().isoformat()
+            if instant is not None
+            else "unknown"
+        )
+        row["report_date_source"] = field if field != "unknown" else ""
+        if start is not None or end is not None:
+            if instant is None:
+                missing_time += 1
+                evidence.issue(
+                    "time_filter",
+                    f"Excluded: no valid {field} timestamp",
+                    row["job_id"],
+                )
+                continue
+            if (start is not None and instant < start) or (
+                end is not None and instant >= end
+            ):
+                outside_range += 1
+                continue
+        selected.append(row)
+    rows = selected
+    job_ids = {r["job_id"] for r in rows}
+    models = [r for r in models if r["job_id"] in job_ids]
+    candidates = [r for r in candidates if r["job_id"] in job_ids]
+    filter_labels = dict(
+        filter_time_field=time_field,
+        filter_start_at=format_time(start),
+        filter_end_at=format_time(end),
+        filter_available_jobs=available_jobs,
+        filter_outside_range_jobs=outside_range,
+        filter_missing_time_jobs=missing_time,
+    )
     evidence.output.mkdir(parents=True, exist_ok=True)
-    summaries = [summarize(rows, scope="all", report_date="all")]
+    summaries = [summarize(rows, scope="all", report_date="all", **filter_labels)]
     days = sorted({r["report_date"] for r in rows})
     summaries += [
         summarize(
-            [r for r in rows if r["report_date"] == day], scope="day", report_date=day
+            [r for r in rows if r["report_date"] == day],
+            scope="day",
+            report_date=day,
+            **filter_labels,
         )
         for day in days
     ]
     buckets = [
-        summarize([r for r in rows if r["image_bucket"] == label], image_bucket=label)
+        summarize(
+            [r for r in rows if r["image_bucket"] == label],
+            image_bucket=label,
+            **filter_labels,
+        )
         for label in ("0", "1-10", "11-30", "31-60", "61-100", "101+", "unknown")
     ]
     for filename, data, columns in (
@@ -1011,28 +1140,97 @@ def export(evidence: Evidence) -> dict:
         write_csv(evidence.output / filename, data, columns)
     return {
         "jobs": len(rows),
+        "available_jobs": available_jobs,
+        "excluded_outside_range_jobs": outside_range,
+        "excluded_missing_time_jobs": missing_time,
+        "time_filter": filter_labels,
         "issues": len(evidence.issues),
         "errors": sum(i["severity"] == "error" for i in evidence.issues),
         "output": str(evidence.output),
     }
 
 
+def project_root() -> Path:
+    script = Path(__file__).resolve()
+    return (
+        script.parents[2]
+        if script.parent.name == "tools" and script.parent.parent.name == "app"
+        else script.parent
+    )
+
+
+def configured_path(value: str, base: Path) -> Path:
+    """Use the same project-relative path convention as the pipeline workers."""
+    text = str(value).strip()
+    if not text:
+        raise ValueError("Configured evidence path must not be blank")
+    if os.name != "nt" and PureWindowsPath(text).drive:
+        raise ValueError(
+            f"Cannot read Windows path on this OS: {text}. "
+            "Use --input for copied evidence or update the statistics config paths."
+        )
+    candidate = Path(text)
+    return (candidate if candidate.is_absolute() else base / candidate).resolve()
+
+
+def configured_sources(config: dict, base: Path, evidence: Evidence) -> list[Path]:
+    pipeline, logging = config.get("pipeline", {}), config.get("logging", {})
+    sources = [
+        configured_path(pipeline.get("result_root", "data/pipeline/results"), base)
+    ]
+    database = configured_path(
+        pipeline.get("database_path", "data/pipeline/jobs.sqlite3"), base
+    )
+    sources.append(database)
+    evidence.database_files.add(database)
+    evidence.live_database = True
+    for value in (
+        config.get("paths", {}).get("backup_output_root"),
+        pipeline.get("staging_root"),
+    ):
+        if value:
+            sources.append(configured_path(value, base))
+    log_dir = configured_path(logging.get("log_dir", "log"), base)
+    system = Path(logging.get("system_log_file", "system"))
+    bases = [log_dir / system]
+    bases += [
+        log_dir / f"{system.stem}.{stage}{system.suffix}"
+        for stage in ("ingest", "inference", "publisher")
+    ]
+    request = log_dir / logging.get("request_log_file", "log.csv")
+    for base_file, destination in [(p, evidence.log_files) for p in bases] + [
+        (request, evidence.request_log_files)
+    ]:
+        matching = [base_file] if base_file.is_file() else []
+        matching += [
+            p
+            for p in base_file.parent.glob(base_file.name + ".*")
+            if p.name[len(base_file.name) + 1 :].isdigit() and p.is_file()
+        ]
+        for path in matching:
+            if not path.is_symlink():
+                resolved = path.resolve()
+                destination.add(resolved)
+                sources.append(resolved)
+    if not evidence.log_files and not evidence.request_log_files:
+        evidence.issue(log_dir, "No configured system/request logs found")
+    return sorted(set(sources))
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--input",
-        required=True,
         type=Path,
-        help="Evidence folder for ONE machine; searched recursively",
+        help="Collected evidence for ONE machine; omit to read config locations",
     )
     parser.add_argument(
         "--output",
-        required=True,
         type=Path,
-        help="Report folder; may be inside input, but cannot equal it",
+        help="Report folder; defaults to <project-root>/statistics_output",
     )
     parser.add_argument(
-        "--machine-id", help="Machine label; defaults to input folder name"
+        "--machine-id", help="Machine label; defaults to input/project folder name"
     )
     parser.add_argument(
         "--image-threshold",
@@ -1042,27 +1240,56 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--config",
         type=Path,
-        help="Historical ai_server.json for threshold and image extensions",
+        help="Config JSON; otherwise AI_CONFIG_PATH or config/ai_server.json",
+    )
+    parser.add_argument(
+        "--project-root",
+        type=Path,
+        help="Base for config-relative paths; defaults to this tool's project root",
     )
     parser.add_argument(
         "--events",
         type=Path,
         help="Optional external event CSV; in-folder CSVs are auto-detected",
     )
+    parser.add_argument(
+        "--start",
+        help="Inclusive start date/time; no timezone means UTC+8",
+    )
+    parser.add_argument(
+        "--end",
+        help="Exclusive end date/time; no timezone means UTC+8",
+    )
+    parser.add_argument(
+        "--time-field",
+        choices=["auto", *TIME_FIELDS, "job_timestamp"],
+        default="auto",
+        help="Timestamp field; auto prefers ready, request, SPI-sent, then manifest",
+    )
     args = parser.parse_args(argv)
     try:
-        root, output = args.input.resolve(), args.output.resolve()
-        if not root.is_dir():
+        start = range_boundary(args.start) if args.start is not None else None
+        end = range_boundary(args.end) if args.end is not None else None
+        if start is not None and end is not None and start >= end:
+            raise ValueError("--start must be earlier than --end (end is exclusive)")
+        base = (args.project_root or project_root()).resolve()
+        root = args.input.resolve() if args.input else base
+        output = (args.output or base / "statistics_output").resolve()
+        if args.input and not root.is_dir():
             raise ValueError(f"Input directory does not exist: {root}")
-        if root.is_relative_to(output):
-            raise ValueError("Output cannot equal input or be an ancestor of input")
+        config_path = args.config
+        if not args.input and config_path is None:
+            config_path = Path(
+                os.environ.get("AI_CONFIG_PATH") or base / "config/ai_server.json"
+            )
         threshold, source, extensions = args.image_threshold, "cli", DEFAULT_EXTENSIONS
-        if args.config:
-            config = json.loads(args.config.read_text(encoding="utf-8-sig"))
-            processing = config["processing"]
+        config = {}
+        if config_path:
+            config = json.loads(config_path.read_text(encoding="utf-8-sig"))
+            processing = config.get("processing", {})
             if threshold is None:
                 threshold = integer(processing.get("folder_images_num_threshold"))
-                source = str(args.config)
+                source = str(config_path.resolve())
             extensions = {
                 str(e).lower()
                 for e in processing.get("image_extensions", sorted(DEFAULT_EXTENSIONS))
@@ -1076,12 +1303,20 @@ def main(argv: list[str] | None = None) -> int:
             source if threshold is not None else "",
             extensions,
         )
-        evidence.discover()
+        sources = [root] if args.input else configured_sources(config, base, evidence)
+        if any(path.is_relative_to(output) for path in sources):
+            raise ValueError("Output cannot equal a source or be its ancestor")
+        evidence.discover(sources)
         if args.events and args.events.resolve() not in evidence.files:
             evidence.read_csv(args.events.resolve(), events_only=True)
-        result = export(evidence)
+        result = export(evidence, start=start, end=end, time_field=args.time_field)
+        result.update(
+            input_mode="folder" if args.input else "config",
+            config=str(config_path.resolve()) if config_path else None,
+            sources=[str(p) for p in sources],
+        )
         print(json.dumps(result, ensure_ascii=False, indent=2))
-        return 2 if result["errors"] else 0 if result["jobs"] else 1
+        return 2 if result["errors"] else 0 if result["available_jobs"] else 1
     except (
         OSError,
         ValueError,
