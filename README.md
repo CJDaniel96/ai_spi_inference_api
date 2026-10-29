@@ -1023,6 +1023,21 @@ linted/formatted yet — see "Known Behavior".
   for the legacy entry point and are excluded from Ruff/mypy. The new `app/` entry
   point has no runtime dependency on `ai_server_fastapi.py`.
 
+## Offline SPI statistics
+
+`05_spi_statistics.bat` (or `python -m app.tools.spi_statistics`) reads a collected
+folder of manifests, pipeline SQLite snapshots, stage logs, and optional machine
+events. It exports job details, daily/overall percentiles, image-count groups,
+model request timings, manifest candidates, and data-quality issues as UTF-8-BOM
+CSVs. It uses only the Python standard library and leaves input evidence intact.
+Missing timestamps/counts stay blank; multiple inference attempts are not counted
+as multiple jobs. See [the Chinese usage guide](docs/spi_statistics.md) for required
+evidence, metric definitions, and the optional SPI/OP event CSV.
+
+```bat
+05_spi_statistics.bat --input "D:\SPI_Statistics\SPI01" --output "D:\SPI_Statistics\reports\SPI01" --machine-id SPI01 --image-threshold 60
+```
+
 ## Optional Stage 04: MiNiFi database CSV export (no DAT)
 
 `04_pipeline_db_export.bat` scans the `input_path` configured in

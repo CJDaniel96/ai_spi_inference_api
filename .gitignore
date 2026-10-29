@@ -147,6 +147,8 @@ ehthumbs.db
 Thumbs.db
 
 # Project specific
+statistics_input/
+statistics_output/
 *.csv
 inference_results_*.csv
 temp/
