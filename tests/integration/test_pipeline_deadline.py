@@ -154,7 +154,7 @@ def test_exactly_sixty_images_still_use_normal_validation(case, monkeypatch):
     make_job(case[0], count=60)
     calls = []
 
-    def validate(source):
+    def validate(source, **kwargs):
         calls.append(source)
         raise ValueError("test boundary: normal image validation was selected")
 

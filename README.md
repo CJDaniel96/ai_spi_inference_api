@@ -14,8 +14,8 @@ Given a timestamp folder containing SPI CSV(s) and pad images, the durable pipel
    absolute end-to-end deadline before waiting for stability.
 2. Validates the CSV set and saves immutable original CSV snapshots. More than
    60 actual image files takes a CSV-only all-`23` bypass without decoding images.
-3. For normal inference, verifies every expected image and atomically copies the
-   complete original tree to the AIPC's local backup, recording `ready_at`.
+3. For normal inference, checks image metadata, streams the original tree once
+   from the share while hashing, then verifies/decodes the local copy before READY.
 4. Calls the **enabled** model endpoints against the immutable local copy.
 5. Verifies that every required model returned a finite result for every expected
    image. Required-model failure or timeout produces an all-`23` fail-safe result.
@@ -23,8 +23,13 @@ Given a timestamp folder containing SPI CSV(s) and pad images, the durable pipel
    durable result manifest without publishing to the machine share.
 7. Publishes Primary CSVs atomically, checkpointing each success. Failed writes
    retry only within the remaining job budget; expired jobs are never auto-resent.
-8. Saves local result backups after Primary. Oversized jobs archive raw images in
-   an independent background lane; missing source files are reported as incomplete.
+8. Saves local result backups in a supervised background process after Primary,
+   without blocking later returns. Oversized raw images use a separate background
+   lane; missing source files are reported as incomplete.
+
+The optional resident Detection → Segmentation service, single-read ingest, and
+background backup behavior are documented in
+[模型串接與 I/O 改善](docs/model_flow_io_improvements.md).
 
 ## Architecture
 
@@ -108,7 +113,8 @@ be reclaimed after a process crash. Jobs are ordered by the earliest deadline.
 New jobs persist `first_seen_at` when CSV input is first observed, before settle,
 validation, copying, queueing, inference, or publication. This is a conservative
 AI-side observation, not a machine export-completion event or folder-name time.
-`ready_at` retains its old meaning: complete CSV/image validation has passed.
+`ready_at` is recorded once complete CSV/image validation on the local raw copy
+has passed and the new job transitions to READY. Existing legacy values remain.
 CSV-only bypass jobs have no `ready_at` because their images are never decoded.
 
 ```text

@@ -146,3 +146,18 @@ def test_merge_requires_img_name_column() -> None:
     result = ModelInferenceResult(name="x", target_column="y", results={})
     with pytest.raises(ValueError, match="img_name"):
         CsvMerger().merge_model_results(df, [result])
+
+
+@pytest.mark.parametrize("values", [{"a.jpg": 185.0}, {}])
+def test_fresh_model_results_replace_stale_source_values(values) -> None:
+    source = pd.DataFrame({"img_name": ["a.jpg"], "cover%": [999.0]}, index=[4])
+    result = ModelInferenceResult(
+        name="area_ratio", target_column="cover%", results=values
+    )
+    merged = CsvMerger().merge_model_results(source, [result])
+    assert list(merged.columns) == ["img_name", "cover%"]
+    value = merged["cover%"].iloc[0]
+    if values:
+        assert value == 185.0
+    else:
+        assert pd.isna(value)

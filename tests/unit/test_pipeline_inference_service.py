@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 
+import httpx
 import pandas as pd
 import pytest
 
@@ -70,6 +71,42 @@ def _job(tmp_path):
     )
     (folder / "0_100.jpg").write_bytes(b"image")
     return folder
+
+
+@pytest.mark.parametrize(("ratio", "code"), [(180.0, 22), (180.01, 23), (None, 23)])
+def test_combined_area_endpoint_uses_existing_cover_threshold(tmp_path, ratio, code):
+    config = _config(tmp_path, reserve=1)
+    config.model_clients = [
+        ModelClientConfig(
+            name="area_ratio",
+            url="http://area/inference",
+            target_column="cover%",
+            required=True,
+            timeout_seconds=25,
+        )
+    ]
+    folder = _job(tmp_path)
+
+    def handler(request):
+        assert "X-SPI-Deadline-At" in request.headers
+        return httpx.Response(200, json={"results": {"0_100.jpg": ratio}})
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            service = PipelineInferenceService(
+                config=config,
+                result_root=tmp_path / "results",
+                http_client=client,
+            )
+            return await service.prepare(
+                job_id=folder.name, staged_folder=folder, deadline_at=time.time() + 3
+            )
+
+    manifest, _path = asyncio.run(run())
+    assert manifest.csv_results[0].result_codes == (code,)
+    assert manifest.outcome is (
+        PipelineOutcome.FALLBACK if ratio is None else PipelineOutcome.NORMAL
+    )
 
 
 def _results(*, error: str | None = None) -> list[ModelInferenceResult]:

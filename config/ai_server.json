@@ -44,6 +44,14 @@
       "url": "http://127.0.0.1:8002/inference",
       "target_column": "min_pad_distance",
       "timeout_seconds": 25
+    },
+    {
+      "name": "area_ratio",
+      "enabled": false,
+      "required": true,
+      "url": "http://127.0.0.1:8003/inference",
+      "target_column": "cover%",
+      "timeout_seconds": 25
     }
   ],
   "defect_rules": {

@@ -107,18 +107,23 @@ class IngestWorker:
                         if claimed.source_folder.is_dir()
                         else claimed.staged_folder
                     )
-                    validated = self._service.validate(source)
+                    validated = self._service.validate(
+                        source,
+                        decode_images=False,
+                        csv_snapshot=claimed.csv_snapshot_folder,
+                    )
                 else:
                     validated = self._call(
                         pipeline_io.validate_source,
                         self._config,
                         claimed.source_folder,
+                        claimed.csv_snapshot_folder,
                         deadline_at=claimed.deadline_at.timestamp(),
                     )
             validated = replace(
                 validated,
                 source_folder=claimed.source_folder,
-                ready_at=claimed.ready_at,
+                ready_at=claimed.ready_at or validated.ready_at,
                 deadline_at=claimed.deadline_at,
             )
             if self._io is None:
@@ -132,6 +137,7 @@ class IngestWorker:
                         validated,
                         backup_root=self._backup_root,
                         staging_root=self._staging_root,
+                        csv_snapshot=claimed.csv_snapshot_folder,
                     )
             else:
                 result = self._call(
@@ -140,6 +146,7 @@ class IngestWorker:
                     validated,
                     self._backup_root,
                     self._staging_root,
+                    claimed.csv_snapshot_folder,
                     deadline_at=claimed.deadline_at.timestamp(),
                 )
             if result is not None and (
@@ -148,7 +155,7 @@ class IngestWorker:
             ):
                 raise RuntimeError("Persisted ingest paths differ from archive paths")
             try:
-                self._repository.mark_ready(
+                claimed = self._repository.mark_ready(
                     job_id=claimed.job_id, worker_id=self._worker_id, now=self._clock()
                 )
                 self._repository.note_image_backup(claimed.job_id, "complete")
@@ -161,7 +168,7 @@ class IngestWorker:
                 "event=pipeline.ingest.raw_backup_ready job_id=%s ready_at=%s "
                 "deadline_at=%s staged_folder=%s",
                 claimed.job_id,
-                claimed.ready_at.isoformat(),
+                claimed.ready_at.isoformat() if claimed.ready_at else "-",
                 claimed.deadline_at.isoformat(),
                 claimed.staged_folder,
             )
@@ -298,29 +305,24 @@ class IngestWorker:
                     )
                 else:
                     validated = (
-                        self._service.validate(folder)
+                        self._service.validate(
+                            folder, decode_images=False, csv_snapshot=csv_target
+                        )
                         if self._io is None
                         else self._call(
                             pipeline_io.validate_source,
                             self._config,
                             folder,
+                            csv_target,
                             deadline_at=deadline,
                         )
                     )
                     validated = replace(
                         validated, deadline_at=observed_job.job.deadline_at
                     )
-                    self._call(
-                        pipeline_io.snapshot_csv,
-                        self._config,
-                        folder,
-                        csv_target,
-                        deadline_at=deadline,
-                    )
                     advanced = self._repository.activate_observed_job(
                         job_id=folder.name,
                         csv_snapshot_folder=csv_target,
-                        ready_at=validated.ready_at,
                         now=self._clock(),
                     )
                     if advanced:

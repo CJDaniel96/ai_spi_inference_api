@@ -103,7 +103,12 @@ def test_loads_real_repo_config() -> None:
     assert config.pipeline.staging_root is None
     assert config.pipeline.source_settle_seconds == 2.0
     assert config.pipeline.publisher_poll_interval_seconds == 0.05
-    assert len(config.model_clients) == 3
+    assert len(config.model_clients) == 4
+    area = next(
+        client for client in config.model_clients if client.name == "area_ratio"
+    )
+    assert area.enabled is False and area.required is True
+    assert area.target_column == "cover%"
 
 
 def test_enabled_model_clients_excludes_disabled(tmp_path: Path) -> None:

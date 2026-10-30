@@ -1,10 +1,10 @@
 """Stage-one validation and immutable archival for timestamp-folder jobs.
 
 The service deliberately separates :meth:`validate` from :meth:`archive`.
-Validation establishes the soft-real-time ``ready_at`` timestamp as soon as
-the CSV contract, every expected image, and a stable source snapshot have been
-verified.  A worker can therefore persist/enqueue that deadline before the
-potentially slower copy to local storage begins.
+The durable worker validates CSVs and image metadata on the share, then decodes
+the byte-verified local copy before marking the job READY. Its original absolute
+deadline is persisted before either step. Standalone validation can still decode
+images immediately for callers that require that behavior.
 
 Archival copies the complete source tree into temporary directories on the
 destination filesystem, verifies their byte content, and atomically renames
@@ -33,7 +33,7 @@ import pandas as pd
 
 from app.core.errors import AppError, CsvSchemaError
 from app.domain.services.csv_merger import CsvMerger
-from app.infrastructure.output.sinic_csv_output import _read_document
+from app.infrastructure.output.sinic_csv_output import _parse_document
 from app.infrastructure.repositories.csv_repository import CsvRepository
 
 _TIMESTAMP_FORMAT = "%Y%m%d%H%M%S"
@@ -98,6 +98,7 @@ class ValidatedIngest:
     ready_at: datetime
     deadline_at: datetime
     source_snapshot: TreeSnapshot
+    images_decoded: bool = True
 
 
 @dataclass(frozen=True)
@@ -173,7 +174,7 @@ class IngestService:
         seen: set[str] = set()
         for path in csv_files:
             payload = path.read_bytes()
-            document = _read_document(path)
+            document = _parse_document(payload, path.name)
             if "is_pass" not in document.fieldnames or not document.rows:
                 raise IngestValidationError(
                     f"Missing is_pass or data rows: {path.name}"
@@ -197,9 +198,6 @@ class IngestService:
                 if key in seen:
                     raise IngestValidationError(f"Duplicate expected image key: {key}")
                 seen.add(key)
-            # The bytes validated must be the bytes later returned to the machine.
-            if payload != path.read_bytes():
-                raise SourceChangedError("CSV changed during snapshot")
             payloads[path.name] = payload
         if snapshot() != initial:
             raise SourceChangedError("CSV set changed during snapshot")
@@ -222,17 +220,23 @@ class IngestService:
             raise SourceChangedError("CSV set changed while committing snapshot")
         return destination
 
-    def validate(self, source_folder: str | Path) -> ValidatedIngest:
+    def validate(
+        self,
+        source_folder: str | Path,
+        *,
+        decode_images: bool = True,
+        csv_snapshot: Path | None = None,
+    ) -> ValidatedIngest:
         """Validate CSV/image completeness and establish the job deadline.
 
-        ``ready_at`` is sampled immediately after the post-validation snapshot
-        matches the pre-validation snapshot.  Copy time therefore consumes the
-        same 30-second end-to-end budget as inference and publication.
+        With ``decode_images=False``, decoding is deferred to the verified local
+        archive. The durable worker records its ready_at only after that succeeds;
+        copying and decoding still consume the original end-to-end budget.
         """
         source = self._resolve_source(source_folder)
         job_id = self._validate_job_id(source.name)
         initial_snapshot = self._snapshot_tree(source)
-        csv_files = self._csv_files(source)
+        csv_files = self._csv_files(csv_snapshot or source)
         if not csv_files:
             raise IngestValidationError(f"No CSV files found in job: {source}")
 
@@ -266,7 +270,10 @@ class IngestService:
                         f"{csv_path.name} row {row_number}"
                     )
                 seen_keys[collision_key] = (csv_path, row_number)
-                self._validate_image(source / image_key, image_key)
+                if decode_images:
+                    self._validate_image(source / image_key, image_key)
+                else:
+                    self._validate_image_metadata(source / image_key, image_key)
                 image_keys.append(image_key)
 
         self._assert_snapshot_unchanged(source, initial_snapshot, "validation")
@@ -278,6 +285,7 @@ class IngestService:
             ready_at=ready_at,
             deadline_at=ready_at + timedelta(seconds=self._deadline_seconds),
             source_snapshot=initial_snapshot,
+            images_decoded=decode_images,
         )
 
     def archive(
@@ -286,6 +294,7 @@ class IngestService:
         *,
         backup_root: str | Path,
         staging_root: str | Path | None = None,
+        csv_snapshot: Path | None = None,
     ) -> IngestResult:
         """Atomically archive a validated source tree to local storage.
 
@@ -301,17 +310,31 @@ class IngestService:
         backup_target = plan.original_backup_folder
         staging_target = plan.staged_folder
 
-        source_manifest = self._content_manifest(source, source=True)
-        self._assert_snapshot_unchanged(source, validated.source_snapshot, "copy")
-
-        # Commit the original backup before any optional staging copy.  Publisher
-        # requires this directory before Primary can become machine-visible.
         targets = tuple(dict.fromkeys((backup_target, staging_target)))
         prepared: dict[Path, _PreparedCopy] = {}
         committed_targets: set[Path] = set()
         try:
-            for target in targets:
-                prepared[target] = self._prepare_copy(source, target, source_manifest)
+            first, source_manifest = self._prepare_streamed_copy(
+                source, backup_target, validated.source_snapshot
+            )
+            prepared[backup_target] = first
+            local_source = first.temporary or first.target
+            if csv_snapshot is not None:
+                expected = {
+                    p.name: p.read_bytes() for p in self._csv_files(csv_snapshot)
+                }
+                actual = {p.name: p.read_bytes() for p in self._csv_files(local_source)}
+                if expected != actual:
+                    raise SourceChangedError(
+                        "Copied CSV differs from immutable snapshot"
+                    )
+            if not validated.images_decoded:
+                for image_key in validated.expected_image_keys:
+                    self._validate_image(local_source / image_key, image_key)
+            for target in targets[1:]:
+                prepared[target] = self._prepare_copy(
+                    local_source, target, source_manifest
+                )
             self._assert_snapshot_unchanged(source, validated.source_snapshot, "copy")
             for target in targets:
                 before_commit = prepared[target]
@@ -463,7 +486,7 @@ class IngestService:
         return image_key
 
     @staticmethod
-    def _validate_image(image_path: Path, image_key: str) -> None:
+    def _validate_image_metadata(image_path: Path, image_key: str) -> None:
         try:
             metadata = image_path.lstat()
         except FileNotFoundError as exc:
@@ -480,6 +503,10 @@ class IngestService:
             )
         if metadata.st_size <= 0:
             raise IngestValidationError(f"Expected image is empty: {image_key}")
+
+    @classmethod
+    def _validate_image(cls, image_path: Path, image_key: str) -> None:
+        cls._validate_image_metadata(image_path, image_key)
         try:
             encoded = np.frombuffer(image_path.read_bytes(), dtype=np.uint8)
             decoded = cv2.imdecode(encoded, cv2.IMREAD_UNCHANGED)
@@ -594,6 +621,74 @@ class IngestService:
             raise IngestStorageError(
                 f"Ingest target must not be inside the source job: {target}"
             )
+
+    @classmethod
+    def _prepare_streamed_copy(
+        cls, source: Path, target: Path, snapshot: TreeSnapshot
+    ) -> tuple[_PreparedCopy, ContentManifest]:
+        """Read source bytes once, hashing during copy and verifying locally."""
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = Path(
+            tempfile.mkdtemp(
+                prefix=f".{target.name}.", suffix=".tmp", dir=target.parent
+            )
+        )
+        expected = {entry.relative_path: entry for entry in snapshot}
+        entries = [
+            ContentManifestEntry(entry.relative_path, "directory", 0, "")
+            for entry in snapshot
+            if entry.kind == "directory"
+        ]
+
+        def copy_and_hash(src, dst):
+            path = Path(src)
+            relative = path.relative_to(source).as_posix()
+            entry = expected.get(relative)
+            metadata = path.lstat()
+            if (
+                entry is None
+                or entry.kind != "file"
+                or not stat.S_ISREG(metadata.st_mode)
+                or (metadata.st_size, metadata.st_mtime_ns)
+                != (entry.size, entry.mtime_ns)
+            ):
+                raise SourceChangedError(f"Source changed during copy: {relative}")
+            digest = hashlib.sha256()
+            size = 0
+            with path.open("rb") as reader, Path(dst).open("wb") as writer:
+                for chunk in iter(lambda: reader.read(_HASH_CHUNK_SIZE), b""):
+                    writer.write(chunk)
+                    digest.update(chunk)
+                    size += len(chunk)
+            if size != entry.size:
+                raise SourceChangedError(f"Source changed during copy: {relative}")
+            shutil.copystat(path, dst)
+            entries.append(
+                ContentManifestEntry(relative, "file", size, digest.hexdigest())
+            )
+            return dst
+
+        try:
+            shutil.copytree(
+                source, temporary, dirs_exist_ok=True, copy_function=copy_and_hash
+            )
+            cls._assert_snapshot_unchanged(source, snapshot, "copy")
+            manifest = tuple(sorted(entries, key=lambda item: item.relative_path))
+            if set(expected) != {entry.relative_path for entry in manifest}:
+                raise SourceChangedError("Source file set changed during copy")
+            if cls._content_manifest(temporary) != manifest:
+                raise IngestStorageError("Local copy failed content verification")
+            if target.exists():
+                if not target.is_dir() or cls._content_manifest(target) != manifest:
+                    raise IngestCollisionError(
+                        f"Ingest target already exists with different content: {target}"
+                    )
+                shutil.rmtree(temporary)
+                return _PreparedCopy(target, None, True), manifest
+            return _PreparedCopy(target, temporary, False), manifest
+        except Exception:
+            shutil.rmtree(temporary, ignore_errors=True)
+            raise
 
     @classmethod
     def _prepare_copy(

@@ -209,8 +209,7 @@ class CsvMerger:
         """Merge one ``{img_name: value}`` mapping into ``column_name``."""
         if not results:
             out = df.copy()
-            if column_name not in out.columns:
-                out[column_name] = pd.Series([pd.NA] * len(out), dtype="Float64")
+            out[column_name] = pd.Series(pd.NA, index=out.index, dtype="Float64")
             return out
 
         map_df = pd.DataFrame(
@@ -220,6 +219,10 @@ class CsvMerger:
             }
         )
         map_df[column_name] = pd.to_numeric(map_df[column_name], errors="coerce")
-        merged = df.merge(map_df, on=_IMAGE_NAME_COLUMN, how="left")
+        # Fresh inference owns this column, including when the source CSV carries
+        # a stale value from an earlier inspection.
+        merged = df.drop(columns=[column_name], errors="ignore").merge(
+            map_df, on=_IMAGE_NAME_COLUMN, how="left"
+        )
         merged[column_name] = pd.to_numeric(merged[column_name], errors="coerce")
         return merged

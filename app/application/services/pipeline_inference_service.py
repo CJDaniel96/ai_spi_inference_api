@@ -250,7 +250,12 @@ class PipelineInferenceService:
                 csv_stem=csv_path.stem,
             )
             frame = self._merger.merge_model_results(frame, model_results)
-            derived = self._derived.add_derived_columns(frame)
+            derived = self._derived.add_derived_columns(
+                frame,
+                cover_from_model=any(
+                    result.target_column == "cover%" for result in model_results
+                ),
+            )
             frame = self._classifier.classify(derived.df)
             frame = add_is_pass(frame)
             metrics.accumulate(frame)

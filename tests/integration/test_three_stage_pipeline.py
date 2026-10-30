@@ -406,8 +406,8 @@ def test_ingest_completion_sets_raw_fence_after_cutoff_takeover(tmp_path: Path) 
     )
 
     class _TakeoverDuringArchive:
-        def validate(self, source_folder):
-            return delegate.validate(source_folder)
+        def validate(self, source_folder, **kwargs):
+            return delegate.validate(source_folder, **kwargs)
 
         def plan_archive(self, validated, **kwargs):
             return delegate.plan_archive(validated, **kwargs)

@@ -16,6 +16,7 @@ from app.application.services.ingest_service import (
     IngestValidationError,
     SourceChangedError,
 )
+from app.infrastructure.input.pipeline_io import backup_images
 
 _JOB_ID = "20260826112233"
 _READY_AT = datetime(2026, 8, 26, 3, 22, 4, tzinfo=UTC)
@@ -293,3 +294,109 @@ def test_existing_different_target_is_never_overwritten(tmp_path) -> None:
         service.archive(service.validate(source), backup_root=tmp_path / "backup")
 
     assert marker.read_text(encoding="utf-8") == "do not overwrite"
+
+
+def test_pipeline_reads_share_image_once_even_with_distinct_staging(
+    tmp_path, monkeypatch
+):
+    source = _create_job(
+        tmp_path,
+        rows=[
+            {
+                "component_name": "J1701",
+                "Array_id": 133,
+                "Pad_id": 27346,
+                "is_pass": 0,
+            }
+        ],
+    )
+    service = _service()
+    snapshot = service.snapshot_csv(source, tmp_path / "snapshot")
+    opens = []
+    original = Path.open
+
+    def track(path, *args, **kwargs):
+        if path.is_relative_to(source):
+            opens.append(path.name)
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", track)
+    validated = service.validate(source, decode_images=False, csv_snapshot=snapshot)
+    result = service.archive(
+        validated,
+        backup_root=tmp_path / "backup",
+        staging_root=tmp_path / "staging",
+        csv_snapshot=snapshot,
+    )
+    assert opens.count(next(source.glob("*.jpg")).name) == 1
+    assert opens.count(next(source.glob("*.csv")).name) == 1
+    assert result.staged_folder.is_dir() and result.original_backup_folder.is_dir()
+
+
+def test_bad_image_is_rejected_locally_before_archive_commit(tmp_path):
+    source = _create_job(tmp_path)
+    next(source.glob("*.jpg")).write_bytes(b"invalid image bytes")
+    service = _service()
+    validated = service.validate(source, decode_images=False)
+    with pytest.raises(IngestValidationError, match="not decodable"):
+        service.archive(validated, backup_root=tmp_path / "backup")
+    assert not (tmp_path / "backup" / "2026-08-26" / _JOB_ID).exists()
+    assert not list((tmp_path / "backup").rglob("*.tmp"))
+
+
+def test_archive_rejects_csv_that_differs_from_saved_decision_input(tmp_path):
+    source = _create_job(
+        tmp_path,
+        rows=[
+            {
+                "component_name": "J1701",
+                "Array_id": 133,
+                "Pad_id": 27346,
+                "is_pass": 0,
+            }
+        ],
+    )
+    service = _service()
+    snapshot = service.snapshot_csv(source, tmp_path / "snapshot")
+    csv = next(source.glob("*.csv"))
+    csv.write_bytes(csv.read_bytes().replace(b",0\n", b",1\n"))
+    validated = service.validate(source, decode_images=False, csv_snapshot=snapshot)
+    with pytest.raises(SourceChangedError, match="immutable snapshot"):
+        service.archive(
+            validated, backup_root=tmp_path / "backup", csv_snapshot=snapshot
+        )
+    assert not (tmp_path / "backup" / "2026-08-26" / _JOB_ID).exists()
+
+
+def test_background_raw_backup_reads_source_once_without_decoding(
+    tmp_path, monkeypatch
+):
+    source = _create_job(
+        tmp_path,
+        rows=[
+            {
+                "component_name": "J1701",
+                "Array_id": 133,
+                "Pad_id": 27346,
+                "is_pass": 0,
+            }
+        ],
+    )
+    image = next(source.glob("*.jpg"))
+    image.write_bytes(b"raw bytes retained even if not decodable")
+    snapshot = _service().snapshot_csv(source, tmp_path / "snapshot")
+    original = Path.open
+    reads = []
+
+    def track(path, *args, **kwargs):
+        if path == image:
+            reads.append(path)
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", track)
+    target = tmp_path / "raw"
+    assert backup_images(source, target, snapshot) == "complete"
+    assert len(reads) == 1
+    assert (
+        target / image.name
+    ).read_bytes() == b"raw bytes retained even if not decodable"

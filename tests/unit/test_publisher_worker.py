@@ -242,3 +242,66 @@ def test_manual_retry_rejects_a_job_which_has_not_failed(publisher_case):
     with pytest.raises(ValueError, match="Only a FAILED job"):
         retry_backup(repository.database_path, _OLD_JOB)
     assert repository.get(_OLD_JOB).status is PipelineJobStatus.PRIMARY_RETURNED
+
+
+class _ControlledBackupIO:
+    def __init__(self):
+        self.released = False
+        self.error = None
+        self.closed = False
+
+    def submit(self, function, *args, deadline_at):
+        self.operation = function, args
+        self.deadline_at = deadline_at
+
+    def poll(self):
+        if not self.released:
+            return False, None
+        if self.error:
+            raise self.error
+        function, args = self.operation
+        function(*args)
+        return True, None
+
+    def close(self):
+        self.closed = True
+
+
+def test_pending_backup_does_not_block_next_primary_return(publisher_case):
+    _config, repository, worker, prepare = publisher_case
+    prepare(_OLD_JOB)
+    lane = _ControlledBackupIO()
+    worker._finalize_io = lane
+    assert worker.run_once()
+    assert worker._finalizing_job.job_id == _OLD_JOB
+    assert repository.get(_OLD_JOB).status is PipelineJobStatus.PRIMARY_RETURNED
+    assert worker.run_once() is False
+
+    _processed, primary = prepare("20261021152905")
+    assert primary.is_file()
+    assert repository.get("20261021152905").status is PipelineJobStatus.PRIMARY_RETURNED
+    assert repository.get(_OLD_JOB).status is PipelineJobStatus.PRIMARY_RETURNED
+
+    lane.released = True
+    worker.run_once()
+    assert repository.get(_OLD_JOB).status is PipelineJobStatus.DONE
+    assert repository.get(_OLD_JOB).publish_attempts == 1
+
+
+def test_background_backup_failure_keeps_primary_receipt_and_retry(publisher_case):
+    _config, repository, worker, prepare = publisher_case
+    _processed, primary = prepare(_OLD_JOB)
+    before = primary.read_bytes()
+    lane = _ControlledBackupIO()
+    worker._finalize_io = lane
+    worker.run_once()
+    lane.released = True
+    lane.error = PermissionError("backup disk temporarily locked")
+    assert worker.run_once()
+    job = repository.get(_OLD_JOB)
+    assert job.status is PipelineJobStatus.PRIMARY_RETURNED
+    assert job.lease_until > job.updated_at
+    assert job.finalize_attempts == 1 and job.publish_attempts == 1
+    assert primary.read_bytes() == before
+    worker.close()
+    assert lane.closed

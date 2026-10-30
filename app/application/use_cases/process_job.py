@@ -403,7 +403,12 @@ class ProcessJobUseCase:
         )
         processing_df = self._merger.merge_model_results(processing_df, model_results)
 
-        derived = self._derived.add_derived_columns(processing_df)
+        derived = self._derived.add_derived_columns(
+            processing_df,
+            cover_from_model=any(
+                result.target_column == "cover%" for result in model_results
+            ),
+        )
         processing_df = derived.df
         for warning in derived.warnings:
             self._logger.info("event=derived.skip req_id=%s detail=%s", req_id, warning)

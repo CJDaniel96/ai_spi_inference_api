@@ -106,6 +106,36 @@ def test_target_column_preserved_on_success_and_error() -> None:
     assert err_result.target_column == "min_pad_distance"
 
 
+def test_shared_deadline_is_forwarded_and_expired_request_is_not_sent() -> None:
+    import time
+
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(200, json={"results": {"a.jpg": 190.0}})
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            deadline = time.time() + 2
+            model = HttpModelClient(
+                name="area_ratio",
+                url="http://area/inference",
+                target_column="cover%",
+                timeout_seconds=25,
+                http_client=client,
+                deadline_at=deadline,
+            )
+            assert (await model.infer("/job")).error is None
+            assert float(calls[0].headers["X-SPI-Deadline-At"]) == deadline
+            assert calls[0].extensions["timeout"]["read"] <= 2
+            model._deadline_at = time.time() - 1
+            assert (await model.infer("/job")).error is not None
+            assert len(calls) == 1
+
+    _run(run())
+
+
 def test_parses_optional_metadata() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(

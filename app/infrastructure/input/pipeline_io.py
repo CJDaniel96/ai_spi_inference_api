@@ -38,20 +38,23 @@ def snapshot_csv(config, source, destination):
     return _service(config).snapshot_csv(source, destination)
 
 
-def validate_source(config, source):
+def validate_source(config, source, csv_snapshot=None):
     if (
         SinicFolderInput(config.processing.image_extensions).load(source).image_count
         > config.processing.folder_images_num_threshold
     ):
         raise SourceChangedError("Image count crossed threshold before decoding")
-    return _service(config).validate(source)
+    return _service(config).validate(
+        source, decode_images=False, csv_snapshot=csv_snapshot
+    )
 
 
-def archive_source(config, validated, backup_root, staging_root):
+def archive_source(config, validated, backup_root, staging_root, csv_snapshot=None):
     return _service(config).archive(
         validated,
         backup_root=backup_root,
         staging_root=staging_root,
+        csv_snapshot=csv_snapshot,
     )
 
 
@@ -85,14 +88,13 @@ def backup_images(source: Path, target: Path, csv_snapshot: Path) -> str:
     service = IngestService()
     prepared = None
     try:
-        # Check the source still represents the CSVs actually returned.
-        for csv in csv_snapshot.glob("*"):
-            if (source / csv.name).read_bytes() != csv.read_bytes():
-                return "incomplete"
         initial = service._snapshot_tree(source)
-        manifest = service._content_manifest(source, source=True)
-        service._assert_snapshot_unchanged(source, initial, "background backup")
-        prepared = service._prepare_copy(source, target, manifest)
+        prepared, manifest = service._prepare_streamed_copy(source, target, initial)
+        copied = prepared.temporary or prepared.target
+        expected = {p.name: p.read_bytes() for p in service._csv_files(csv_snapshot)}
+        actual = {p.name: p.read_bytes() for p in service._csv_files(copied)}
+        if not expected or expected != actual:
+            return "incomplete"
         service._assert_snapshot_unchanged(source, initial, "background backup")
         prepared = service._commit_copy(prepared, manifest)
         return "complete"

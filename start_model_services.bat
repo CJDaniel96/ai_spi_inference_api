@@ -32,4 +32,9 @@ timeout /t 1 >nul 2>nul
 REM In production, verify both /health payloads report status=healthy before
 REM starting Stage 02.  HTTP 200 alone may mean an engine is still initializing.
 
+REM Optional Detection -> Segmentation workflow. Enable area_ratio only after
+REM setting the actual weights in config\yolo_area.json and validating masks.
+"%PYTHON_EXE%" -c "from app.core.config import load_config; import sys; sys.exit(0 if any(c.name == 'area_ratio' for c in load_config().enabled_model_clients()) else 1)"
+if not errorlevel 1 start "SPI_Model_Area_8003" "%PYTHON_EXE%" -m app.area_service --config "%~dp0config\yolo_area.json"
+
 endlocal

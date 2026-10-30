@@ -474,6 +474,7 @@ class PipelineJobRepository:
             worker_id=worker_id,
             expected_status=PipelineJobStatus.INGESTING,
             new_status=PipelineJobStatus.READY,
+            event_column="ready_at",
             raw_backup_ready=True,
             now=now,
         )
@@ -1020,6 +1021,7 @@ class PipelineJobRepository:
             "result_ready_at",
             "primary_returned_at",
             "completed_at",
+            "ready_at",
         }:
             raise ValueError("unsupported event timestamp column")
         timestamp = _as_utc(now or datetime.now(UTC), "now")
@@ -1039,7 +1041,11 @@ class PipelineJobRepository:
             event_assignment = ""
             event_parameters: list[Any] = []
             if event_column is not None:
-                event_assignment = f", {event_column} = ?"
+                event_assignment = (
+                    ", ready_at = COALESCE(ready_at, ?)"
+                    if event_column == "ready_at"
+                    else f", {event_column} = ?"
+                )
                 event_parameters.append(timestamp.timestamp())
             parameters: list[Any] = [
                 new_status.value,

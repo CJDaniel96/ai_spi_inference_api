@@ -1,0 +1,13 @@
+{
+  "center_model_path": "models/area/center.pt",
+  "segment_model_path": "models/area/segment.pt",
+  "solder_class": "Solder_Paste",
+  "pad_class": "Pad",
+  "device": "cuda:0",
+  "confidence": 0.6,
+  "image_size": 640,
+  "batch_size": 8,
+  "fixed_batch_size": false,
+  "max_images": 60,
+  "request_timeout_seconds": 5.0
+}

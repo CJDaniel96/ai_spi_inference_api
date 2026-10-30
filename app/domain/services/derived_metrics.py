@@ -40,7 +40,9 @@ class DerivedMetricsResult:
 class DerivedMetricsCalculator:
     """Computes ``pad_area`` and ``cover%`` when their input columns exist."""
 
-    def add_derived_columns(self, df: pd.DataFrame) -> DerivedMetricsResult:
+    def add_derived_columns(
+        self, df: pd.DataFrame, *, cover_from_model: bool = False
+    ) -> DerivedMetricsResult:
         """Add ``pad_area`` and/or ``cover%`` when their inputs are present.
 
         Never raises on missing columns; each skipped column is recorded as a
@@ -65,7 +67,11 @@ class DerivedMetricsCalculator:
                 f"'{_WIDTH_COLUMN}' and '{_LENGTH_COLUMN}'"
             )
 
-        if _PASTE_PIXELS_COLUMN in out.columns and _PAD_AREA_COLUMN in out.columns:
+        if cover_from_model and _COVER_COLUMN in out.columns:
+            # A segmentation ratio already compares two masks in pixel units.
+            # Preserve it instead of applying the legacy physical-area conversion.
+            out[_COVER_COLUMN] = pd.to_numeric(out[_COVER_COLUMN], errors="coerce")
+        elif _PASTE_PIXELS_COLUMN in out.columns and _PAD_AREA_COLUMN in out.columns:
             paste_pixels = pd.to_numeric(out[_PASTE_PIXELS_COLUMN], errors="coerce")
             out[_COVER_COLUMN] = (
                 paste_pixels * _PASTE_AREA_RATIO * _PERCENT / out[_PAD_AREA_COLUMN]

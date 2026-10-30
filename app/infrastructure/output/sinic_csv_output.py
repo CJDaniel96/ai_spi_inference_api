@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import csv
 import errno
+import io
 import os
 import tempfile
 import time
@@ -114,31 +115,29 @@ class SinicCsvOutput:
         )
 
 
-def _detect_encoding(path: Path) -> str:
-    sample = path.read_bytes()[:4096]
-    if sample.startswith(b"\xef\xbb\xbf"):
-        return "utf-8-sig"
-    for encoding in _ENCODING_CANDIDATES:
-        try:
-            sample.decode(encoding)
-        except UnicodeDecodeError:
-            continue
-        return encoding
-    return "latin1"
-
-
-def _detect_lineterminator(path: Path) -> str:
-    sample = path.read_bytes()[:4096]
-    newline_index = sample.find(b"\n")
-    if newline_index > 0 and sample[newline_index - 1 : newline_index] == b"\r":
-        return "\r\n"
-    return "\n"
-
-
 def _read_document(source_csv: Path) -> _CsvDocument:
-    encoding = _detect_encoding(source_csv)
-    lineterminator = _detect_lineterminator(source_csv)
-    with source_csv.open("r", encoding=encoding, newline="") as source:
+    return _parse_document(source_csv.read_bytes(), source_csv.name)
+
+
+def _parse_document(payload: bytes, name: str = "CSV") -> _CsvDocument:
+    """Parse exactly the captured bytes, without reopening a changing source."""
+    sample_bytes = payload[:4096]
+    encoding = "latin1"
+    if payload.startswith(b"\xef\xbb\xbf"):
+        encoding = "utf-8-sig"
+    else:
+        for candidate in _ENCODING_CANDIDATES:
+            try:
+                payload.decode(candidate)
+            except UnicodeDecodeError:
+                continue
+            encoding = candidate
+            break
+    newline_index = sample_bytes.find(b"\n")
+    lineterminator = (
+        "\r\n" if newline_index > 0 and sample_bytes[newline_index - 1] == 13 else "\n"
+    )
+    with io.StringIO(payload.decode(encoding), newline="") as source:
         sample = source.read(4096)
         source.seek(0)
         try:
@@ -149,7 +148,7 @@ def _read_document(source_csv: Path) -> _CsvDocument:
             dialect = csv.excel
         reader = csv.DictReader(source, dialect=dialect, strict=True)
         if not reader.fieldnames:
-            raise ValueError(f"{source_csv} has no CSV header")
+            raise ValueError(f"{name} has no CSV header")
         rows = tuple(dict(row) for row in reader)
         fieldnames = tuple(reader.fieldnames)
     return _CsvDocument(

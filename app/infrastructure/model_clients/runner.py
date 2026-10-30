@@ -138,6 +138,7 @@ def _build_http_client(
     http_client: httpx.AsyncClient,
     logger: logging.Logger,
     req_id: str | None,
+    deadline_at: float | None = None,
 ) -> ModelClient:
     """Default factory constructing an :class:`HttpModelClient`."""
     return HttpModelClient(
@@ -148,6 +149,7 @@ def _build_http_client(
         http_client=http_client,
         logger=logger,
         req_id=req_id,
+        deadline_at=deadline_at,
     )
 
 
@@ -186,6 +188,7 @@ async def _build_and_gather_until_required(
     req_id: str | None,
     http_client: httpx.AsyncClient,
 ) -> list[ModelInferenceResult]:
+    deadline_at = time.time() + timeout_seconds
     clients = [
         factory(
             name=entry.name,
@@ -195,6 +198,7 @@ async def _build_and_gather_until_required(
             http_client=http_client,
             logger=logger,
             req_id=req_id,
+            deadline_at=deadline_at,
         )
         for entry in config.enabled_model_clients()
     ]

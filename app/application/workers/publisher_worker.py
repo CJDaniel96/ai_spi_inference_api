@@ -20,7 +20,11 @@ from app.domain.entities.pipeline_result import (
     PipelineOutcome,
     PipelineResultManifest,
 )
-from app.infrastructure.deadline_io import DeadlineExceeded
+from app.infrastructure.deadline_io import DeadlineExceeded, DeadlineIO
+from app.infrastructure.output.pipeline_backup import (
+    finalize_result_backup,
+    preserve_csv_snapshot,
+)
 from app.infrastructure.output.sinic_csv_output import PublishCompletionUnknown
 from app.infrastructure.repositories.pipeline_job_repository import (
     PipelineJobRepository,
@@ -47,6 +51,7 @@ class PublisherWorker:
         fallback_builder: PipelineInferenceService,
         worker_id: str,
         logger: logging.Logger | None = None,
+        finalize_io: DeadlineIO | None = None,
     ) -> None:
         self._config = config
         self._repository = repository
@@ -54,11 +59,14 @@ class PublisherWorker:
         self._fallback_builder = fallback_builder
         self._worker_id = worker_id
         self._logger = logger or get_logger("pipeline.publisher_worker")
+        self._finalize_io = finalize_io
+        self._finalizing_job = None
 
     def run_once(self) -> bool:
         """Publish one urgent job, otherwise finalize one post-primary backup."""
         self._repository.expire_due()
         self._publisher.maintain_io()
+        finalized = self._poll_finalize()
         publishing = self._repository.claim_for_publish(
             worker_id=self._worker_id,
             lease_seconds=self._config.pipeline.publisher_lease_seconds,
@@ -70,14 +78,62 @@ class PublisherWorker:
             self._publish_claim(publishing)
             return True
 
+        if self._finalizing_job is not None:
+            return finalized
         finalizing = self._repository.claim_for_finalize(
             worker_id=self._worker_id,
             lease_seconds=self._config.pipeline.worker_lease_seconds,
         )
         if finalizing is None:
-            return False
-        self._finalize_claim(finalizing)
+            return finalized
+        if self._finalize_io is None:
+            self._finalize_claim(finalizing)
+        else:
+            self._start_finalize(finalizing)
         return True
+
+    def _start_finalize(self, job) -> None:
+        try:
+            if job.result_manifest_path is None:
+                raise RuntimeError("Primary-returned job has no result manifest")
+            input_folder = self._available_input_folder(job)
+            self._finalize_io.submit(
+                finalize_result_backup,
+                self._config,
+                job,
+                input_folder,
+                deadline_at=time.time()
+                + min(30.0, self._config.pipeline.worker_lease_seconds * 0.8),
+            )
+            self._finalizing_job = job
+        except Exception as exc:
+            self._finalize_failed(job, exc)
+
+    def _poll_finalize(self) -> bool:
+        job = self._finalizing_job
+        if job is None:
+            return False
+        try:
+            done, _ = self._finalize_io.poll()
+            if not done:
+                return False
+            self._repository.mark_done(job_id=job.job_id, worker_id=self._worker_id)
+        except Exception as exc:
+            self._finalize_failed(job, exc)
+        self._finalizing_job = None
+        return True
+
+    def finish_pending_backup(self) -> None:
+        """One-shot CLI drains only its own bounded background claim."""
+        while self._finalizing_job is not None:
+            self._poll_finalize()
+            if self._finalizing_job is not None:
+                time.sleep(0.005)
+
+    def close(self) -> None:
+        if self._finalize_io is not None:
+            self._finalize_io.close()
+        self._publisher.close()
 
     def run_forever(self) -> None:
         interval = self._config.pipeline.publisher_poll_interval_seconds
@@ -91,7 +147,7 @@ class PublisherWorker:
                     )
                 time.sleep(interval)
         finally:
-            self._publisher.close()
+            self.close()
 
     def _publish_claim(self, job) -> None:
         heartbeat_stop = Event()
@@ -251,22 +307,7 @@ class PublisherWorker:
         try:
             if job.result_manifest_path is None:
                 raise RuntimeError("Primary-returned job has no result manifest")
-            if job.csv_snapshot_folder is not None:
-                # CSV-only jobs have deliberately published before raw-image backup.
-                import shutil
-
-                job.original_backup_folder.mkdir(parents=True, exist_ok=True)
-                for source in job.csv_snapshot_folder.iterdir():
-                    destination = job.original_backup_folder / source.name
-                    if (
-                        destination.exists()
-                        and destination.read_bytes() != source.read_bytes()
-                    ):
-                        raise RuntimeError(f"Raw CSV backup differs: {destination}")
-                    if not destination.exists():
-                        shutil.copy2(source, destination)
-            if not job.original_backup_folder.is_dir():
-                raise RuntimeError("Immutable original backup is not available yet")
+            preserve_csv_snapshot(job)
             input_folder = self._available_input_folder(job)
             self._publisher.write_local_result_backup(
                 staged_folder=input_folder,
@@ -278,53 +319,56 @@ class PublisherWorker:
                 worker_id=self._worker_id,
             )
         except Exception as exc:
-            self._logger.exception(
-                "event=pipeline.publisher.finalize_error job_id=%s err=%s",
-                job.job_id,
-                exc,
-            )
-            try:
-                if (
-                    isinstance(exc, FileNotFoundError)
-                    or job.finalize_attempts >= _MAX_FINALIZE_ATTEMPTS
-                ):
-                    reason = (
-                        "result_backup_missing_file"
-                        if isinstance(exc, FileNotFoundError)
-                        else "result_backup_retries_exhausted"
-                    )
-                    self._repository.mark_failed(
-                        job_id=job.job_id,
-                        worker_id=self._worker_id,
-                        reason=f"{reason}: {exc}",
-                    )
-                    self._logger.error(
-                        "event=pipeline.publisher.result_backup_failed job_id=%s "
-                        "reason=%s attempts=%d primary_already_returned=True",
-                        job.job_id,
-                        reason,
-                        job.finalize_attempts,
-                    )
-                else:
-                    delay = _FINALIZE_RETRY_BASE_SECONDS * (
-                        2 ** (job.finalize_attempts - 1)
-                    )
-                    # Keep the durable lease until the retry becomes eligible.
-                    # Other jobs can finalize meanwhile; restarts preserve the delay.
-                    self._repository.renew_lease(
-                        job_id=job.job_id,
-                        worker_id=self._worker_id,
-                        lease_seconds=delay,
-                    )
-                    self._logger.warning(
-                        "event=pipeline.publisher.result_backup_retry job_id=%s "
-                        "attempts=%d retry_after_seconds=%.3f",
-                        job.job_id,
-                        job.finalize_attempts,
-                        delay,
-                    )
-            except PipelineLeaseLostError:
-                pass
+            self._finalize_failed(job, exc)
+
+    def _finalize_failed(self, job, exc: Exception) -> None:
+        self._logger.exception(
+            "event=pipeline.publisher.finalize_error job_id=%s err=%s",
+            job.job_id,
+            exc,
+        )
+        try:
+            if (
+                isinstance(exc, FileNotFoundError)
+                or job.finalize_attempts >= _MAX_FINALIZE_ATTEMPTS
+            ):
+                reason = (
+                    "result_backup_missing_file"
+                    if isinstance(exc, FileNotFoundError)
+                    else "result_backup_retries_exhausted"
+                )
+                self._repository.mark_failed(
+                    job_id=job.job_id,
+                    worker_id=self._worker_id,
+                    reason=f"{reason}: {exc}",
+                )
+                self._logger.error(
+                    "event=pipeline.publisher.result_backup_failed job_id=%s "
+                    "reason=%s attempts=%d primary_already_returned=True",
+                    job.job_id,
+                    reason,
+                    job.finalize_attempts,
+                )
+            else:
+                delay = _FINALIZE_RETRY_BASE_SECONDS * (
+                    2 ** (job.finalize_attempts - 1)
+                )
+                # Keep the durable lease until the retry becomes eligible.
+                # Other jobs can finalize meanwhile; restarts preserve the delay.
+                self._repository.renew_lease(
+                    job_id=job.job_id,
+                    worker_id=self._worker_id,
+                    lease_seconds=delay,
+                )
+                self._logger.warning(
+                    "event=pipeline.publisher.result_backup_retry job_id=%s "
+                    "attempts=%d retry_after_seconds=%.3f",
+                    job.job_id,
+                    job.finalize_attempts,
+                    delay,
+                )
+        except PipelineLeaseLostError:
+            pass
 
     @staticmethod
     def _available_input_folder(job) -> Path:

@@ -65,6 +65,7 @@ class HttpModelClient:
         http_client: httpx.AsyncClient,
         logger: logging.Logger | None = None,
         req_id: str | None = None,
+        deadline_at: float | None = None,
     ) -> None:
         """Initialize the client.
 
@@ -86,16 +87,27 @@ class HttpModelClient:
         self._http_client = http_client
         self._logger = logger or get_logger("model_client")
         self._req_id = req_id
+        self._deadline_at = deadline_at
 
     async def infer(self, job_folder: str) -> ModelInferenceResult:
         """Call the endpoint for ``job_folder`` and return a typed result."""
         self._log_start()
         start = time.perf_counter()
+        headers = {}
+        if self._req_id:
+            headers["X-SPI-Job-Id"] = self._req_id
+        timeout = self._timeout_seconds
+        if self._deadline_at is not None:
+            timeout = min(timeout, self._deadline_at - time.time())
+            if timeout <= 0:
+                return self._failure("Model job deadline expired before request", start)
+            headers["X-SPI-Deadline-At"] = str(self._deadline_at)
         try:
             response = await self._http_client.post(
                 self._url,
                 json={"job_folder": job_folder},
-                timeout=self._timeout_seconds,
+                timeout=timeout,
+                headers=headers,
             )
             response.raise_for_status()
             data = response.json()

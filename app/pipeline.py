@@ -162,12 +162,14 @@ def _run_publisher(config: AppConfig, *, worker_id: str, once: bool) -> None:
             result_root=result_root,
         ),
         worker_id=worker_id,
+        finalize_io=DeadlineIO(),
     )
     if once:
         try:
             worker.run_once()
+            worker.finish_pending_backup()
         finally:
-            publisher.close()
+            worker.close()
     else:
         worker.run_forever()
 
