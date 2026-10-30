@@ -33,6 +33,8 @@ import pandas as pd
 
 from app.core.errors import AppError, CsvSchemaError
 from app.domain.services.csv_merger import CsvMerger
+from app.infrastructure.output.sinic_csv_output import _read_document
+from app.infrastructure.repositories.csv_repository import CsvRepository
 
 _TIMESTAMP_FORMAT = "%Y%m%d%H%M%S"
 _TIMESTAMP_PATTERN = re.compile(r"\d{14}")
@@ -150,6 +152,75 @@ class IngestService:
         self._deadline_seconds = primary_return_deadline_seconds
         self._clock = clock or (lambda: datetime.now(UTC))
         self._csv_merger = CsvMerger()
+
+    def snapshot_csv(self, source_folder: Path, destination: Path) -> Path:
+        """Validate/atomically snapshot only CSV bytes; never inspect images."""
+        source = self._resolve_source(source_folder)
+        self._validate_job_id(source.name)
+        self._validate_target(source, destination.resolve(strict=False))
+        csv_files = self._csv_files(source)
+        if not csv_files:
+            raise IngestValidationError("No CSV files found")
+
+        def snapshot():
+            return tuple(
+                (p.name, p.stat().st_size, p.stat().st_mtime_ns)
+                for p in self._csv_files(source)
+            )
+
+        initial = snapshot()
+        payloads = {}
+        seen: set[str] = set()
+        for path in csv_files:
+            payload = path.read_bytes()
+            document = _read_document(path)
+            if "is_pass" not in document.fieldnames or not document.rows:
+                raise IngestValidationError(
+                    f"Missing is_pass or data rows: {path.name}"
+                )
+            if len(set(document.fieldnames)) != len(document.fieldnames):
+                raise IngestValidationError(f"Duplicate CSV headers: {path.name}")
+            if any(
+                None in row or any(v is None for v in row.values())
+                for row in document.rows
+            ):
+                raise IngestValidationError(f"Incomplete CSV row: {path.name}")
+            frame = pd.DataFrame(document.rows)
+            frame = self._csv_merger.add_image_name_column(
+                frame,
+                source_column=self._source_column,
+                template=self._template,
+                csv_stem=path.stem,
+            )
+            for number, raw_key in enumerate(frame["img_name"], 2):
+                key = self._safe_image_key(raw_key, path, number).casefold()
+                if key in seen:
+                    raise IngestValidationError(f"Duplicate expected image key: {key}")
+                seen.add(key)
+            # The bytes validated must be the bytes later returned to the machine.
+            if payload != path.read_bytes():
+                raise SourceChangedError("CSV changed during snapshot")
+            payloads[path.name] = payload
+        if snapshot() != initial:
+            raise SourceChangedError("CSV set changed during snapshot")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = Path(tempfile.mkdtemp(prefix=".csv-", dir=destination.parent))
+        try:
+            for name, payload in payloads.items():
+                with (temporary / name).open("wb") as handle:
+                    handle.write(payload)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            if destination.exists():
+                if {p.name: p.read_bytes() for p in destination.iterdir()} != payloads:
+                    raise IngestCollisionError("Persisted CSV snapshot differs")
+            else:
+                os.replace(temporary, destination)
+        finally:
+            shutil.rmtree(temporary, ignore_errors=True)
+        if snapshot() != initial:
+            raise SourceChangedError("CSV set changed while committing snapshot")
+        return destination
 
     def validate(self, source_folder: str | Path) -> ValidatedIngest:
         """Validate CSV/image completeness and establish the job deadline.
@@ -370,7 +441,7 @@ class IngestService:
     @staticmethod
     def _read_csv(csv_path: Path) -> pd.DataFrame:
         try:
-            return pd.read_csv(csv_path)
+            return CsvRepository().read_for_processing(csv_path)
         except (OSError, UnicodeError, pd.errors.ParserError) as exc:
             raise IngestValidationError(
                 f"Unable to parse CSV {csv_path.name}: {exc}"

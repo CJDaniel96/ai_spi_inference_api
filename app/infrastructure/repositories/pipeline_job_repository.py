@@ -47,8 +47,15 @@ class EnqueueResult:
 
 
 _ALLOWED_TRANSITIONS: dict[PipelineJobStatus, frozenset[PipelineJobStatus]] = {
+    PipelineJobStatus.DISCOVERED: frozenset(
+        {PipelineJobStatus.INGESTING, PipelineJobStatus.FALLBACK_READY}
+    ),
     PipelineJobStatus.INGESTING: frozenset(
-        {PipelineJobStatus.READY, PipelineJobStatus.FAILED}
+        {
+            PipelineJobStatus.READY,
+            PipelineJobStatus.FAILED,
+            PipelineJobStatus.DISCOVERED,
+        }
     ),
     PipelineJobStatus.READY: frozenset({PipelineJobStatus.INFERENCING}),
     PipelineJobStatus.INFERENCING: frozenset(
@@ -68,6 +75,7 @@ _ALLOWED_TRANSITIONS: dict[PipelineJobStatus, frozenset[PipelineJobStatus]] = {
     ),
     PipelineJobStatus.DONE: frozenset(),
     PipelineJobStatus.FAILED: frozenset(),
+    PipelineJobStatus.EXPIRED: frozenset(),
 }
 
 _SCHEMA = """
@@ -77,7 +85,7 @@ CREATE TABLE IF NOT EXISTS pipeline_jobs (
     staged_folder TEXT NOT NULL,
     original_backup_folder TEXT NOT NULL,
     result_manifest_path TEXT,
-    ready_at REAL NOT NULL,
+    ready_at REAL,
     deadline_at REAL NOT NULL,
     status TEXT NOT NULL,
     reason TEXT,
@@ -96,10 +104,19 @@ CREATE TABLE IF NOT EXISTS pipeline_jobs (
     primary_returned_at REAL,
     completed_at REAL,
     failed_at REAL,
-    CHECK (deadline_at >= ready_at),
+    first_seen_at REAL,
+    csv_ready_at REAL,
+    csv_snapshot_folder TEXT,
+    input_mode TEXT NOT NULL DEFAULT 'full',
+    next_retry_at REAL,
+    expired_at REAL,
+    image_backup_status TEXT NOT NULL DEFAULT 'pending',
+    publication_unknown INTEGER NOT NULL DEFAULT 0,
+    CHECK (ready_at IS NULL OR deadline_at >= ready_at),
     CHECK (status IN (
         'INGESTING', 'READY', 'INFERENCING', 'RESULT_READY',
-        'FALLBACK_READY', 'PUBLISHING', 'PRIMARY_RETURNED', 'DONE', 'FAILED'
+        'FALLBACK_READY', 'PUBLISHING', 'PRIMARY_RETURNED', 'DONE', 'FAILED',
+        'DISCOVERED', 'EXPIRED'
     )),
     CHECK (
         (lease_owner IS NULL AND lease_until IS NULL)
@@ -112,6 +129,14 @@ ON pipeline_jobs (status, deadline_at, ready_at, created_at);
 
 CREATE INDEX IF NOT EXISTS idx_pipeline_jobs_lease
 ON pipeline_jobs (status, lease_until);
+
+CREATE TABLE IF NOT EXISTS pipeline_publications (
+    job_id TEXT NOT NULL REFERENCES pipeline_jobs(job_id),
+    source_csv TEXT NOT NULL,
+    destination_csv TEXT NOT NULL,
+    returned_at REAL NOT NULL,
+    PRIMARY KEY (job_id, source_csv)
+);
 """
 
 
@@ -132,6 +157,223 @@ class PipelineJobRepository:
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         self._busy_timeout_ms = max(1, round(busy_timeout_seconds * 1000))
         self._initialize()
+
+    def observe_job(
+        self,
+        *,
+        job_id: str,
+        source_folder: Path,
+        staged_folder: Path,
+        original_backup_folder: Path,
+        timeout_seconds: float,
+        now: datetime | None = None,
+    ) -> EnqueueResult:
+        """Persist the first CSV observation, before settle/validation/copy."""
+        timestamp = _as_utc(now or datetime.now(UTC), "now")
+        if timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be positive")
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            cursor = connection.execute(
+                """INSERT INTO pipeline_jobs (
+                    job_id, source_folder, staged_folder, original_backup_folder,
+                    deadline_at, first_seen_at, status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 'DISCOVERED', ?, ?)
+                ON CONFLICT(job_id) DO NOTHING""",
+                (
+                    job_id,
+                    str(source_folder),
+                    str(staged_folder),
+                    str(original_backup_folder),
+                    timestamp.timestamp() + timeout_seconds,
+                    timestamp.timestamp(),
+                    timestamp.timestamp(),
+                    timestamp.timestamp(),
+                ),
+            )
+            row = self._select_row(connection, job_id)
+            if Path(row["source_folder"]) != source_folder:
+                raise PipelineJobConflictError(f"job_id {job_id!r} has another source")
+            connection.commit()
+            return EnqueueResult(_row_to_job(row), cursor.rowcount == 1)
+
+    def activate_observed_job(
+        self,
+        *,
+        job_id: str,
+        csv_snapshot_folder: Path,
+        ready_at: datetime | None = None,
+        manifest_path: Path | None = None,
+        now: datetime | None = None,
+    ) -> bool:
+        """Commit CSV-only fallback or advance validated input into ingest."""
+        timestamp = _as_utc(now or datetime.now(UTC), "now").timestamp()
+        fast = manifest_path is not None
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """UPDATE pipeline_jobs SET status = ?, ready_at = ?,
+                    csv_ready_at = ?, csv_snapshot_folder = ?, input_mode = ?,
+                    result_manifest_path = ?, result_ready_at = ?,
+                    fallback_required = ?, reason = ?, updated_at = ?
+                    WHERE job_id = ? AND status = 'DISCOVERED' AND deadline_at > ?""",
+                (
+                    "FALLBACK_READY" if fast else "INGESTING",
+                    ready_at.timestamp() if ready_at else None,
+                    timestamp,
+                    str(csv_snapshot_folder),
+                    "csv_only" if fast else "full",
+                    str(manifest_path) if fast else None,
+                    timestamp if fast else None,
+                    int(fast),
+                    "images_exceed_threshold" if fast else None,
+                    timestamp,
+                    job_id,
+                    timestamp,
+                ),
+            )
+            return cursor.rowcount == 1
+
+    def expire_due(self, *, now: datetime | None = None) -> int:
+        """Fence unpublished new-policy jobs; historical deadlines keep semantics."""
+        timestamp = _as_utc(now or datetime.now(UTC), "now").timestamp()
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """UPDATE pipeline_jobs SET status = 'EXPIRED', expired_at = ?,
+                    publication_unknown = MAX(publication_unknown,
+                        CASE WHEN status = 'PUBLISHING' AND lease_owner IS NOT NULL
+                            THEN 1 ELSE 0 END),
+                    reason = CASE WHEN publication_unknown = 1 OR
+                        (status = 'PUBLISHING' AND lease_owner IS NOT NULL)
+                        THEN 'publish_completion_unknown'
+                        ELSE 'end_to_end_timeout: ' || COALESCE(reason, status) END,
+                    updated_at = ?, lease_owner = NULL, lease_until = NULL
+                    WHERE first_seen_at IS NOT NULL AND deadline_at <= ?
+                    AND status NOT IN (
+                        'DONE', 'FAILED', 'EXPIRED', 'PRIMARY_RETURNED')""",
+                (timestamp, timestamp, timestamp),
+            )
+            return cursor.rowcount
+
+    def expire_job(
+        self,
+        *,
+        job_id: str,
+        reason: str,
+        publication_unknown: bool = False,
+        now: datetime | None = None,
+    ) -> None:
+        timestamp = _as_utc(now or datetime.now(UTC), "now").timestamp()
+        with self._connect() as connection:
+            connection.execute(
+                """UPDATE pipeline_jobs SET status = 'EXPIRED', expired_at = ?,
+                    reason = ?, publication_unknown = MAX(publication_unknown, ?),
+                    updated_at = ?, lease_owner = NULL, lease_until = NULL
+                    WHERE job_id = ? AND primary_returned_at IS NULL
+                    AND status NOT IN ('DONE', 'FAILED')""",
+                (timestamp, reason, int(publication_unknown), timestamp, job_id),
+            )
+
+    def schedule_publish_retry(
+        self,
+        *,
+        job_id: str,
+        worker_id: str,
+        reason: str,
+        delay_seconds: float = 0.1,
+        now: datetime | None = None,
+    ) -> None:
+        timestamp = _as_utc(now or datetime.now(UTC), "now")
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = self._select_row(connection, job_id)
+            self._require_active_lease(row, worker_id, timestamp)
+            connection.execute(
+                """UPDATE pipeline_jobs SET reason = ?, next_retry_at = ?,
+                    updated_at = ?, lease_owner = NULL, lease_until = NULL
+                    WHERE job_id = ? AND status = 'PUBLISHING'""",
+                (
+                    reason,
+                    min(timestamp.timestamp() + delay_seconds, row["deadline_at"]),
+                    timestamp.timestamp(),
+                    job_id,
+                ),
+            )
+            connection.commit()
+
+    def record_csv_published(
+        self,
+        *,
+        job_id: str,
+        worker_id: str,
+        source_csv: str,
+        destination_csv: Path,
+        returned_at: float,
+    ) -> None:
+        timestamp = datetime.now(UTC)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = self._select_row(connection, job_id)
+            self._require_active_lease(row, worker_id, timestamp)
+            if row["status"] != "PUBLISHING":
+                raise PipelineLeaseLostError("publication was fenced")
+            connection.execute(
+                "INSERT OR IGNORE INTO pipeline_publications VALUES (?, ?, ?, ?)",
+                (job_id, source_csv, str(destination_csv), returned_at),
+            )
+            connection.commit()
+
+    def bind_publish_manifest(
+        self, job_id: str, worker_id: str, manifest: Path
+    ) -> None:
+        """Persist the exact decision before any per-CSV publication can occur."""
+        timestamp = datetime.now(UTC)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = self._select_row(connection, job_id)
+            self._require_active_lease(row, worker_id, timestamp)
+            if row["status"] != "PUBLISHING":
+                raise PipelineLeaseLostError("publication was fenced")
+            connection.execute(
+                "UPDATE pipeline_jobs SET result_manifest_path = ? WHERE job_id = ?",
+                (str(manifest), job_id),
+            )
+            connection.commit()
+
+    def published_csvs(self, job_id: str) -> dict[str, tuple[Path, float]]:
+        with self._connect() as connection:
+            return {
+                row["source_csv"]: (Path(row["destination_csv"]), row["returned_at"])
+                for row in connection.execute(
+                    "SELECT * FROM pipeline_publications WHERE job_id = ?", (job_id,)
+                )
+            }
+
+    def note_image_backup(self, job_id: str, status: str) -> None:
+        if status not in {"pending", "complete", "incomplete", "failed", "running"}:
+            raise ValueError("invalid image backup status")
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE pipeline_jobs SET image_backup_status = ?, updated_at = ? "
+                "WHERE job_id = ?",
+                (status, datetime.now(UTC).timestamp(), job_id),
+            )
+
+    def pending_image_backups(self) -> list[PipelineJob]:
+        with self._connect() as connection:
+            return [
+                _row_to_job(row)
+                for row in connection.execute(
+                    """SELECT * FROM pipeline_jobs WHERE csv_snapshot_folder IS NOT NULL
+                    AND raw_backup_ready = 0 AND fallback_required = 1
+                    AND image_backup_status IN ('pending', 'running')
+                    AND status IN ('PRIMARY_RETURNED', 'DONE', 'EXPIRED')
+                    OR (first_seen_at IS NULL AND raw_backup_ready = 0
+                        AND status IN ('PUBLISHING', 'PRIMARY_RETURNED')
+                        AND image_backup_status IN (
+                            'pending', 'running', 'not_recorded'))
+                    ORDER BY created_at LIMIT 1"""
+                )
+            ]
 
     def enqueue_ingesting(
         self,
@@ -291,6 +533,30 @@ class PipelineJobRepository:
             now=now,
         )
 
+    def rediscover_changed_input(
+        self,
+        *,
+        job_id: str,
+        worker_id: str,
+        now: datetime | None = None,
+    ) -> None:
+        """Re-evaluate CSV/threshold after a source change without a new budget."""
+        timestamp = _as_utc(now or datetime.now(UTC), "now")
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = self._select_row(connection, job_id)
+            self._require_active_lease(row, worker_id, timestamp)
+            if row["status"] != "INGESTING" or row["first_seen_at"] is None:
+                raise PipelineLeaseLostError("job cannot return to discovery")
+            connection.execute(
+                """UPDATE pipeline_jobs SET status = 'DISCOVERED',
+                    ready_at = NULL, csv_ready_at = NULL, csv_snapshot_folder = NULL,
+                    lease_owner = NULL, lease_until = NULL,
+                    reason = 'source_changed', updated_at = ? WHERE job_id = ?""",
+                (timestamp.timestamp(), job_id),
+            )
+            connection.commit()
+
     def get(self, job_id: str) -> PipelineJob | None:
         """Return the latest snapshot, or ``None`` if the job is unknown."""
         with self._connect() as connection:
@@ -335,14 +601,25 @@ class PipelineJobRepository:
         if publish_reserve_seconds < 0:
             raise ValueError("publish_reserve_seconds must not be negative")
         timestamp = _as_utc(now or datetime.now(UTC), "now")
+        self.expire_due(now=timestamp)
         lease_until = timestamp + timedelta(seconds=lease_seconds)
         cutoff = timestamp.timestamp() + publish_reserve_seconds
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            # A crashed publisher may have committed a rename before its DB ack.
+            # New-policy jobs are never blindly re-published in that situation.
+            connection.execute(
+                """UPDATE pipeline_jobs SET status = 'EXPIRED', expired_at = ?,
+                    publication_unknown = 1, reason = 'publish_completion_unknown',
+                    lease_owner = NULL, lease_until = NULL, updated_at = ?
+                    WHERE first_seen_at IS NOT NULL AND status = 'PUBLISHING'
+                    AND lease_owner IS NOT NULL AND lease_until <= ?""",
+                (timestamp.timestamp(), timestamp.timestamp(), timestamp.timestamp()),
+            )
             row = connection.execute(
                 """
                 SELECT * FROM pipeline_jobs
-                WHERE (
+                WHERE ((
                     status IN (?, ?)
                     AND lease_owner IS NULL
                 ) OR (
@@ -351,7 +628,7 @@ class PipelineJobRepository:
                 ) OR (
                     status IN (?, ?, ?)
                     AND deadline_at <= ?
-                )
+                )) AND (next_retry_at IS NULL OR next_retry_at <= ?)
                 ORDER BY deadline_at ASC, ready_at ASC, created_at ASC, job_id ASC
                 LIMIT 1
                 """,
@@ -364,6 +641,7 @@ class PipelineJobRepository:
                     PipelineJobStatus.READY.value,
                     PipelineJobStatus.INFERENCING.value,
                     cutoff,
+                    timestamp.timestamp(),
                 ),
             ).fetchone()
             if row is None:
@@ -380,6 +658,7 @@ class PipelineJobRepository:
                 """
                 UPDATE pipeline_jobs
                 SET status = ?, lease_owner = ?, lease_until = ?, updated_at = ?,
+                    next_retry_at = NULL,
                     publish_attempts = publish_attempts + 1,
                     fallback_required = CASE WHEN ? THEN 1 ELSE fallback_required END,
                     reason = CASE WHEN ? THEN ? ELSE reason END
@@ -658,6 +937,7 @@ class PipelineJobRepository:
     ) -> PipelineJob | None:
         _validate_claim_arguments(worker_id, lease_seconds)
         timestamp = _as_utc(now or datetime.now(UTC), "now")
+        self.expire_due(now=timestamp)
         lease_until = timestamp + timedelta(seconds=lease_seconds)
         allowed_columns = {
             "ingest_attempts",
@@ -869,7 +1149,13 @@ class PipelineJobRepository:
     ) -> None:
         lease_until = row["lease_until"]
         if (
-            row["lease_owner"] != worker_id
+            row["status"] == PipelineJobStatus.EXPIRED.value
+            or (
+                row["first_seen_at"] is not None
+                and row["primary_returned_at"] is None
+                and row["deadline_at"] <= timestamp.timestamp()
+            )
+            or row["lease_owner"] != worker_id
             or lease_until is None
             or lease_until <= timestamp.timestamp()
         ):
@@ -912,16 +1198,47 @@ class PipelineJobRepository:
     def _initialize(self) -> None:
         with self._connect() as connection:
             connection.execute("PRAGMA journal_mode = WAL")
-            connection.executescript(_SCHEMA)
             columns = {
                 row[1] for row in connection.execute("PRAGMA table_info(pipeline_jobs)")
             }
-            if "raw_backup_ready" not in columns:
-                connection.execute(
-                    "ALTER TABLE pipeline_jobs ADD COLUMN raw_backup_ready "
-                    "INTEGER NOT NULL DEFAULT 0 "
-                    "CHECK (raw_backup_ready IN (0, 1))"
+            if columns and "first_seen_at" not in columns:
+                snapshot = self.database_path.with_name(
+                    self.database_path.name + ".pre-e2e.sqlite3"
                 )
+                if not snapshot.exists():
+                    with sqlite3.connect(snapshot) as target:
+                        connection.backup(target)
+                connection.execute("BEGIN IMMEDIATE")
+                # Recheck after the lock: another new worker may have migrated it.
+                columns = {
+                    row[1]
+                    for row in connection.execute("PRAGMA table_info(pipeline_jobs)")
+                }
+                if "first_seen_at" not in columns:
+                    connection.execute(
+                        "ALTER TABLE pipeline_jobs RENAME TO pipeline_jobs_before_e2e"
+                    )
+                    connection.execute(_SCHEMA.split("CREATE INDEX", 1)[0])
+                    new_columns = {
+                        row[1]
+                        for row in connection.execute(
+                            "PRAGMA table_info(pipeline_jobs)"
+                        )
+                    }
+                    common = ", ".join(sorted(columns & new_columns))
+                    connection.execute(
+                        f"INSERT INTO pipeline_jobs ({common}) SELECT {common} "
+                        "FROM pipeline_jobs_before_e2e"  # noqa: S608
+                    )
+                    connection.execute("DROP TABLE pipeline_jobs_before_e2e")
+                    connection.execute(
+                        """UPDATE pipeline_jobs SET image_backup_status =
+                            CASE WHEN raw_backup_ready = 1 THEN 'complete'
+                                ELSE 'not_recorded' END"""
+                    )
+                connection.commit()
+            connection.executescript(_SCHEMA)
+            connection.execute("PRAGMA user_version = 2")
 
 
 def _validate_claim_arguments(worker_id: str, lease_seconds: float) -> None:
@@ -954,7 +1271,7 @@ def _row_to_job(row: sqlite3.Row) -> PipelineJob:
             if row["result_manifest_path"] is not None
             else None
         ),
-        ready_at=datetime.fromtimestamp(row["ready_at"], UTC),
+        ready_at=_optional_datetime(row["ready_at"]),
         deadline_at=datetime.fromtimestamp(row["deadline_at"], UTC),
         status=PipelineJobStatus(row["status"]),
         reason=row["reason"],
@@ -973,4 +1290,14 @@ def _row_to_job(row: sqlite3.Row) -> PipelineJob:
         primary_returned_at=_optional_datetime(row["primary_returned_at"]),
         completed_at=_optional_datetime(row["completed_at"]),
         failed_at=_optional_datetime(row["failed_at"]),
+        first_seen_at=_optional_datetime(row["first_seen_at"]),
+        csv_ready_at=_optional_datetime(row["csv_ready_at"]),
+        csv_snapshot_folder=(
+            Path(row["csv_snapshot_folder"]) if row["csv_snapshot_folder"] else None
+        ),
+        input_mode=row["input_mode"],
+        next_retry_at=_optional_datetime(row["next_retry_at"]),
+        expired_at=_optional_datetime(row["expired_at"]),
+        image_backup_status=row["image_backup_status"],
+        publication_unknown=bool(row["publication_unknown"]),
     )

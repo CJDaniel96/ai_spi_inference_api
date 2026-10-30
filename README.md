@@ -10,18 +10,21 @@ FastAPI `/process` workflow remains available for compatibility.
 
 Given a timestamp folder containing SPI CSV(s) and pad images, the durable pipeline:
 
-1. Watches today's 14-digit timestamp folders and waits for a stable file set.
-2. Parses every CSV and verifies that every expected image exists, is non-empty,
-   and can be decoded.
-3. Persists `ready_at` and the absolute deadline in SQLite, then atomically copies
-   the complete original tree to the AIPC's local backup.
+1. Watches today's timestamp folders and persists the first CSV observation and
+   absolute end-to-end deadline before waiting for stability.
+2. Validates the CSV set and saves immutable original CSV snapshots. More than
+   60 actual image files takes a CSV-only all-`23` bypass without decoding images.
+3. For normal inference, verifies every expected image and atomically copies the
+   complete original tree to the AIPC's local backup, recording `ready_at`.
 4. Calls the **enabled** model endpoints against the immutable local copy.
 5. Verifies that every required model returned a finite result for every expected
    image. Required-model failure or timeout produces an all-`23` fail-safe result.
 6. Merges results, calculates derived values, classifies defects, and writes a
    durable result manifest without publishing to the machine share.
-7. Publishes every Primary CSV first, then writes the returned/processed result
-   backups and marks the job complete.
+7. Publishes Primary CSVs atomically, checkpointing each success. Failed writes
+   retry only within the remaining job budget; expired jobs are never auto-resent.
+8. Saves local result backups after Primary. Oversized jobs archive raw images in
+   an independent background lane; missing source files are reported as incomplete.
 
 ## Architecture
 
@@ -70,9 +73,10 @@ SPI shared folder
        │
        ▼
 Ingest Worker
-  stable snapshot + CSV/image validation
-  persist INGESTING + ready_at/deadline_at
-  atomic complete local copy
+  persist DISCOVERED + first_seen_at/deadline_at
+  stable CSV set + immutable CSV-only snapshot
+  >60 images: all-23 FALLBACK_READY directly to Publisher
+  <=60 images: validate + atomically archive raw input
        │ READY
        ▼
 Inference Worker
@@ -83,8 +87,9 @@ Inference Worker
        ▼
 Publisher Worker
   normal result, or cutoff takeover from INGESTING/READY/INFERENCING
-  wait for the complete durable raw copy if ingest is still finishing
-  publish all Primary CSVs atomically
+  use durable CSV snapshot for fallback without waiting for raw images
+  publish each Primary CSV atomically, recording per-file acknowledgements
+  retry within the original deadline; otherwise EXPIRED
        │ PRIMARY_RETURNED
        ▼
   local returned CSV + processed CSV + manifest backup
@@ -93,38 +98,49 @@ Publisher Worker
 SQLite WAL state and stage-specific logs retain the evidence
 ```
 
-Persisted states are `INGESTING`, `READY`, `INFERENCING`, `RESULT_READY`,
-`FALLBACK_READY`, `PUBLISHING`, `PRIMARY_RETURNED`, `DONE`, and `FAILED`.
+Persisted states are `DISCOVERED`, `INGESTING`, `READY`, `INFERENCING`, `RESULT_READY`,
+`FALLBACK_READY`, `PUBLISHING`, `PRIMARY_RETURNED`, `DONE`, `FAILED`, and `EXPIRED`.
 Claims use SQLite transactions and expiring worker leases, so an expired stage can
 be reclaimed after a process crash. Jobs are ordered by the earliest deadline.
 
-### 30-second soft-real-time policy
+### Configurable end-to-end deadline (6 seconds by default)
 
-`ready_at` is recorded after the timestamp folder has a stable snapshot and the
-complete CSV/image contract has passed validation. The absolute deadline is:
+New jobs persist `first_seen_at` when CSV input is first observed, before settle,
+validation, copying, queueing, inference, or publication. This is a conservative
+AI-side observation, not a machine export-completion event or folder-name time.
+`ready_at` retains its old meaning: complete CSV/image validation has passed.
+CSV-only bypass jobs have no `ready_at` because their images are never decoded.
 
 ```text
-deadline_at = ready_at + primary_return_deadline_seconds
+deadline_at = first_seen_at + end_to_end_timeout_seconds
 publish_cutoff = deadline_at - primary_publish_reserve_seconds
 ```
 
-With the shipped `30`-second deadline and `5`-second reserve, model work must be
-committable before approximately second 25. At the cutoff, Publisher atomically
-takes ownership of an unfinished ingest/inference job and selects an all-`23`
-fallback. Primary is produced only from the complete local raw copy, never directly
-from the machine share; this preserves the original evidence even if the machine
-deletes its folder after seeing the return CSV. A late inference commit is rejected
-by SQLite and cannot overwrite the fallback. Optional model tasks are cancelled
-once all required models have finished, so they do not consume the publication
-reserve.
+The shipped total is 6 seconds, with 1 second reserved for publication. Every
+retry/restart reuses the persisted deadline. At the cutoff, Publisher may select
+an all-`23` fallback from the durable CSV snapshot. At the deadline, unpublished
+jobs become terminal `EXPIRED`; they are not inferred, retried, or auto-resent.
+Per-file checkpoints prevent repeating successful CSVs after a partial failure.
 
-The SLA covers local archival, queueing, inference, result construction, and the
-last Primary CSV write after `ready_at`; folder discovery, settle time, and
-validation happen before `ready_at`. This is a **soft** real-time target: an AIPC
-stall, sustained overload, unavailable/blocked SMB share, or unusually slow raw
-copy can still miss it. A slow copy is allowed to miss the soft target rather than
-returning before the required original backup exists.
-`pipeline.primary_returned` logs include latency and `deadline_met` evidence.
+Blocking share reads/writes run in supervised spawned IO processes. A timeout
+terminates the IO lane so the main worker can schedule other jobs. An uncertain
+SMB rename acknowledgement is recorded as `publish_completion_unknown`, not as
+definite failure or success, and is not automatically replayed. The remote server
+may still complete a rename already submitted; absolute rejection of late results
+requires machine-side job/expiry checks. Cancelled HTTP waits also do not promise
+to preempt GPU computation in a downstream model server.
+
+CSV stability is inferred from an unchanged complete CSV set during
+`source_settle_seconds`; without a machine completion marker this cannot prove
+that another CSV will never arrive. Oversized jobs preserve original CSVs and
+decisions before publication, but background image backup can be incomplete if
+the machine deletes the source after receiving the result. Inspect
+`image_backup_status` and arrange source retention when all images must be kept.
+
+Stop all three workers before upgrading an existing database. Startup performs a
+transactional schema migration and saves `DATABASE.pre-e2e.sqlite3` first.
+Historical timestamps and deadlines remain unchanged; do not run old workers
+against the migrated schema. Use the pre-migration snapshot for an explicit rollback.
 
 ## API Reference
 
@@ -162,7 +178,8 @@ This endpoint intentionally keeps the original synchronous contract. It runs
 `ProcessJobUseCase` inline and **does not enqueue or update the three-stage SQLite
 pipeline**. It remains useful for existing clients and manual processing, but its
 deadline starts when the request begins rather than at the durable pipeline's
-`ready_at` timestamp.
+first CSV observation. Its existing `primary_return_deadline_seconds` setting is
+separate from the new durable-pipeline total budget.
 
 Do not run `scan_jobs.py` and the new Ingest Worker against the same watched folders
 at the same time: they are two separate execution paths and can publish the same
@@ -331,6 +348,8 @@ Note rule 5 uses **`<` (less than)** the threshold.
 | File | Path | Contents |
 | --- | --- | --- |
 | Original source copy | `{backup_output_root}/{YYYY-MM-DD}/{job_id}/...` | Complete byte-verified source payload before inference; source files are never modified |
+| CSV snapshot | `{pipeline.result_root}/csv_inputs/{snapshot-id}/{job_id}/{csv}` | Immutable CSV bytes required before any new-policy publication |
+| Oversized raw backup | `{backup_output_root}/{YYYY-MM-DD}/{job_id}/raw/...` | Background byte-verified payload; may be incomplete if the source disappears |
 | Optional staging copy | `{pipeline.staging_root}/{job_id}/...` | Separate local inference copy only when `staging_root` is set |
 | Result artifact | `{pipeline.result_root}/{job_id}/{attempt-id}/manifest.json` | Normal/fallback decision, row-aligned result codes, errors, timings, and counts |
 | Staged processed CSV | `{pipeline.result_root}/{job_id}/{attempt-id}/processed/{stem}_processed.csv` | Full AI/debug schema used by Publisher |
@@ -342,7 +361,7 @@ Note rule 5 uses **`<` (less than)** the threshold.
 
 When `pipeline.staging_root` is `null` (the recommended default), the preserved
 original source copy is also the inference staging directory, avoiding a second
-full copy inside the 30-second budget. When it is set to a different local root,
+full copy inside the configured total budget. When it is set to a different local root,
 Ingest creates and verifies two complete atomic copies.
 
 Publisher writes **all Primary CSVs before any** returned/processed backup. A local
@@ -431,7 +450,8 @@ baking environment-specific paths into a shared file.
   },
   "reliability": {
     "primary_return_deadline_seconds": 30.0,
-    "primary_publish_reserve_seconds": 5.0,
+    "end_to_end_timeout_seconds": 6.0,
+    "primary_publish_reserve_seconds": 1.0,
     "scanner_http_timeout_grace_seconds": 5.0,
     "required_model_failure_policy": "fail_all_23"
   },
@@ -445,8 +465,8 @@ baking environment-specific paths into a shared file.
     "ingest_poll_interval_seconds": 0.25,
     "inference_poll_interval_seconds": 0.05,
     "publisher_poll_interval_seconds": 0.05,
-    "publisher_lease_seconds": 1.0,
-    "publisher_heartbeat_interval_seconds": 0.25,
+    "publisher_lease_seconds": 0.5,
+    "publisher_heartbeat_interval_seconds": 0.1,
     "worker_lease_seconds": 60.0
   },
   "logging": {
@@ -488,10 +508,10 @@ The top-level `watch_root`, `scanner_settle_seconds`, `process_api_url`,
 by `scan_jobs.py`. Durable Ingest reads `pipeline.watch_root` and
 `pipeline.source_settle_seconds`.
 
-`primary_return_deadline_seconds` defaults to 30 seconds. The durable pipeline
-persists the deadline from validated `ready_at`; the synchronous `/process` path
-still measures from the beginning of the HTTP request. `scanner_http_timeout_grace_seconds`
-applies only to `scan_jobs.py`.
+`end_to_end_timeout_seconds` defaults to 6 seconds for new durable jobs; the reserve
+must fit inside it. `primary_return_deadline_seconds` remains the synchronous
+`/process` target, measured from HTTP request start. `scanner_http_timeout_grace_seconds`
+applies only to `scan_jobs.py`. Historical in-flight jobs keep their saved deadlines.
 
 Config is cached independently in each process. Restart all three workers (and the
 API when used) after changing settings. `scan_jobs.py` continues to load its own
@@ -778,7 +798,7 @@ runs as an independent foreground process:
 
 | Launcher | Responsibility | Does not do |
 | --- | --- | --- |
-| `01_pipeline_ingest.bat` | Monitor today's timestamp folders, validate every CSV/image, and preserve immutable raw input | AI inference or machine return |
+| `01_pipeline_ingest.bat` | Persist first observation, validate/snapshot CSVs, route oversized jobs to all-23, archive normal input and background oversized images | Model inference or machine return |
 | `02_pipeline_inference.bat` | Claim durable ready jobs and write a deadline-fenced result manifest | Scan the SPI share or publish Primary CSVs |
 | `03_pipeline_publisher.bat` | Publish Primary CSVs first, apply all-23 deadline fallback when needed, then save returned/processed backups | Monitor new folders or invoke model inference |
 
@@ -942,11 +962,12 @@ linted/formatted yet — see "Known Behavior".
 
 - **Worker exits immediately**: set `pipeline.enabled=true` and inspect its startup
   preflight error. Ingest requires a readable `pipeline.watch_root`; every stage
-  probes its required local/output directories.
+  probes its required local directories. Publisher starts even if the machine
+  output share is temporarily unavailable, and applies the per-job retry budget.
 - **No jobs reach `READY`**: inspect `system.ingest` for missing/empty/undecodable
   expected images, duplicate image keys, CSV template errors, or a source snapshot
   that keeps changing. The worker intentionally treats these as not-ready and
-  scans again.
+  scans again until the persisted total deadline, then marks the job `EXPIRED`.
 - **SQLite is locked or unreliable**: confirm `pipeline.database_path` is a local
   AIPC file, not a UNC/SMB path, and that all workers use the same database.
 - **Job remains `PUBLISHING` or `PRIMARY_RETURNED`**: inspect `system.publisher`.
@@ -963,8 +984,9 @@ linted/formatted yet — see "Known Behavior".
 - **`high cover` never fires**: `cover%` needs `paste_pixels` (paste model) and
   `pad_area` (needs `Width` + `Length`). Paste is disabled by default.
 - **Primary write fails**: check `external_output_root` and SMB availability. The
-  Publisher retains a recoverable `PUBLISHING` state and retries; the 30-second SLA
-  cannot be guaranteed during a network outage.
+  Publisher retries only until the saved total deadline and then marks the job
+  `EXPIRED`, allowing subsequent jobs to proceed. Check capacity/quota as well as
+  network errors. Expired jobs never auto-resend after recovery or restart.
 - **Compatibility `/process` returns `500`**: check `external_output_root` and
   `backup_output_root`; synchronous output failures return an HTTP error.
 - **Config errors on startup**: `config/ai_server.json` must be present and valid

@@ -6,12 +6,15 @@ import filecmp
 import logging
 import shutil
 import time
+from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 from app.core.config import AppConfig
 from app.core.logging import get_logger
 from app.domain.entities.pipeline_result import PipelineResultManifest
+from app.infrastructure.deadline_io import DeadlineExceeded, DeadlineIO
 from app.infrastructure.output.sinic_csv_output import SinicCsvOutput
 
 
@@ -35,35 +38,125 @@ class PipelinePublisherService:
         machine_output_root: Path | None = None,
         logger: logging.Logger | None = None,
         clock=time.time,
+        io_runner: DeadlineIO | None = None,
     ) -> None:
         self._config = config
         self._logger = logger or get_logger("pipeline.publisher")
         self._clock = clock
+        self._io = io_runner
+        self._cleanup = DeadlineIO()
+        self._cleanup_pending = deque()
+        self._cleanup_active = False
         self._machine_output = SinicCsvOutput(
             machine_output_root or Path(config.paths.external_output_root),
             preserve_job_folder=config.output.preserve_job_folder,
             require_existing_result_column=config.output.require_existing_is_pass,
         )
 
+    def schedule_io_cleanup(self) -> None:
+        """Queue only temporary files owned by this process's killed IO child."""
+        if self._io is not None and self._io.last_terminated_pid is not None:
+            self._cleanup_pending.append((self._io.last_terminated_pid, time.time()))
+            self._io.last_terminated_pid = None
+
+    def maintain_io(self) -> None:
+        """Poll/start best-effort share cleanup without delaying Primary work."""
+        if self._cleanup_active:
+            try:
+                done, _result = self._cleanup.poll()
+                if not done:
+                    return
+            except Exception as exc:
+                self._logger.warning("event=pipeline.temp_cleanup.error err=%s", exc)
+            self._cleanup_active = False
+        if self._cleanup_pending:
+            pid, cutoff = self._cleanup_pending.popleft()
+            try:
+                self._cleanup.submit(
+                    _cleanup_publication_temps,
+                    self._machine_output._return_root,
+                    pid,
+                    cutoff,
+                    deadline_at=time.time() + 1,
+                )
+                self._cleanup_active = True
+            except Exception as exc:
+                self._logger.warning("event=pipeline.temp_cleanup.error err=%s", exc)
+
+    def close(self) -> None:
+        self._cleanup.close()
+        if self._io is not None:
+            self._io.close()
+
     def publish_primary(
         self,
         *,
         staged_folder: Path,
         manifest_path: Path,
-        ready_at: float,
+        ready_at: float | None,
         deadline_at: float,
+        first_seen_at: float | None = None,
+        published_csvs: dict[str, tuple[Path, float]] | None = None,
+        on_published: Callable[[str, Path, float], None] | None = None,
     ) -> PrimaryPublishResult:
         """Atomically publish all primary CSVs without doing local backup IO."""
         manifest = PipelineResultManifest.read(manifest_path)
         paths: list[Path] = []
+        returned_at = None
         for csv_result in manifest.csv_results:
+            previous = (published_csvs or {}).get(csv_result.source_csv)
+            if previous is not None:
+                paths.append(previous[0])
+                returned_at = max(returned_at or 0, previous[1])
+                continue
+            bounded = first_seen_at is not None
+            if bounded and self._clock() >= deadline_at:
+                raise DeadlineExceeded("Publish budget exhausted")
             source_csv = _safe_child(staged_folder, csv_result.source_csv)
-            result = self._machine_output.write(source_csv, csv_result.result_codes)
+            if self._io is not None and bounded:
+                result = self._io.call(
+                    self._machine_output.write,
+                    source_csv,
+                    csv_result.result_codes,
+                    deadline_at=deadline_at,
+                    function_kwargs={"deadline_at": deadline_at},
+                )
+            else:
+                result = self._machine_output.write(
+                    source_csv,
+                    csv_result.result_codes,
+                    **({"deadline_at": deadline_at} if bounded else {}),
+                )
             paths.append(result.destination_csv)
+            returned_at = self._clock()
+            if on_published is not None:
+                on_published(csv_result.source_csv, result.destination_csv, returned_at)
 
-        returned_at = self._clock()
-        latency_ms = max(0.0, (returned_at - ready_at) * 1000.0)
-        deadline_met = returned_at <= deadline_at
+        returned_at = returned_at if returned_at is not None else self._clock()
+        start = ready_at if ready_at is not None else first_seen_at
+        latency_ms = max(0.0, (returned_at - start) * 1000.0)
+        deadline_met = (
+            returned_at < deadline_at
+            if first_seen_at is not None
+            else returned_at <= deadline_at
+        )
+        if ready_at is None:
+            self._logger.info(
+                "event=pipeline.primary_returned job_id=%s files=%d "
+                "first_seen_at=%.6f returned_at=%.6f deadline_at=%.6f "
+                "deadline_met=%s outcome=%s reason=%s",
+                manifest.job_id,
+                len(paths),
+                first_seen_at,
+                returned_at,
+                deadline_at,
+                deadline_met,
+                manifest.outcome.value,
+                manifest.reason or "-",
+            )
+            return PrimaryPublishResult(
+                tuple(paths), returned_at, latency_ms, deadline_met
+            )
         self._logger.info(
             "event=pipeline.primary_returned job_id=%s files=%d "
             "ready_at=%.6f returned_at=%.6f latency_ms=%.3f "
@@ -161,3 +254,11 @@ def _safe_child(root: Path, relative: str) -> Path:
     if candidate != root_resolved and root_resolved not in candidate.parents:
         raise ValueError(f"Artifact path escapes its root: {relative!r}")
     return candidate
+
+
+def _cleanup_publication_temps(root: Path, pid: int, cutoff: float) -> None:
+    # Primary lives at the root or at most one preserved timestamp folder below.
+    for pattern in (f".*.p{pid}.*.tmp", f"*/.*.p{pid}.*.tmp"):
+        for path in root.glob(pattern):
+            if path.is_file() and path.stat().st_mtime <= cutoff:
+                path.unlink(missing_ok=True)

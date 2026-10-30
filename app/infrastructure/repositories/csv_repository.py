@@ -9,6 +9,7 @@ from pathlib import Path
 import pandas as pd
 
 from app.core.errors import OutputWriteError
+from app.infrastructure.output.sinic_csv_output import _read_document
 
 
 class CsvRepository:
@@ -16,7 +17,10 @@ class CsvRepository:
 
     def read_for_processing(self, path: Path) -> pd.DataFrame:
         """Read a CSV with pandas' default typing (for computation)."""
-        return pd.read_csv(path)
+        document = _read_document(path)
+        return pd.read_csv(
+            path, encoding=document.encoding, sep=document.dialect.delimiter
+        )
 
     def read_for_output(self, path: Path) -> pd.DataFrame:
         """Read a CSV as strings, preserving original numeric formatting.
@@ -24,7 +28,14 @@ class CsvRepository:
         Uses ``dtype=str`` and ``keep_default_na=False`` so values such as
         ``"50.000"`` and empty cells round-trip unchanged.
         """
-        return pd.read_csv(path, dtype=str, keep_default_na=False)
+        document = _read_document(path)
+        return pd.read_csv(
+            path,
+            encoding=document.encoding,
+            sep=document.dialect.delimiter,
+            dtype=str,
+            keep_default_na=False,
+        )
 
     def write(self, df: pd.DataFrame, path: Path) -> None:
         """Atomically write ``df`` to ``path`` (creating parent directories).

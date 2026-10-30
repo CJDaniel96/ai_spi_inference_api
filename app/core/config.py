@@ -202,11 +202,9 @@ class OutputConfig(BaseModel):
 class ReliabilityConfig(BaseModel):
     """Production deadline and fail-safe behavior.
 
-    ``primary_return_deadline_seconds`` is the end-to-end target for making the
-    machine-facing primary CSV visible.  The durable pipeline measures it from
-    the ``ready_at`` timestamp established after CSV/image completeness and
-    stability validation.  The legacy synchronous API continues to measure it
-    from the beginning of ``/process``.
+    ``end_to_end_timeout_seconds`` is the durable pipeline's total budget, starting
+    at the persisted first CSV observation. ``primary_return_deadline_seconds``
+    remains the legacy synchronous API target from the beginning of ``/process``.
 
     ``primary_publish_reserve_seconds`` is held back from model inference so a
     fail-safe CSV still has time to be generated and published before the target.
@@ -216,6 +214,8 @@ class ReliabilityConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     primary_return_deadline_seconds: float = Field(default=30.0, gt=0)
+    # Durable pipeline only: starts at the first persisted CSV observation.
+    end_to_end_timeout_seconds: float = Field(default=6.0, gt=0, allow_inf_nan=False)
     primary_publish_reserve_seconds: float = Field(default=5.0, ge=0)
     scanner_http_timeout_grace_seconds: float = Field(default=5.0, ge=0)
     required_model_failure_policy: Literal["fail_all_23"] = "fail_all_23"
@@ -243,7 +243,7 @@ class PipelineConfig(BaseModel):
     watch_root: str | None = None
     database_path: str = "data/pipeline/jobs.sqlite3"
     # ``None`` reuses the immutable raw backup as inference staging, avoiding a
-    # second full copy inside the 30-second production budget.
+    # second full copy inside the configured production budget.
     staging_root: str | None = None
     result_root: str = "data/pipeline/results"
     source_settle_seconds: float = Field(default=2.0, ge=0)
@@ -324,11 +324,19 @@ class AppConfig(BaseModel):
         if (
             self.pipeline.enabled
             and self.pipeline.worker_lease_seconds
-            <= self.reliability.primary_return_deadline_seconds
+            <= self.reliability.end_to_end_timeout_seconds
         ):
             raise ValueError(
                 "pipeline.worker_lease_seconds must be greater than "
-                "reliability.primary_return_deadline_seconds"
+                "reliability.end_to_end_timeout_seconds"
+            )
+        if self.pipeline.enabled and (
+            self.reliability.primary_publish_reserve_seconds
+            >= self.reliability.end_to_end_timeout_seconds
+        ):
+            raise ValueError(
+                "primary_publish_reserve_seconds must be less than "
+                "end_to_end_timeout_seconds"
             )
         if self.pipeline.enabled and (
             self.pipeline.publisher_heartbeat_interval_seconds

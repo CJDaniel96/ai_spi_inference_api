@@ -21,6 +21,7 @@ from app.application.services.pipeline_publisher_service import (
 )
 from app.core.config import AppConfig, load_config, resolve_under_project_root
 from app.core.logging import get_logger, setup_logging
+from app.infrastructure.deadline_io import DeadlineIO
 from app.infrastructure.repositories.pipeline_job_repository import (
     PipelineJobRepository,
 )
@@ -62,7 +63,12 @@ def _worker_id(stage: str, configured: str | None) -> str:
 
 
 def _repository(config: AppConfig) -> PipelineJobRepository:
-    return PipelineJobRepository(_configured_path(config.pipeline.database_path))
+    return PipelineJobRepository(
+        _configured_path(config.pipeline.database_path),
+        busy_timeout_seconds=min(
+            0.1, config.reliability.end_to_end_timeout_seconds / 10
+        ),
+    )
 
 
 def _configure_logging(config: AppConfig, stage: str) -> None:
@@ -98,17 +104,21 @@ def _run_ingest(
             if config.pipeline.staging_root
             else None
         ),
+        io_runner=DeadlineIO(),
     )
     if once:
         # A fresh folder needs two stable observations.  Keep one-shot/manual
         # ingest bounded while allowing the configured settle window to elapse.
         stop_at = time.monotonic() + config.pipeline.source_settle_seconds + 1.0
-        while True:
-            if worker.run_once(target_date=target_date):
-                break
-            if time.monotonic() >= stop_at:
-                break
-            time.sleep(config.pipeline.ingest_poll_interval_seconds)
+        try:
+            while True:
+                if worker.run_once(target_date=target_date):
+                    break
+                if time.monotonic() >= stop_at:
+                    break
+                time.sleep(config.pipeline.ingest_poll_interval_seconds)
+        finally:
+            worker.close()
     else:
         worker.run_forever()
 
@@ -138,13 +148,15 @@ def _run_publisher(config: AppConfig, *, worker_id: str, once: bool) -> None:
     from app.application.workers.publisher_worker import PublisherWorker
 
     result_root = _configured_path(config.pipeline.result_root)
+    publisher = PipelinePublisherService(
+        config=config,
+        machine_output_root=_configured_path(config.paths.external_output_root),
+        io_runner=DeadlineIO(),
+    )
     worker = PublisherWorker(
         config=config,
         repository=_repository(config),
-        publisher=PipelinePublisherService(
-            config=config,
-            machine_output_root=_configured_path(config.paths.external_output_root),
-        ),
+        publisher=publisher,
         fallback_builder=PipelineInferenceService(
             config=config,
             result_root=result_root,
@@ -152,7 +164,10 @@ def _run_publisher(config: AppConfig, *, worker_id: str, once: bool) -> None:
         worker_id=worker_id,
     )
     if once:
-        worker.run_once()
+        try:
+            worker.run_once()
+        finally:
+            publisher.close()
     else:
         worker.run_forever()
 
@@ -209,9 +224,11 @@ def _preflight(config: AppConfig, stage: str) -> None:
             _configured_path(config.pipeline.result_root), "pipeline.result_root"
         )
     else:
-        _ensure_output_directory(
+        # The share may recover during the per-job budget. Do not prevent the
+        # publisher from starting just because its destination is unavailable.
+        get_logger("pipeline.publisher").info(
+            "event=pipeline.publisher.destination path=%s",
             _configured_path(config.paths.external_output_root),
-            "paths.external_output_root",
         )
         _ensure_writable_directory(
             _configured_path(config.paths.backup_output_root),

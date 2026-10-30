@@ -11,6 +11,7 @@ from pathlib import Path
 class PipelineJobStatus(StrEnum):
     """Persisted states used by the ingest, inference, and publisher workers."""
 
+    DISCOVERED = "DISCOVERED"
     INGESTING = "INGESTING"
     READY = "READY"
     INFERENCING = "INFERENCING"
@@ -20,10 +21,11 @@ class PipelineJobStatus(StrEnum):
     PRIMARY_RETURNED = "PRIMARY_RETURNED"
     DONE = "DONE"
     FAILED = "FAILED"
+    EXPIRED = "EXPIRED"
 
 
 TERMINAL_PIPELINE_JOB_STATUSES = frozenset(
-    {PipelineJobStatus.DONE, PipelineJobStatus.FAILED}
+    {PipelineJobStatus.DONE, PipelineJobStatus.FAILED, PipelineJobStatus.EXPIRED}
 )
 
 
@@ -32,8 +34,8 @@ class PipelineJob:
     """Immutable snapshot of a durable pipeline job.
 
     All timestamps are timezone-aware UTC values.  ``ready_at`` is when the source
-    folder first passed completeness validation; the SLA deadline is derived from
-    that instant rather than from the start of inference.
+    folder first passed image completeness validation. New deadlines start at
+    ``first_seen_at``; CSV-only bypass jobs never claim image validation passed.
     """
 
     job_id: str
@@ -41,7 +43,7 @@ class PipelineJob:
     staged_folder: Path
     original_backup_folder: Path
     result_manifest_path: Path | None
-    ready_at: datetime
+    ready_at: datetime | None
     deadline_at: datetime
     status: PipelineJobStatus
     reason: str | None
@@ -60,6 +62,14 @@ class PipelineJob:
     primary_returned_at: datetime | None
     completed_at: datetime | None
     failed_at: datetime | None
+    first_seen_at: datetime | None = None
+    csv_ready_at: datetime | None = None
+    csv_snapshot_folder: Path | None = None
+    input_mode: str = "full"
+    next_retry_at: datetime | None = None
+    expired_at: datetime | None = None
+    image_backup_status: str = "pending"
+    publication_unknown: bool = False
 
     @property
     def is_terminal(self) -> bool:

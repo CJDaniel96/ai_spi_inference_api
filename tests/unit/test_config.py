@@ -95,7 +95,8 @@ def test_loads_real_repo_config() -> None:
     ]
     assert config.processing.folder_images_num_threshold == 60
     assert config.reliability.primary_return_deadline_seconds == 30.0
-    assert config.reliability.primary_publish_reserve_seconds == 5.0
+    assert config.reliability.primary_publish_reserve_seconds == 1.0
+    assert config.reliability.end_to_end_timeout_seconds == 6.0
     assert config.reliability.required_model_failure_policy == "fail_all_23"
     assert config.pipeline.enabled is True
     assert config.pipeline.database_path == configured["pipeline"]["database_path"]
@@ -255,7 +256,7 @@ def test_enabled_pipeline_requires_watch_root_and_long_enough_lease(
     data["pipeline"] = {
         "enabled": True,
         "watch_root": "D:/watch",
-        "worker_lease_seconds": 30,
+        "worker_lease_seconds": 6,
     }
     with pytest.raises(ConfigError) as exc_info:
         load_config(_write_config(tmp_path, data))
@@ -383,6 +384,14 @@ def test_non_positive_primary_deadline_is_rejected(
         load_config(_write_config(tmp_path, data))
 
     assert "primary_return_deadline_seconds" in str(exc_info.value)
+
+
+@pytest.mark.parametrize("deadline", [0, -1, float("inf"), float("nan")])
+def test_invalid_end_to_end_deadline_is_rejected(tmp_path, deadline):
+    data = _valid_config_dict()
+    data["reliability"] = {"end_to_end_timeout_seconds": deadline}
+    with pytest.raises(ConfigError, match="end_to_end_timeout_seconds"):
+        load_config(_write_config(tmp_path, data))
 
 
 def test_publish_reserve_must_be_less_than_deadline(tmp_path: Path) -> None:

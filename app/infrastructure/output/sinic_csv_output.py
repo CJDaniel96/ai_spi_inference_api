@@ -9,13 +9,21 @@ atomic rename so the machine cannot read a half-written result.
 from __future__ import annotations
 
 import csv
+import errno
 import os
 import tempfile
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from app.infrastructure.deadline_io import DeadlineExceeded
+
 _ENCODING_CANDIDATES = ("utf-8", "cp950", "big5")
+
+
+class PublishCompletionUnknown(OSError):
+    """The share did not acknowledge the final rename reliably."""
 
 
 @dataclass(frozen=True)
@@ -61,7 +69,11 @@ class SinicCsvOutput:
         return self._return_root / source_csv.name
 
     def write(
-        self, source_csv: Path, result_codes: Sequence[int | str]
+        self,
+        source_csv: Path,
+        result_codes: Sequence[int | str],
+        *,
+        deadline_at: float | None = None,
     ) -> MachineCsvWriteResult:
         """Return a source CSV with row-aligned result codes applied."""
         document = _read_document(source_csv)
@@ -93,6 +105,7 @@ class SinicCsvOutput:
             fieldnames=fieldnames,
             rows=rows,
             document=document,
+            deadline_at=deadline_at,
         )
         return MachineCsvWriteResult(
             source_csv=source_csv,
@@ -129,10 +142,12 @@ def _read_document(source_csv: Path) -> _CsvDocument:
         sample = source.read(4096)
         source.seek(0)
         try:
-            dialect: type[csv.Dialect] | csv.Dialect = csv.Sniffer().sniff(sample)
+            dialect: type[csv.Dialect] | csv.Dialect = csv.Sniffer().sniff(
+                sample, delimiters=",;\t|"
+            )
         except csv.Error:
             dialect = csv.excel
-        reader = csv.DictReader(source, dialect=dialect)
+        reader = csv.DictReader(source, dialect=dialect, strict=True)
         if not reader.fieldnames:
             raise ValueError(f"{source_csv} has no CSV header")
         rows = tuple(dict(row) for row in reader)
@@ -152,11 +167,14 @@ def _atomic_write_document(
     fieldnames: list[str],
     rows: list[dict[str, str]],
     document: _CsvDocument,
+    deadline_at: float | None = None,
 ) -> None:
+    if deadline_at is not None and time.time() >= deadline_at:
+        raise DeadlineExceeded("CSV publication deadline reached")
     destination.parent.mkdir(parents=True, exist_ok=True)
     fd, temp_name = tempfile.mkstemp(
         dir=destination.parent,
-        prefix=f".{destination.name}.",
+        prefix=f".{destination.name}.p{os.getpid()}.",
         suffix=".tmp",
     )
     os.close(fd)
@@ -176,7 +194,20 @@ def _atomic_write_document(
             writer.writerows(rows)
             destination_file.flush()
             os.fsync(destination_file.fileno())
-        os.replace(temp_path, destination)
+        if deadline_at is not None and time.time() >= deadline_at:
+            raise DeadlineExceeded("CSV publication deadline reached before rename")
+        try:
+            os.replace(temp_path, destination)
+        except OSError as exc:
+            if deadline_at is not None and exc.errno not in {
+                errno.ENOSPC,
+                errno.EACCES,
+                errno.EPERM,
+                errno.EBUSY,
+                errno.EEXIST,
+            }:
+                raise PublishCompletionUnknown(str(exc)) from exc
+            raise
     except Exception:
         temp_path.unlink(missing_ok=True)
         raise

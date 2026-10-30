@@ -191,6 +191,16 @@ python app/tools/spi_statistics.py --input ./statistics_input --output ./statist
 | `inference_processing_s` | `result_ready_at - inference_started_at`，含模型通訊、分類、結果產生與可能的重試 |
 | `publish_s` | `primary_returned_at - result_ready_at`，含發布等待與寫檔 |
 | `internal_total_s` | Pipeline：`primary_returned_at - ready_at`；舊版：system log 的 `primary_return_latency_ms / 1000` |
+| `first_seen_at` | 新版 Pipeline 首次偵測 CSV 的持久化時間，早於穩定等待、驗證、備份與推論；不是機台送出完成事件 |
+| `csv_ready_at` | 原始 CSV 已驗證並保存為本機快照的時間；不代表影像已驗證 |
+| `end_to_end_s` | 新版：`primary_returned_at - first_seen_at`；只有全部 Primary 發布完成才有成功耗時 |
+| `end_to_end_budget_s` | `deadline_at - first_seen_at`，保留該筆工作實際設定的總預算 |
+| `deadline_start_source` | `first_csv_observed`；若首次目錄檢查本身超時、無法取得 CSV metadata，保守記為 `folder_inspection` |
+| `expired_at` | 超過預算或發布狀態不明而停止處理的時間；逾時工作不自動補發 |
+| `input_mode` | `csv_only` 為超量快速回寫，未經影像解碼；`full` 為正常輸入路徑 |
+| `published_csv_count` | 新版逐檔發布成功的持久化紀錄數；大於零但無 `primary_returned_at` 表示部分發布 |
+| `publication_unknown` | 無法確認 SMB 發布完成時為 1，不視為確定未回傳，也不自動重送 |
+| `image_backup_status` | 原始影像備份獨立狀態：pending/running/complete/incomplete/failed；歷史未知可為 not_recorded |
 | `request_total_s` | 舊版 CSV 的 `request_latency_ms / 1000`，含備份；與內部回傳耗時分開 |
 | `pre_ready_s` | `ready_at - spi_sent_at`，含前段傳輸、穩定等待與驗證 |
 | `machine_wait_s` | `spi_read_at - spi_sent_at` |
@@ -218,6 +228,9 @@ python app/tools/spi_statistics.py --input ./statistics_input --output ./statist
 - 影像加權比例：在「影像數與是否超閾值都已知」的工作內，超閾值工作的影像總數除以該樣本的影像總數。樣本工作數為 `image_weighted_known_jobs`；分母為零時空白。
 - `threshold_skip_result_jobs` 是已識別結果中原因為 `images_exceed_threshold` 的數量；`threshold_skip_published_jobs` 額外要求有發布證據。前者不等於已回傳機台的數量。
 - 每個耗時統計都有自己的 `*_n`，分位數與超過 3／5 秒比例只使用該欄有效樣本；比較採嚴格大於。P50／P95／P99 採排序後線性插值。
+- 新版另外提供 `end_to_end_jobs`、`end_to_end_met_jobs`／`end_to_end_met_pct`，分母為已記錄首次觀測時間的全部工作，包含尚未完成、逾時及狀態未知者。各工作依自身 `deadline_at` 判定，不寫死為 6 秒。
+- `expired_jobs`、`partial_publication_jobs`、`publication_unknown_jobs` 與 `image_backup_incomplete_jobs` 分開呈現。`EXPIRED` 沒有成功耗時也仍在分母內，避免僅統計成功結果而高估達標率。
+- 超量快路徑沒有 `ready_at`／`inference_started_at`，所以舊的等待及內部耗時可留空。預設日期會在 `ready_at` 缺少時採 `first_seen_at`，讓未產生 manifest 的逾時工作也能分日。歷史資料的 `internal_total_s` 定義保持不變。
 - 正常結果不代表整份工作 OK；`normal_result_jobs` 表示正常跑完決策，仍可能包含 AI 判 NG。fallback NG 與模型判 NG 不混為一談。
 - `total_jobs` 是提供資料中可識別的唯一工作數，包含尚未回傳與缺少結果的工作。沒有出現在輸入證據裡的生產板，工具無法得知；此分母不是機台總產量。
 - 預設日期依 `ready_at`、舊版 request 開始、機台送出、manifest 建立的順序選取；明確指定 `--time-field` 時，改以該時間分日，並記錄 `report_date_source`。無時間則為 `unknown`；只有明確指定 `job_timestamp` 才解析工作 ID 的時間。

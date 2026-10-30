@@ -134,21 +134,37 @@ class FileSettleTracker:
         self._allow_no_images = allow_no_images
         self._states: dict[str, _ObservedState] = {}
 
+    @property
+    def settle_seconds(self) -> float:
+        return self._settle_seconds
+
     def observe(self, job: MachineJobFiles, *, now: float | None = None) -> bool:
         """Return ``True`` once required files have remained unchanged long enough."""
         now = time.monotonic() if now is None else now
-        key = str(job.folder.resolve())
+        key = str(job.folder)
         snapshot = SinicFolderInput.snapshot(job)
+        has_required_files = bool(job.csv_files) and (
+            self._allow_no_images or bool(job.image_files)
+        )
+        return self.observe_snapshot(key, snapshot, has_required_files, now=now)
+
+    def observe_snapshot(
+        self,
+        key: str,
+        snapshot: FileSnapshot,
+        has_required_files: bool,
+        *,
+        now: float | None = None,
+    ) -> bool:
+        """Observe metadata collected by a deadline-bounded IO process."""
+        now = time.monotonic() if now is None else now
         state = self._states.get(key)
         if state is None or state.snapshot != snapshot:
             self._states[key] = _ObservedState(snapshot=snapshot, stable_since=now)
             return False
 
-        has_required_files = bool(job.csv_files) and (
-            self._allow_no_images or bool(job.image_files)
-        )
         return has_required_files and now - state.stable_since >= self._settle_seconds
 
     def forget(self, folder: Path) -> None:
         """Drop state after a job is returned or intentionally abandoned."""
-        self._states.pop(str(folder.resolve()), None)
+        self._states.pop(str(folder), None)

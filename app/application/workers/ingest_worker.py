@@ -1,17 +1,21 @@
-"""Independent Stage 1 worker: discover, validate, persist, and archive input."""
+"""Stage 1: observe deadlines, snapshot CSVs and bypass oversized image jobs."""
 
 from __future__ import annotations
 
 import logging
 import time
+import uuid
 from dataclasses import replace
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
-from app.application.services.ingest_service import IngestService, ValidatedIngest
-from app.core.config import AppConfig
+from app.application.services.ingest_service import IngestService, SourceChangedError
+from app.application.services.pipeline_inference_service import PipelineInferenceService
+from app.core.config import AppConfig, resolve_under_project_root
 from app.core.logging import get_logger
 from app.domain.entities.pipeline_job import PipelineJobStatus
+from app.infrastructure.deadline_io import DeadlineExceeded, DeadlineIO
+from app.infrastructure.input import pipeline_io
 from app.infrastructure.input.sinic_folder_input import (
     FileSettleTracker,
     SinicFolderInput,
@@ -23,8 +27,6 @@ from app.infrastructure.repositories.pipeline_job_repository import (
 
 
 class IngestWorker:
-    """Continuously create immutable local jobs from today's timestamp folders."""
-
     def __init__(
         self,
         *,
@@ -38,20 +40,19 @@ class IngestWorker:
         ingest_service: IngestService | None = None,
         input_adapter: SinicFolderInput | None = None,
         settle_tracker: FileSettleTracker | None = None,
+        io_runner: DeadlineIO | None = None,
+        clock=None,
     ) -> None:
-        self._config = config
-        self._repository = repository
-        self._worker_id = worker_id
-        self._watch_root = watch_root
-        self._backup_root = backup_root
-        self._staging_root = staging_root
+        self._config, self._repository = config, repository
+        self._worker_id, self._watch_root = worker_id, watch_root
+        self._backup_root, self._staging_root = backup_root, staging_root
         self._logger = logger or get_logger("pipeline.ingest")
+        self._clock = clock or (lambda: datetime.now(UTC))
         self._service = ingest_service or IngestService(
             image_name_source_column=config.processing.image_name_source_column,
             image_name_template=config.processing.image_name_template,
-            primary_return_deadline_seconds=(
-                config.reliability.primary_return_deadline_seconds
-            ),
+            primary_return_deadline_seconds=config.reliability.end_to_end_timeout_seconds,
+            clock=self._clock,
         )
         self._adapter = input_adapter or SinicFolderInput(
             config.processing.image_extensions
@@ -59,196 +60,356 @@ class IngestWorker:
         self._settle = settle_tracker or FileSettleTracker(
             settle_seconds=config.pipeline.source_settle_seconds
         )
-        # Avoid decoding every image twice on the normal enqueue-and-archive
-        # path.  Crash recovery simply validates again in the new process.
-        self._pending_validations: dict[str, ValidatedIngest] = {}
+        self._csv_settle = FileSettleTracker(
+            self._settle.settle_seconds, allow_no_images=True
+        )
+        self._io = io_runner
+        self._background = DeadlineIO()
+        self._background_job = None
+        self._background_legacy = False
+        self._pending_validations = {}
+        self._result_root = resolve_under_project_root(config.pipeline.result_root)
+        self._fallback = PipelineInferenceService(
+            config=config,
+            result_root=self._result_root,
+            clock=lambda: self._clock().timestamp(),
+        )
+
+    def _call(self, function, *args, deadline_at):
+        if self._clock().timestamp() >= deadline_at:
+            raise DeadlineExceeded("Ingest budget exhausted")
+        if self._io is not None:
+            return self._io.call(function, *args, deadline_at=deadline_at)
+        result = function(*args)
+        if self._clock().timestamp() >= deadline_at:
+            raise DeadlineExceeded("Ingest budget exhausted")
+        return result
 
     def run_once(self, *, target_date=None) -> bool:
-        """Discover new jobs and advance at most one durable ingest claim."""
         target_date = target_date or datetime.now().date()
+        self._repository.expire_due(now=self._clock())
+        self._poll_background()
         discovered = self._discover(target_date)
         claimed = self._repository.claim_for_ingest(
             worker_id=self._worker_id,
             lease_seconds=self._config.pipeline.worker_lease_seconds,
+            now=self._clock(),
         )
         if claimed is None:
+            self._start_background()
             return discovered > 0
-
         try:
-            # A completed atomic archive remains usable even if the machine has
-            # already deleted its source before this worker restarts.
-            validation_source = (
-                claimed.source_folder
-                if claimed.source_folder.is_dir()
-                else claimed.staged_folder
-            )
             validated = self._pending_validations.pop(claimed.job_id, None)
             if validated is None:
-                validated = self._service.validate(validation_source)
+                if self._io is None:
+                    source = (
+                        claimed.source_folder
+                        if claimed.source_folder.is_dir()
+                        else claimed.staged_folder
+                    )
+                    validated = self._service.validate(source)
+                else:
+                    validated = self._call(
+                        pipeline_io.validate_source,
+                        self._config,
+                        claimed.source_folder,
+                        deadline_at=claimed.deadline_at.timestamp(),
+                    )
             validated = replace(
                 validated,
                 source_folder=claimed.source_folder,
                 ready_at=claimed.ready_at,
                 deadline_at=claimed.deadline_at,
             )
-            if claimed.staged_folder.is_dir() and not claimed.source_folder.is_dir():
-                result_staged = claimed.staged_folder
-                result_backup = claimed.original_backup_folder
+            if self._io is None:
+                if (
+                    claimed.staged_folder.is_dir()
+                    and not claimed.source_folder.is_dir()
+                ):
+                    result = None
+                else:
+                    result = self._service.archive(
+                        validated,
+                        backup_root=self._backup_root,
+                        staging_root=self._staging_root,
+                    )
             else:
-                result = self._service.archive(
+                result = self._call(
+                    pipeline_io.archive_source,
+                    self._config,
                     validated,
-                    backup_root=self._backup_root,
-                    staging_root=self._staging_root,
+                    self._backup_root,
+                    self._staging_root,
+                    deadline_at=claimed.deadline_at.timestamp(),
                 )
-                result_staged = result.staged_folder
-                result_backup = result.original_backup_folder
-            if (
-                result_staged != claimed.staged_folder
-                or result_backup != claimed.original_backup_folder
+            if result is not None and (
+                result.staged_folder != claimed.staged_folder
+                or result.original_backup_folder != claimed.original_backup_folder
             ):
                 raise RuntimeError("Persisted ingest paths differ from archive paths")
             try:
                 self._repository.mark_ready(
-                    job_id=claimed.job_id,
-                    worker_id=self._worker_id,
+                    job_id=claimed.job_id, worker_id=self._worker_id, now=self._clock()
                 )
-                durable_state = PipelineJobStatus.READY.value
+                self._repository.note_image_backup(claimed.job_id, "complete")
             except PipelineLeaseLostError:
-                # Publisher may have selected the cutoff fallback while the
-                # atomic copy was finishing.  Persist only the verified-copy
-                # fence; Publisher retains ownership of the decision.
-                self._repository.mark_raw_backup_ready(job_id=claimed.job_id)
-                durable_state = PipelineJobStatus.PUBLISHING.value
+                current = self._repository.get(claimed.job_id)
+                if not current.is_terminal:
+                    self._repository.mark_raw_backup_ready(job_id=claimed.job_id)
             self._settle.forget(claimed.source_folder)
             self._logger.info(
                 "event=pipeline.ingest.raw_backup_ready job_id=%s ready_at=%s "
-                "deadline_at=%s state=%s staged_folder=%s",
+                "deadline_at=%s staged_folder=%s",
                 claimed.job_id,
                 claimed.ready_at.isoformat(),
                 claimed.deadline_at.isoformat(),
-                durable_state,
                 claimed.staged_folder,
             )
+        except DeadlineExceeded:
+            self._repository.expire_job(
+                job_id=claimed.job_id, reason="ingest_timeout", now=self._clock()
+            )
+        except SourceChangedError:
+            try:
+                if claimed.first_seen_at is not None:
+                    self._repository.rediscover_changed_input(
+                        job_id=claimed.job_id,
+                        worker_id=self._worker_id,
+                        now=self._clock(),
+                    )
+                else:
+                    self._repository.release_ingest_for_retry(
+                        job_id=claimed.job_id,
+                        worker_id=self._worker_id,
+                        reason="source_changed",
+                        now=self._clock(),
+                    )
+            except PipelineLeaseLostError:
+                pass
         except Exception as exc:
             self._logger.exception(
-                "event=pipeline.ingest.error job_id=%s err=%s",
-                claimed.job_id,
-                exc,
+                "event=pipeline.ingest.error job_id=%s err=%s", claimed.job_id, exc
             )
             try:
                 self._repository.release_lease(
                     job_id=claimed.job_id,
                     worker_id=self._worker_id,
                     reason=f"ingest_error: {exc}",
+                    now=self._clock(),
                 )
             except PipelineLeaseLostError:
-                # Deadline Publisher has already fenced this ingest attempt.
                 pass
+        self._repository.expire_due(now=self._clock())
         return True
-
-    def run_forever(self) -> None:
-        """Run until interrupted; SQLite makes restarts safe."""
-        interval = self._config.pipeline.ingest_poll_interval_seconds
-        while True:
-            try:
-                self.run_once()
-            except Exception as exc:
-                self._logger.exception("event=pipeline.ingest.loop_error err=%s", exc)
-            time.sleep(interval)
 
     def _discover(self, target_date) -> int:
         created = 0
-        for source_folder in self._adapter.list_candidates(
-            self._watch_root, target_date
-        ):
-            existing = self._repository.get(source_folder.name)
-            if existing is not None:
+        extensions = self._config.processing.image_extensions
+        threshold = self._config.processing.folder_images_num_threshold
+        if self._io is None:
+            folders = self._adapter.list_candidates(self._watch_root, target_date)
+        else:
+            folders = self._call(
+                pipeline_io.candidates,
+                extensions,
+                self._watch_root,
+                target_date,
+                deadline_at=time.time()
+                + min(2, self._config.reliability.end_to_end_timeout_seconds),
+            )
+        for folder in folders:
+            existing = self._repository.get(folder.name)
+            if (
+                existing is not None
+                and existing.status is not PipelineJobStatus.DISCOVERED
+            ):
                 if existing.status is not PipelineJobStatus.INGESTING:
-                    self._pending_validations.pop(source_folder.name, None)
-                self._recover_taken_over_archive(existing)
+                    self._pending_validations.pop(folder.name, None)
                 continue
-            machine_job = self._adapter.load(source_folder)
-            if not self._settle.observe(machine_job):
-                continue
+            observed = self._clock()
+            deadline = (
+                existing.deadline_at.timestamp()
+                if existing
+                else observed.timestamp()
+                + self._config.reliability.end_to_end_timeout_seconds
+            )
             try:
-                validated = self._service.validate(source_folder)
-                plan = self._service.plan_archive(
-                    validated,
-                    backup_root=self._backup_root,
-                    staging_root=self._staging_root,
+                files, csv_snapshot, full_snapshot = self._call(
+                    pipeline_io.inspect_source,
+                    extensions,
+                    folder,
+                    threshold,
+                    deadline_at=deadline,
                 )
-                result = self._repository.enqueue_ingesting(
-                    job_id=validated.job_id,
-                    source_folder=validated.source_folder,
-                    staged_folder=plan.staged_folder,
-                    original_backup_folder=plan.original_backup_folder,
-                    ready_at=validated.ready_at,
-                    deadline_at=validated.deadline_at,
+                if not files.csv_files:
+                    continue
+                backup = (
+                    self._backup_root
+                    / datetime.strptime(folder.name, "%Y%m%d%H%M%S").date().isoformat()
+                    / folder.name
                 )
-                if result.created:
-                    self._pending_validations[validated.job_id] = validated
-                created += int(result.created)
-                self._logger.info(
-                    "event=pipeline.ingest.enqueued job_id=%s ready_at=%s "
-                    "deadline_at=%s created=%s",
-                    validated.job_id,
-                    validated.ready_at.isoformat(),
-                    validated.deadline_at.isoformat(),
-                    result.created,
+                staged = (
+                    self._staging_root / folder.name if self._staging_root else backup
+                )
+                observed_job = self._repository.observe_job(
+                    job_id=folder.name,
+                    source_folder=folder,
+                    staged_folder=staged,
+                    original_backup_folder=backup,
+                    timeout_seconds=self._config.reliability.end_to_end_timeout_seconds,
+                    now=observed,
+                )
+                csv_stable = self._csv_settle.observe_snapshot(
+                    str(folder), csv_snapshot, True
+                )
+                full_stable = self._settle.observe_snapshot(
+                    str(folder), full_snapshot, bool(files.image_files)
+                )
+                if not csv_stable:
+                    continue
+                fast = files.image_count > threshold
+                if not fast and not full_stable:
+                    continue
+                csv_target = (
+                    self._result_root / "csv_inputs" / uuid.uuid4().hex / folder.name
+                )
+                self._call(
+                    pipeline_io.snapshot_csv,
+                    self._config,
+                    folder,
+                    csv_target,
+                    deadline_at=deadline,
+                )
+                if fast:
+                    _manifest, manifest_path = self._fallback.build_csv_fallback(
+                        job_id=folder.name,
+                        csv_folder=csv_target,
+                        reason="images_exceed_threshold",
+                        errors=(
+                            f"Image count {files.image_count} "
+                            f"exceeds threshold {threshold}",
+                        ),
+                    )
+                    advanced = self._repository.activate_observed_job(
+                        job_id=folder.name,
+                        csv_snapshot_folder=csv_target,
+                        manifest_path=manifest_path,
+                        now=self._clock(),
+                    )
+                else:
+                    validated = (
+                        self._service.validate(folder)
+                        if self._io is None
+                        else self._call(
+                            pipeline_io.validate_source,
+                            self._config,
+                            folder,
+                            deadline_at=deadline,
+                        )
+                    )
+                    validated = replace(
+                        validated, deadline_at=observed_job.job.deadline_at
+                    )
+                    self._call(
+                        pipeline_io.snapshot_csv,
+                        self._config,
+                        folder,
+                        csv_target,
+                        deadline_at=deadline,
+                    )
+                    advanced = self._repository.activate_observed_job(
+                        job_id=folder.name,
+                        csv_snapshot_folder=csv_target,
+                        ready_at=validated.ready_at,
+                        now=self._clock(),
+                    )
+                    if advanced:
+                        self._pending_validations[folder.name] = validated
+                created += int(advanced)
+            except DeadlineExceeded:
+                self._repository.observe_job(
+                    job_id=folder.name,
+                    source_folder=folder,
+                    staged_folder=self._backup_root / folder.name,
+                    original_backup_folder=self._backup_root / folder.name,
+                    timeout_seconds=self._config.reliability.end_to_end_timeout_seconds,
+                    now=observed,
+                )
+                self._repository.expire_job(
+                    job_id=folder.name,
+                    reason="input_inspection_timeout"
+                    if existing is None
+                    else "input_timeout",
+                    now=self._clock(),
                 )
             except Exception as exc:
-                # An incomplete stable snapshot is not dead-lettered: the machine
-                # may still add the missing file on a later scan.
                 self._logger.warning(
-                    "event=pipeline.ingest.not_ready source=%s err=%s",
-                    source_folder,
-                    exc,
+                    "event=pipeline.ingest.not_ready source=%s err=%s", folder, exc
                 )
         return created
 
-    def _recover_taken_over_archive(self, job) -> None:
-        """Finish raw backup after a deadline takeover without changing state."""
-        if job.raw_backup_ready:
-            return
-        if job.status not in {
-            PipelineJobStatus.PUBLISHING,
-            PipelineJobStatus.PRIMARY_RETURNED,
-            PipelineJobStatus.DONE,
-        }:
+    def _poll_background(self) -> None:
+        if self._background_job is None:
             return
         try:
-            validation_source = (
-                job.source_folder
-                if job.source_folder.is_dir()
-                else job.original_backup_folder
-            )
-            if not validation_source.is_dir():
+            done, status = self._background.poll()
+            if not done:
                 return
-            validated = self._service.validate(validation_source)
-            validated = replace(
-                validated,
-                source_folder=job.source_folder,
-                ready_at=job.ready_at,
-                deadline_at=job.deadline_at,
-            )
-            if job.source_folder.is_dir():
-                result = self._service.archive(
-                    validated,
-                    backup_root=self._backup_root,
-                    staging_root=self._staging_root,
+        except Exception:
+            status = "incomplete"
+        finished = self._background_job
+        self._background_job = None
+        self._repository.note_image_backup(finished, status)
+        if self._background_legacy and status == "complete":
+            current = self._repository.get(finished)
+            if current.status in {
+                PipelineJobStatus.PUBLISHING,
+                PipelineJobStatus.PRIMARY_RETURNED,
+                PipelineJobStatus.DONE,
+            }:
+                self._repository.mark_raw_backup_ready(job_id=finished)
+
+    def _start_background(self) -> None:
+        if self._background_job is not None:
+            return
+        for job in self._repository.pending_image_backups():
+            self._repository.note_image_backup(job.job_id, "running")
+            self._background_legacy = job.first_seen_at is None
+            if self._background_legacy:
+                self._background.submit(
+                    pipeline_io.recover_legacy_archive,
+                    self._config,
+                    job,
+                    self._backup_root,
+                    self._staging_root,
+                    deadline_at=time.time()
+                    + self._config.pipeline.worker_lease_seconds,
                 )
-                backup_folder = result.original_backup_folder
             else:
-                backup_folder = job.original_backup_folder
-            self._repository.mark_raw_backup_ready(job_id=job.job_id)
-            self._logger.info(
-                "event=pipeline.ingest.recovered_backup job_id=%s backup=%s",
-                job.job_id,
-                backup_folder,
-            )
-        except Exception as exc:
-            self._logger.warning(
-                "event=pipeline.ingest.recover_backup_error job_id=%s err=%s",
-                job.job_id,
-                exc,
-            )
+                self._background.submit(
+                    pipeline_io.backup_images,
+                    job.source_folder,
+                    job.original_backup_folder / "raw",
+                    job.csv_snapshot_folder,
+                    deadline_at=time.time()
+                    + self._config.pipeline.worker_lease_seconds,
+                )
+            self._background_job = job.job_id
+
+    def close(self) -> None:
+        self._background.close()
+        if self._io is not None:
+            self._io.close()
+
+    def run_forever(self) -> None:
+        try:
+            while True:
+                try:
+                    self.run_once()
+                except Exception as exc:
+                    self._logger.exception(
+                        "event=pipeline.ingest.loop_error err=%s", exc
+                    )
+                time.sleep(self._config.pipeline.ingest_poll_interval_seconds)
+        finally:
+            self.close()

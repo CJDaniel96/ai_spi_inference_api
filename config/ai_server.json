@@ -9,7 +9,14 @@
   },
   "processing": {
     "folder_images_num_threshold": 60,
-    "image_extensions": [".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif"],
+    "image_extensions": [
+      ".jpg",
+      ".jpeg",
+      ".png",
+      ".bmp",
+      ".tiff",
+      ".tif"
+    ],
     "image_name_source_column": null,
     "image_name_template": "{csv_stem}_{component_name}_{Array_id}_{Pad_id}.jpg"
   },
@@ -63,9 +70,10 @@
   },
   "reliability": {
     "primary_return_deadline_seconds": 30.0,
-    "primary_publish_reserve_seconds": 5.0,
+    "primary_publish_reserve_seconds": 1.0,
     "scanner_http_timeout_grace_seconds": 5.0,
-    "required_model_failure_policy": "fail_all_23"
+    "required_model_failure_policy": "fail_all_23",
+    "end_to_end_timeout_seconds": 6.0
   },
   "pipeline": {
     "enabled": true,
@@ -77,8 +85,8 @@
     "ingest_poll_interval_seconds": 0.25,
     "inference_poll_interval_seconds": 0.05,
     "publisher_poll_interval_seconds": 0.05,
-    "publisher_lease_seconds": 1.0,
-    "publisher_heartbeat_interval_seconds": 0.25,
+    "publisher_lease_seconds": 0.5,
+    "publisher_heartbeat_interval_seconds": 0.1,
     "worker_lease_seconds": 60.0
   },
   "logging": {

@@ -20,6 +20,8 @@ from app.domain.entities.pipeline_result import (
     PipelineOutcome,
     PipelineResultManifest,
 )
+from app.infrastructure.deadline_io import DeadlineExceeded
+from app.infrastructure.output.sinic_csv_output import PublishCompletionUnknown
 from app.infrastructure.repositories.pipeline_job_repository import (
     PipelineJobRepository,
     PipelineLeaseLostError,
@@ -55,6 +57,8 @@ class PublisherWorker:
 
     def run_once(self) -> bool:
         """Publish one urgent job, otherwise finalize one post-primary backup."""
+        self._repository.expire_due()
+        self._publisher.maintain_io()
         publishing = self._repository.claim_for_publish(
             worker_id=self._worker_id,
             lease_seconds=self._config.pipeline.publisher_lease_seconds,
@@ -77,14 +81,17 @@ class PublisherWorker:
 
     def run_forever(self) -> None:
         interval = self._config.pipeline.publisher_poll_interval_seconds
-        while True:
-            try:
-                self.run_once()
-            except Exception as exc:
-                self._logger.exception(
-                    "event=pipeline.publisher.loop_error err=%s", exc
-                )
-            time.sleep(interval)
+        try:
+            while True:
+                try:
+                    self.run_once()
+                except Exception as exc:
+                    self._logger.exception(
+                        "event=pipeline.publisher.loop_error err=%s", exc
+                    )
+                time.sleep(interval)
+        finally:
+            self._publisher.close()
 
     def _publish_claim(self, job) -> None:
         heartbeat_stop = Event()
@@ -108,19 +115,50 @@ class PublisherWorker:
                 else:
                     fallback_path = None
                 if fallback_path is None:
-                    _manifest, fallback_path = self._fallback_builder.build_fallback(
-                        job_id=job.job_id,
-                        staged_folder=input_folder,
-                        reason=job.reason or "publish_reserve_reached",
-                        errors=(job.reason,) if job.reason else (),
-                    )
+                    if job.csv_snapshot_folder is not None:
+                        _manifest, fallback_path = (
+                            self._fallback_builder.build_csv_fallback(
+                                job_id=job.job_id,
+                                csv_folder=input_folder,
+                                reason=job.reason or "publish_reserve_reached",
+                                errors=(job.reason,) if job.reason else (),
+                            )
+                        )
+                    else:
+                        _manifest, fallback_path = (
+                            self._fallback_builder.build_fallback(
+                                job_id=job.job_id,
+                                staged_folder=input_folder,
+                                reason=job.reason or "publish_reserve_reached",
+                                errors=(job.reason,) if job.reason else (),
+                            )
+                        )
                 manifest_path = fallback_path
 
+            extra = {}
+            if job.first_seen_at is not None:
+                self._repository.bind_publish_manifest(
+                    job.job_id, self._worker_id, manifest_path
+                )
+                extra = dict(
+                    first_seen_at=job.first_seen_at.timestamp(),
+                    published_csvs=self._repository.published_csvs(job.job_id),
+                    on_published=lambda source, destination, returned: (
+                        self._repository.record_csv_published(
+                            job_id=job.job_id,
+                            worker_id=self._worker_id,
+                            source_csv=source,
+                            destination_csv=destination,
+                            returned_at=returned,
+                        )
+                    ),
+                )
             result = self._publisher.publish_primary(
                 staged_folder=input_folder,
                 manifest_path=manifest_path,
-                ready_at=job.ready_at.timestamp(),
+                ready_at=job.ready_at.timestamp() if job.ready_at else None,
                 deadline_at=job.deadline_at.timestamp(),
+                **extra,
             )
             returned_at = datetime.fromtimestamp(result.returned_at, UTC)
             self._repository.mark_primary_returned(
@@ -129,6 +167,25 @@ class PublisherWorker:
                 result_manifest_path=manifest_path,
                 now=returned_at,
             )
+        except DeadlineExceeded as exc:
+            self._publisher.schedule_io_cleanup()
+            self._repository.expire_job(
+                job_id=job.job_id,
+                reason="publish_completion_unknown"
+                if exc.uncertain
+                else "publish_timeout",
+                publication_unknown=exc.uncertain,
+            )
+        except (PublishCompletionUnknown, BrokenPipeError, EOFError) as exc:
+            self._publisher.schedule_io_cleanup()
+            self._repository.expire_job(
+                job_id=job.job_id,
+                reason="publish_completion_unknown",
+                publication_unknown=True,
+            )
+            self._logger.error(
+                "event=pipeline.publisher.abandoned job_id=%s err=%s", job.job_id, exc
+            )
         except _RawBackupNotReadyError as exc:
             self._logger.debug(
                 "event=pipeline.publisher.waiting_for_raw_backup job_id=%s err=%s",
@@ -136,11 +193,7 @@ class PublisherWorker:
                 exc,
             )
             try:
-                self._repository.release_lease(
-                    job_id=job.job_id,
-                    worker_id=self._worker_id,
-                    reason="waiting_for_verified_raw_backup",
-                )
+                self._retry_or_expire(job, "waiting_for_verified_raw_backup")
             except PipelineLeaseLostError:
                 pass
         except Exception as exc:
@@ -150,17 +203,29 @@ class PublisherWorker:
                 exc,
             )
             try:
-                self._repository.release_lease(
-                    job_id=job.job_id,
-                    worker_id=self._worker_id,
-                    reason=f"primary_publish_error: {exc}",
-                )
+                self._retry_or_expire(job, f"primary_publish_error: {exc}")
             except PipelineLeaseLostError:
                 pass
         finally:
             heartbeat_stop.set()
             heartbeat.join(
                 timeout=(self._config.pipeline.publisher_heartbeat_interval_seconds * 2)
+            )
+
+    def _retry_or_expire(self, job, reason: str) -> None:
+        if job.first_seen_at is None:
+            self._repository.release_lease(
+                job_id=job.job_id,
+                worker_id=self._worker_id,
+                reason=reason,
+            )
+        elif time.time() >= job.deadline_at.timestamp():
+            self._repository.expire_job(job_id=job.job_id, reason=reason)
+        else:
+            self._repository.schedule_publish_retry(
+                job_id=job.job_id,
+                worker_id=self._worker_id,
+                reason=reason,
             )
 
     def _renew_publish_lease(self, job_id: str, stop: Event) -> None:
@@ -186,6 +251,20 @@ class PublisherWorker:
         try:
             if job.result_manifest_path is None:
                 raise RuntimeError("Primary-returned job has no result manifest")
+            if job.csv_snapshot_folder is not None:
+                # CSV-only jobs have deliberately published before raw-image backup.
+                import shutil
+
+                job.original_backup_folder.mkdir(parents=True, exist_ok=True)
+                for source in job.csv_snapshot_folder.iterdir():
+                    destination = job.original_backup_folder / source.name
+                    if (
+                        destination.exists()
+                        and destination.read_bytes() != source.read_bytes()
+                    ):
+                        raise RuntimeError(f"Raw CSV backup differs: {destination}")
+                    if not destination.exists():
+                        shutil.copy2(source, destination)
             if not job.original_backup_folder.is_dir():
                 raise RuntimeError("Immutable original backup is not available yet")
             input_folder = self._available_input_folder(job)
@@ -249,6 +328,10 @@ class PublisherWorker:
 
     @staticmethod
     def _available_input_folder(job) -> Path:
+        if job.csv_snapshot_folder is not None and (
+            job.input_mode == "csv_only" or job.fallback_required
+        ):
+            return job.csv_snapshot_folder
         if not job.raw_backup_ready:
             raise _RawBackupNotReadyError(
                 "Verified raw-backup fence is not set for "

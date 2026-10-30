@@ -27,6 +27,9 @@ UTC = timezone.utc  # noqa: UP017 -- standalone tool also supports Python 3.10
 TZ8 = timezone(timedelta(hours=8))
 DEFAULT_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif"}
 STATE_TIMES = (
+    "first_seen_at",
+    "csv_ready_at",
+    "expired_at",
     "ready_at",
     "inference_started_at",
     "result_ready_at",
@@ -52,6 +55,11 @@ JOB_COLUMNS = [
     "selection_at",
     "status",
     "state_reason",
+    "deadline_start_source",
+    "input_mode",
+    "image_backup_status",
+    "publication_unknown",
+    "published_csv_count",
     "publication_evidence",
     "manifest_selection",
     "manifest_fingerprint",
@@ -77,6 +85,8 @@ JOB_COLUMNS = [
     "inference_processing_s",
     "publish_s",
     "internal_total_s",
+    "end_to_end_s",
+    "end_to_end_budget_s",
     "request_total_s",
     "machine_wait_s",
     "read_after_write_s",
@@ -279,7 +289,7 @@ class Evidence:
                 )
         # Index once: avoid walking every image again for every production job.
         for path in self.files:
-            if path.suffix.lower() == ".csv":
+            if path.suffix.lower() == ".csv" and "csv_inputs" not in path.parts:
                 self.raw_roots[path.parent.name].add(path.parent)
         roots = set().union(*self.raw_roots.values()) if self.raw_roots else set()
         for path in self.files:
@@ -399,8 +409,18 @@ class Evidence:
                 ).fetchone():
                     return
                 connection.row_factory = sqlite3.Row
+                has_publications = connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' "
+                    "AND name='pipeline_publications'"
+                ).fetchone()
                 for row in connection.execute("SELECT * FROM pipeline_jobs").fetchall():
                     data = dict(row)
+                    if has_publications and data.get("first_seen_at") is not None:
+                        data["published_csv_count"] = connection.execute(
+                            "SELECT COUNT(*) FROM pipeline_publications "
+                            "WHERE job_id = ?",
+                            (data["job_id"],),
+                        ).fetchone()[0]
                     self.states[str(data["job_id"])].append((data, str(path)))
             finally:
                 connection.close()
@@ -616,6 +636,10 @@ class Evidence:
             "ingest_attempts",
             "inference_attempts",
             "publish_attempts",
+            "input_mode",
+            "image_backup_status",
+            "publication_unknown",
+            "published_csv_count",
         ):
             assign(field, state.get(field), state_source)
         logs = self.logs.get(job_id, [])
@@ -853,6 +877,8 @@ class Evidence:
             ("inference_processing_s", "inference_started_at", "result_ready_at"),
             ("publish_s", "result_ready_at", "primary_returned_at"),
             ("internal_total_s", "ready_at", "primary_returned_at"),
+            ("end_to_end_s", "first_seen_at", "primary_returned_at"),
+            ("end_to_end_budget_s", "first_seen_at", "deadline_at"),
             ("machine_wait_s", "spi_sent_at", "spi_read_at"),
             ("read_after_write_s", "primary_returned_at", "spi_read_at"),
         ):
@@ -867,12 +893,26 @@ class Evidence:
             row["late_after_op_s"] = round(row["spi_read_at"] - row["op_confirm_at"], 6)
             row["late_after_op"] = int(row["late_after_op_s"] > 0)
         if "primary_returned_at" in row and "deadline_at" in row:
-            row["deadline_met"] = int(row["primary_returned_at"] <= row["deadline_at"])
+            row["deadline_met"] = int(
+                row["primary_returned_at"] < row["deadline_at"]
+                if "first_seen_at" in row
+                else row["primary_returned_at"] <= row["deadline_at"]
+            )
+        elif row.get("status") == "EXPIRED":
+            row["deadline_met"] = 0
+        row["deadline_start_source"] = (
+            "folder_inspection"
+            if row.get("state_reason") == "input_inspection_timeout"
+            else "first_csv_observed"
+            if "first_seen_at" in row
+            else ""
+        )
         date_field = next(
             (
                 f
                 for f in (
                     "ready_at",
+                    "first_seen_at",
                     "request_start_at",
                     "spi_sent_at",
                     "manifest_created_at",
@@ -978,7 +1018,21 @@ def summarize(rows: list[dict], **labels: Any) -> dict:
             for r in rows
         ),
         jobs_with_issues=sum(bool(r.get("data_issues")) for r in rows),
+        expired_jobs=sum(r.get("status") == "EXPIRED" for r in rows),
+        partial_publication_jobs=sum(
+            (r.get("published_csv_count") or 0) > 0 and not r.get("primary_returned_at")
+            for r in rows
+        ),
+        publication_unknown_jobs=sum(bool(r.get("publication_unknown")) for r in rows),
+        image_backup_incomplete_jobs=sum(
+            r.get("image_backup_status") in {"incomplete", "failed"} for r in rows
+        ),
     )
+    end_to_end_jobs = [r for r in rows if r.get("first_seen_at")]
+    met = sum(r.get("deadline_met") == 1 for r in end_to_end_jobs)
+    result["end_to_end_jobs"] = len(end_to_end_jobs)
+    result["end_to_end_met_jobs"] = met
+    result["end_to_end_met_pct"] = rate(met, len(end_to_end_jobs))
     image_known = [r for r in known if r.get("image_count") is not None]
     image_total = sum(r["image_count"] for r in image_known)
     result["image_weighted_known_jobs"] = len(image_known)
@@ -991,6 +1045,7 @@ def summarize(rows: list[dict], **labels: Any) -> dict:
         "inference_processing_s",
         "publish_s",
         "internal_total_s",
+        "end_to_end_s",
         "machine_wait_s",
     ):
         values = [r[field] for r in rows if r.get(field) is not None]
