@@ -81,6 +81,7 @@
     "database_path": "D:/path/to/local/state/pipeline.sqlite3",
     "staging_root": null,
     "result_root": "D:/path/to/local/pipeline-results",
+    "db_export_config_path": "config/db_export.json",
     "source_settle_seconds": 2.0,
     "ingest_poll_interval_seconds": 0.25,
     "inference_poll_interval_seconds": 0.05,

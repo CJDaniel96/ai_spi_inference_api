@@ -109,6 +109,8 @@ def test_model_services_launcher_forwards_multi_format_model_settings() -> None:
         "start_legacy_api.bat",
         "legacy_scan.bat",
         "convert_to_tensorrt.bat",
+        "db_export.bat",
+        "spi_statistics.bat",
     ],
 )
 def test_support_launchers_are_not_numbered(filename: str) -> None:
@@ -151,7 +153,7 @@ def test_python_resolver_avoids_fragile_batch_labels() -> None:
 
 
 def test_statistics_launcher_uses_config_defaults_and_forwards_arguments() -> None:
-    active_text = "\n".join(_active_lines(_launcher("05_spi_statistics.bat"))).lower()
+    active_text = "\n".join(_active_lines(_launcher("spi_statistics.bat"))).lower()
     assert 'call "%~dp0resolve_python.bat"' in active_text
     assert '"%python_exe%" -m app.tools.spi_statistics %*' in active_text
     assert "--input" not in active_text

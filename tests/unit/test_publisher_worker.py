@@ -10,6 +10,7 @@ import pytest
 
 from app.application.services.pipeline_inference_service import PipelineInferenceService
 from app.application.services.pipeline_publisher_service import PipelinePublisherService
+from app.application.workers.db_export_worker import DbExportWorker
 from app.application.workers.publisher_worker import PublisherWorker
 from app.core.config import AppConfig, DefectRuleConfig, PathConfig, PipelineConfig
 from app.domain.entities.pipeline_job import PipelineJobStatus
@@ -303,5 +304,31 @@ def test_background_backup_failure_keeps_primary_receipt_and_retry(publisher_cas
     assert job.lease_until > job.updated_at
     assert job.finalize_attempts == 1 and job.publish_attempts == 1
     assert primary.read_bytes() == before
+    worker.close()
+    assert lane.closed
+
+
+def test_pending_export_does_not_block_backup_or_next_primary(publisher_case, tmp_path):
+    config, repository, worker, prepare = publisher_case
+    lane = _ControlledBackupIO()
+    worker._db_export_worker = DbExportWorker(
+        config_path=tmp_path / "export.json",
+        backup_root=Path(config.paths.backup_output_root),
+        log_dir=tmp_path / "logs",
+        system_log_file="system.db_export",
+        io_runner=lane,
+    )
+    _processed, old_primary = prepare(_OLD_JOB)
+    receipt = old_primary.read_bytes()
+    assert worker.run_once()
+    assert repository.get(_OLD_JOB).status is PipelineJobStatus.DONE
+
+    next_job = "20261105120000"
+    _processed, next_primary = prepare(next_job)
+    assert next_primary.is_file()
+    assert worker.run_once()
+    assert repository.get(next_job).status is PipelineJobStatus.DONE
+    assert repository.get(_OLD_JOB).publish_attempts == 1
+    assert old_primary.read_bytes() == receipt
     worker.close()
     assert lane.closed

@@ -14,6 +14,7 @@ from app.application.services.pipeline_inference_service import (
 from app.application.services.pipeline_publisher_service import (
     PipelinePublisherService,
 )
+from app.application.workers.db_export_worker import DbExportWorker
 from app.core.config import AppConfig
 from app.core.logging import get_logger
 from app.domain.entities.pipeline_result import (
@@ -52,6 +53,7 @@ class PublisherWorker:
         worker_id: str,
         logger: logging.Logger | None = None,
         finalize_io: DeadlineIO | None = None,
+        db_export_worker: DbExportWorker | None = None,
     ) -> None:
         self._config = config
         self._repository = repository
@@ -61,8 +63,17 @@ class PublisherWorker:
         self._logger = logger or get_logger("pipeline.publisher_worker")
         self._finalize_io = finalize_io
         self._finalizing_job = None
+        self._db_export_worker = db_export_worker
 
     def run_once(self) -> bool:
+        """Prioritize machine returns, then advance the background export lane."""
+        try:
+            return self._run_primary_and_backup()
+        finally:
+            if self._db_export_worker is not None:
+                self._db_export_worker.run_once()
+
+    def _run_primary_and_backup(self) -> bool:
         """Publish one urgent job, otherwise finalize one post-primary backup."""
         self._repository.expire_due()
         self._publisher.maintain_io()
@@ -129,8 +140,12 @@ class PublisherWorker:
             self._poll_finalize()
             if self._finalizing_job is not None:
                 time.sleep(0.005)
+        if self._db_export_worker is not None:
+            self._db_export_worker.flush()
 
     def close(self) -> None:
+        if self._db_export_worker is not None:
+            self._db_export_worker.close()
         if self._finalize_io is not None:
             self._finalize_io.close()
         self._publisher.close()

@@ -82,13 +82,13 @@ statistics_input/
 **推薦：依 config 的原有資料位置統計。**
 
 ```bat
-05_spi_statistics.bat --config "config\ai_server.json" --output "D:\SPI統計結果" --machine-id SPI01
+spi_statistics.bat --config "config\ai_server.json" --output "D:\SPI統計結果" --machine-id SPI01
 ```
 
 也可以直接雙擊或執行：
 
 ```bat
-05_spi_statistics.bat
+spi_statistics.bat
 ```
 
 未指定 `--config` 且未指定 `--input` 時，依序使用環境變數 `AI_CONFIG_PATH`、專案的 `config/ai_server.json`。未指定 `--output` 時，輸出至專案的 `statistics_output`。執行結果會列出實際使用的 config、掃描來源及報表路徑。
@@ -102,13 +102,13 @@ python app/tools/spi_statistics.py --config ./config/ai_server.json --output ./s
 **離線資料夾仍可使用原本指令：**
 
 ```bat
-05_spi_statistics.bat --input "D:\SPI_Statistics\SPI01" --output "D:\SPI_Statistics\reports\SPI01" --machine-id SPI01 --image-threshold 60
+spi_statistics.bat --input "D:\SPI_Statistics\SPI01" --output "D:\SPI_Statistics\reports\SPI01" --machine-id SPI01 --image-threshold 60
 ```
 
 若離線資料夾同時提供當時產線設定：
 
 ```bat
-05_spi_statistics.bat --input "D:\SPI_Statistics\SPI01" --output "D:\SPI_Statistics\reports\SPI01" --machine-id SPI01 --config "D:\SPI_Statistics\SPI01\ai_server.json"
+spi_statistics.bat --input "D:\SPI_Statistics\SPI01" --output "D:\SPI_Statistics\reports\SPI01" --machine-id SPI01 --config "D:\SPI_Statistics\SPI01\ai_server.json"
 ```
 
 指定 `--input` 後，只掃描該資料夾；此時 `--config` 僅提供閾值與副檔名，不會追蹤其原本的產線位置。離線模式未指定 config 時也不會自動載入開發機設定。
@@ -130,13 +130,13 @@ python app/tools/spi_statistics.py --input ./statistics_input --output ./statist
 例如只統計 2026-10-29 的 08:00 至 20:00：
 
 ```bat
-05_spi_statistics.bat --config "config\ai_server.json" --output "D:\SPI統計結果\20261029_day" --machine-id SPI01 --start "2026-10-29 08:00:00" --end "2026-10-29 20:00:00"
+spi_statistics.bat --config "config\ai_server.json" --output "D:\SPI統計結果\20261029_day" --machine-id SPI01 --start "2026-10-29 08:00:00" --end "2026-10-29 20:00:00"
 ```
 
 整天統計用下一天的零時作為結束，避免漏掉最後一秒內的小數時間：
 
 ```bat
-05_spi_statistics.bat --config "config\ai_server.json" --start 2026-10-29 --end 2026-10-30
+spi_statistics.bat --config "config\ai_server.json" --start 2026-10-29 --end 2026-10-30
 ```
 
 區間採 **開始包含、結束不包含**：上例包含 `2026-10-29 00:00:00`，排除 `2026-10-30 00:00:00`。參數沒有時區時採 UTC+8，也接受 `2026-10-29T08:00:00+08:00` 或 UTC 的 `Z` 格式。開始必須早於結束。
@@ -156,7 +156,7 @@ python app/tools/spi_statistics.py --input ./statistics_input --output ./statist
 依時間戳工作資料夾選取一天的例子：
 
 ```bat
-05_spi_statistics.bat --config "config\ai_server.json" --start 2026-10-29 --end 2026-10-30 --time-field job_timestamp
+spi_statistics.bat --config "config\ai_server.json" --start 2026-10-29 --end 2026-10-30 --time-field job_timestamp
 ```
 
 `jobs.csv` 的 `selection_time_field`、`selection_at` 保留每筆實際使用的時間，日期分組也跟隨這個時間。`summary.csv`／`image_buckets.csv` 記錄篩選欄位、起訖時間，以及全來源可識別工作數、區間外數、缺少篩選時間數。所有耗時與比例的統計分母只包含篩選後工作。

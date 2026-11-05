@@ -145,9 +145,20 @@ async def _run_inference(config: AppConfig, *, worker_id: str, once: bool) -> No
 
 
 def _run_publisher(config: AppConfig, *, worker_id: str, once: bool) -> None:
+    from app.application.workers.db_export_worker import DbExportWorker
     from app.application.workers.publisher_worker import PublisherWorker
 
     result_root = _configured_path(config.pipeline.result_root)
+    db_export_worker = None
+    if config.pipeline.db_export_config_path is not None:
+        log_name = Path(config.logging.system_log_file)
+        db_export_worker = DbExportWorker(
+            config_path=_configured_path(config.pipeline.db_export_config_path),
+            backup_root=_configured_path(config.paths.backup_output_root),
+            log_dir=_configured_path(config.logging.log_dir),
+            system_log_file=f"{log_name.stem}.db_export{log_name.suffix}",
+            io_runner=DeadlineIO(),
+        )
     publisher = PipelinePublisherService(
         config=config,
         machine_output_root=_configured_path(config.paths.external_output_root),
@@ -163,6 +174,7 @@ def _run_publisher(config: AppConfig, *, worker_id: str, once: bool) -> None:
         ),
         worker_id=worker_id,
         finalize_io=DeadlineIO(),
+        db_export_worker=db_export_worker,
     )
     if once:
         try:

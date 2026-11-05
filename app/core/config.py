@@ -246,6 +246,9 @@ class PipelineConfig(BaseModel):
     # second full copy inside the configured production budget.
     staging_root: str | None = None
     result_root: str = "data/pipeline/results"
+    # Publisher scans completed result backups in a separate IO process.
+    # None retains the original publisher-only behavior for existing configs.
+    db_export_config_path: str | None = None
     source_settle_seconds: float = Field(default=2.0, ge=0)
     ingest_poll_interval_seconds: float = Field(default=0.25, gt=0)
     inference_poll_interval_seconds: float = Field(default=0.05, gt=0)
@@ -265,7 +268,7 @@ class PipelineConfig(BaseModel):
             raise ValueError("pipeline path must not be blank")
         return normalized
 
-    @field_validator("watch_root", "staging_root")
+    @field_validator("watch_root", "staging_root", "db_export_config_path")
     @classmethod
     def _optional_path_must_not_be_blank(cls, value: str | None) -> str | None:
         if value is None:

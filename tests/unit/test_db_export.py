@@ -338,3 +338,45 @@ def test_output_inside_input_is_excluded(export_case):
     settings["output_path"] = str(output)
     assert db_export.export_once(settings) == 2
     assert db_export.export_once(settings) == 0
+
+
+def test_concurrent_standalone_export_defers_and_recovers(export_case, tmp_path):
+    import subprocess
+    import sys
+
+    _, settings, source, _ = export_case
+    config_path = tmp_path / "export.json"
+    config_path.write_text(json.dumps(settings))
+    with db_export._export_lock(
+        db_export.project_path(settings["input_path"])
+    ) as acquired:
+        assert acquired
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "app.db_export",
+                "--once",
+                "--config",
+                str(config_path),
+            ],
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
+        assert result.returncode == 0, result.stderr
+        assert source.is_file()
+        assert not list(db_export.project_path(settings["output_path"]).rglob("*.csv"))
+    assert db_export.export_once(settings) == 2
+    assert not source.exists()
+
+
+@pytest.mark.parametrize("key", ["poll_seconds", "source_settle_seconds"])
+@pytest.mark.parametrize("value", ["nan", "inf"])
+def test_nonfinite_scan_timing_is_rejected(export_case, tmp_path, key, value):
+    _, settings, _, _ = export_case
+    settings[key] = value
+    config_path = tmp_path / "export.json"
+    config_path.write_text(json.dumps(settings))
+    with pytest.raises(ValueError, match="finite"):
+        db_export.load_settings(config_path)

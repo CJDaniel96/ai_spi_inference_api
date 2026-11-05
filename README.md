@@ -26,6 +26,9 @@ Given a timestamp folder containing SPI CSV(s) and pad images, the durable pipel
 8. Saves local result backups in a supervised background process after Primary,
    without blocking later returns. Oversized raw images use a separate background
    lane; missing source files are reported as incomplete.
+9. Exports completed processed backups to MiNiFi OK/NG CSVs in another supervised
+   background lane when `pipeline.db_export_config_path` is configured. The
+   shipped config enables this, so a standalone export process is unnecessary.
 
 The optional resident Detection → Segmentation service, single-read ingest, and
 background backup behavior are documented in
@@ -57,7 +60,7 @@ Production components:
 | --- | --- | --- |
 | Ingest worker | — | Validate today's timestamp folders and create local immutable input |
 | Inference worker | — | Earliest-deadline-first model execution and result manifest creation |
-| Publisher worker | — | Deadline takeover, Primary-first publication, then local result backup |
+| Publisher worker | — | Deadline takeover, Primary-first publication, local result backup, and background MiNiFi export |
 | SQLite WAL database | — | Durable job state, leases, attempts, timestamps, and crash recovery |
 | PatchCore anomaly | `8000` | Returns `anomaly_score` |
 | Paste detection | `8001` | Returns `paste_pixels` — **disabled by default** |
@@ -102,6 +105,11 @@ Publisher Worker
        ▼
 SQLite WAL state and stage-specific logs retain the evidence
 ```
+
+After result backups are complete, Publisher's independent export lane scans
+them for MiNiFi delivery. `DONE` records successful Primary and backup completion;
+MiNiFi export may still be pending. Export failures retain the processed backup
+for retry and do not change the job's Primary receipt or `DONE` state.
 
 Persisted states are `DISCOVERED`, `INGESTING`, `READY`, `INFERENCING`, `RESULT_READY`,
 `FALLBACK_READY`, `PUBLISHING`, `PRIMARY_RETURNED`, `DONE`, `FAILED`, and `EXPIRED`.
@@ -498,6 +506,7 @@ Pipeline settings:
 | `database_path` | Local file-backed SQLite WAL database; never place it on SMB/network storage |
 | `staging_root` | `null` reuses the preserved original copy; otherwise creates `{staging_root}/{job_id}` |
 | `result_root` | Local transient result-manifest and processed-artifact root |
+| `db_export_config_path` | Publisher's background MiNiFi export settings file; `null` disables export. Relative paths resolve under the project root |
 | `source_settle_seconds` | Stable snapshot window before full CSV/image validation |
 | `*_poll_interval_seconds` | Delay between worker polling iterations |
 | `publisher_lease_seconds` | Short Primary claim lease; must fit inside the publish reserve |
@@ -806,7 +815,7 @@ runs as an independent foreground process:
 | --- | --- | --- |
 | `01_pipeline_ingest.bat` | Persist first observation, validate/snapshot CSVs, route oversized jobs to all-23, archive normal input and background oversized images | Model inference or machine return |
 | `02_pipeline_inference.bat` | Claim durable ready jobs and write a deadline-fenced result manifest | Scan the SPI share or publish Primary CSVs |
-| `03_pipeline_publisher.bat` | Publish Primary CSVs first, apply all-23 deadline fallback when needed, then save returned/processed backups | Monitor new folders or invoke model inference |
+| `03_pipeline_publisher.bat` | Publish Primary CSVs first, apply all-23 deadline fallback, save result backups, and export completed processed backups to MiNiFi | Monitor new folders or invoke model inference |
 
 All three forward optional CLI arguments. For example,
 `01_pipeline_ingest.bat --once --date 2026-08-26` submits one historical-date
@@ -822,6 +831,13 @@ flag `SPI_ENABLE_LEGACY_SCANNER=1` and must be used only while Stage 01 is stopp
 The unnumbered compatibility and utility launchers are deliberately outside the
 three-stage production data flow.
 
+The standalone utilities use descriptive names without stage numbers:
+
+| Utility | Purpose |
+| --- | --- |
+| `db_export.bat` | Manually export processed CSVs to MiNiFi OK/NG files |
+| `spi_statistics.bat` | Generate SPI statistics reports from config or offline data |
+
 The numbers are not the production boot order. Start Stage 03 Publisher first,
 then required model services (`8000` and `8002`) and wait until both are healthy,
 then start Stage 02 Inference, and finally Stage 01 Ingest. Publisher must stay
@@ -829,7 +845,9 @@ available even when models are down because it owns the deadline fallback.
 
 Each stage writes a separate system log derived from `logging.system_log_file`, for
 example `system.ingest`, `system.inference`, and `system.publisher` under
-`logging.log_dir`. The legacy entry point `uv run python ai_server_fastapi.py`
+`logging.log_dir`. Background export details use `system.db_export`; export
+completion/failure summaries also appear in the Publisher log.
+The legacy entry point `uv run python ai_server_fastapi.py`
 remains available but is deprecated.
 
 ## Deployment / Operations
@@ -1053,7 +1071,7 @@ linted/formatted yet — see "Known Behavior".
 
 ## SPI statistics
 
-`05_spi_statistics.bat` (or `python -m app.tools.spi_statistics`) reads the result,
+`spi_statistics.bat` (or `python -m app.tools.spi_statistics`) reads the result,
 SQLite, backup/staging, and log locations from `--config` when `--input` is omitted.
 The default config is `AI_CONFIG_PATH` or `config/ai_server.json`; relative data
 paths resolve under the project root, matching the workers. Live SQLite is read
@@ -1066,7 +1084,7 @@ as multiple jobs. See [the Chinese usage guide](docs/spi_statistics.md) for requ
 evidence, metric definitions, and the optional SPI/OP event CSV.
 
 ```bat
-05_spi_statistics.bat --config "config\ai_server.json" --output "D:\SPI_Statistics\reports\SPI01" --machine-id SPI01
+spi_statistics.bat --config "config\ai_server.json" --output "D:\SPI_Statistics\reports\SPI01" --machine-id SPI01
 ```
 
 Add `--start "2026-10-29 08:00:00" --end "2026-10-29 20:00:00"` to limit the
@@ -1075,10 +1093,34 @@ is supplied). `--time-field` selects the timestamp; `auto` prefers source-ready
 time, while `job_timestamp` explicitly selects the timestamp encoded in the job ID.
 Unknown filter times are excluded and counted; omitted bounds retain all jobs.
 
-## Optional Stage 04: MiNiFi database CSV export (no DAT)
+## MiNiFi database CSV export in Stage 03 (no DAT)
 
-`04_pipeline_db_export.bat` scans the `input_path` configured in
-`config/db_export.json` recursively for `*_processed.csv`. No pipeline database,
+The shipped `pipeline.db_export_config_path="config/db_export.json"` integrates
+MiNiFi export into `03_pipeline_publisher.bat`. Start Stage 03 normally; a standalone
+exporter is unnecessary. Publisher uses a dedicated spawned IO process for
+export scans, separate from both Primary publication and local backup. A slow or
+failed export therefore leaves the main loop available for later machine returns.
+
+The integrated input root always comes from the active AI config's
+`paths.backup_output_root`, including when using `03_pipeline_publisher.bat
+--config ...`. Site metadata, output path, settle delay, and polling interval
+come from the export settings file. Each scan reloads that file, so corrected
+settings are picked up on retry. Scans have a 30-second supervision limit; a
+stalled lane is terminated and restarted on a later scan. This budget is separate
+from the six-second machine-return deadline. Pending files are rediscovered after
+a Publisher restart. `DONE` still means Primary and local backup have completed;
+it does not imply MiNiFi delivery or database ingestion has finished.
+
+`03_pipeline_publisher.bat --once` drains its own backup attempt and makes a final
+bounded export scan. The normal settle delay still applies, so freshly written
+backups may remain pending until the next invocation or resident scan.
+
+Set `pipeline.db_export_config_path=null` to disable integrated export. The
+`db_export.bat` utility is available for manual export or
+standalone folders; it scans the `input_path` in its settings recursively for
+`*_processed.csv`. Exporters sharing the same input root use a nonblocking OS
+file lock, so a second Publisher or standalone exporter defers while a scan is
+active. The lock releases automatically when the process exits. No pipeline database,
 export database, or DAT file is required. `--pipeline-config` and `state_path`
 are no longer used. Example configuration:
 
@@ -1095,25 +1137,25 @@ are no longer used. Example configuration:
 }
 ```
 
-Set `input_path` to a folder containing processed CSVs, or to the root of a tree
+For standalone use, set `input_path` to a folder containing processed CSVs, or to the root of a tree
 of date/job folders. It must already exist. Relative paths resolve under the
 project root. The default above is the existing pipeline backup root; change it
 for a different site layout. `output_path` is the folder MiNiFi watches.
 
-For the three-stage pipeline, use `paths.backup_output_root` as `input_path`.
+For standalone export of pipeline backups, use `paths.backup_output_root` as `input_path`.
 Stage 03 publishes its completed copies under
 `{backup_root}/{date}/{job_id}/ai_result/processed/`. Keep
 `pipeline.result_root` separate: its `{job_id}/{generation}/processed/` files
 are retained inference artifacts needed by Publisher and backup recovery.
-Stage 04 rejects that timestamp/UUID layout, including before a manifest is
+The exporter rejects that timestamp/UUID layout, including before a manifest is
 written, without exporting or moving its CSVs. Pointing an older exporter at
 the result root can move these files into the generation's `exported/` folder
 and cause Stage 03's `result_backup_missing_file` error.
 
 ```bat
-04_pipeline_db_export.bat
-04_pipeline_db_export.bat --once
-04_pipeline_db_export.bat --config config\db_export.json
+db_export.bat
+db_export.bat --once
+db_export.bat --config config\db_export.json
 ```
 
 For standalone files, a valid 14-digit timestamp (`YYYYMMDDHHmmss`) must appear
@@ -1152,7 +1194,7 @@ UUIDs and output filenames for the same file.
 The source token avoids collisions for multiple sources. Each CSV is written to
 a temporary `.tmp` file and atomically renamed. Configure MiNiFi to collect
 `*.csv` recursively and exclude temporary files. MiNiFi uploads and deletes
-those output files; Stage 04 does not perform the upload.
+those output files; the exporter only prepares them.
 
 After both output CSVs are published, the source moves into an `exported`
 archive. For a folder named `processed`, `exported` is its sibling; otherwise
@@ -1169,7 +1211,7 @@ output folder or an `exported` folder. Original SPI input and returned CSVs stay
 in place. A manifest retains its original processed path; locate an exported
 source by basename in the archive instead.
 
-Run one Stage 04 process per input tree. Archive collisions are errors; existing
+Run one standalone exporter per input tree. Archive collisions are errors; existing
 backups are not intentionally overwritten. Output or move failures retain the
 source for retry, so partial publication or a crash before the move can replay
 a CSV already consumed by MiNiFi. Use stable UUIDs for DB deduplication/upsert;
@@ -1182,4 +1224,4 @@ already-exported files into their corresponding `exported` folders before
 starting this version if replay is not desired.
 
 Failures are logged to the console and retried on the next scan; `--once` exits
-nonzero on failure. Statistics CSV generation is outside Stage 04's scope.
+nonzero on failure. Use `spi_statistics.bat` for statistics CSV generation.

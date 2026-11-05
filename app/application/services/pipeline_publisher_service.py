@@ -218,7 +218,7 @@ class PipelinePublisherService:
                     and PipelineResultManifest.read(manifest_backup) == manifest
                     and filecmp.cmp(processed_source, exported, shallow=False)
                 ):
-                    # Stage 04 already archived this exact backup. Recreating
+                    # The exporter already archived this exact backup. Recreating
                     # processed/ would enqueue a duplicate database export.
                     written.append(exported)
                     continue

@@ -29,6 +29,24 @@
 
 直接建立 PublisherWorker 且未傳入 `finalize_io` 的同步呼叫方式仍保留，供既有工具與單元測試使用。
 
+## 03 整合 MiNiFi 匯出
+
+`03_pipeline_publisher.bat` 現在可同時執行 `db_export.bat` 工具的 OK／NG CSV 匯出功能。
+目前設定已加入 `pipeline.db_export_config_path="config/db_export.json"`，啟動 03 即可。
+
+流程為「機台 Primary 回傳 → 本機結果備份 → 背景掃描已完成備份 → MiNiFi OK／NG CSV → 封存 processed CSV」。
+匯出使用獨立、可監督的 IO 子程序，不占用 Primary 或備份的 IO 通道。
+`DONE` 仍代表機台回傳與本機備份完成，匯出可以稍後完成；MiNiFi 上傳及資料庫寫入由下游負責。
+
+- 整合模式的輸入固定取目前 AI 設定的 `paths.backup_output_root`，避免自訂 AI 設定時讀到另一台的備份。
+- 廠別、線別、站點、輸出位置、掃描間隔及檔案穩定等待仍沿用 `config/db_export.json`。
+- 每次掃描重新載入匯出設定；正常預設每 30 秒掃描，單次掃描最多 30 秒，與機台六秒期限分開。
+- 輸出失敗時保留 processed CSV，後續掃描或重啟後再試；不重送機台 CSV。
+- 保留既有欄位、檔名、穩定 UUID、全 23 空缺陷名稱轉為 `AI_SKIP`、成功後移至 `exported` 的規則。
+- 同一輸入根目錄使用 OS 檔案鎖，避免多個 03 或手動執行 `db_export.bat` 同時匯出；程序結束時自動釋放。
+- `03 --once` 會在本次備份嘗試結束後再掃描一次；新檔若未滿穩定等待時間，留待下一次處理。
+- 設定 `pipeline.db_export_config_path=null` 可停用整合匯出。`db_export.bat` 供手動補處理及獨立資料夾使用，仍依它自己的 `input_path`。
+
 ## Detection → Segmentation
 
 新增 `python -m app.area_service`，預設位址 `127.0.0.1:8003`。

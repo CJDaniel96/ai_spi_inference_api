@@ -4,21 +4,26 @@ from __future__ import annotations
 
 import argparse
 import csv
+import errno
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import tempfile
 import time
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
+from app.core.logging import get_logger
 from app.domain.db_export_schema import CSV_RENAME_MAP, DB_COLUMNS
 
-LOG = logging.getLogger(__name__)
+LOG = get_logger("db_export")
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -32,10 +37,12 @@ def load_settings(path: Path) -> dict:
     for key in ("site", "factory", "line", "station_id", "input_path", "output_path"):
         if not isinstance(settings.get(key), str) or not settings[key].strip():
             raise ValueError(f"Configure {key} in {path}")
-    if float(settings.get("poll_seconds", 30)) <= 0:
-        raise ValueError("poll_seconds must be positive")
-    if float(settings.get("source_settle_seconds", 2)) < 0:
-        raise ValueError("source_settle_seconds must not be negative")
+    interval = float(settings.get("poll_seconds", 30))
+    settle = float(settings.get("source_settle_seconds", 2))
+    if not math.isfinite(interval) or interval <= 0:
+        raise ValueError("poll_seconds must be finite and positive")
+    if not math.isfinite(settle) or settle < 0:
+        raise ValueError("source_settle_seconds must be finite and non-negative")
     return settings
 
 
@@ -168,6 +175,49 @@ def pending_sources(input_root: Path, output_root: Path):
                 yield source
 
 
+@contextmanager
+def _export_lock(input_root: Path) -> Iterator[bool]:
+    """Serialize exporters sharing a backup root; OS exit releases the lock."""
+    # Keep the file in place: unlinking it could let another process lock a
+    # different inode while a scan is still using the previous one.
+    with (input_root / ".db_export.lock").open("a+b") as handle:
+        if os.name == "nt":
+            import msvcrt
+
+            if handle.tell() == 0:
+                handle.write(b"0")
+                handle.flush()
+            handle.seek(0)
+
+            def lock():
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+
+            def unlock():
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            def lock():
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+            def unlock():
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+        try:
+            lock()
+        except OSError as exc:
+            if exc.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
+                raise
+            LOG.info("Another exporter is scanning %s; deferred", input_root)
+            yield False
+        else:
+            try:
+                yield True
+            finally:
+                unlock()
+
+
 def export_once(settings: dict) -> int:
     input_root = project_path(settings["input_path"]).resolve()
     output_root = project_path(settings["output_path"]).resolve()
@@ -177,6 +227,13 @@ def export_once(settings: dict) -> int:
         raise ValueError("Input must not be inside the MiNiFi output directory")
     if "exported" in input_root.parts:
         raise ValueError("input_path must not point into an exported archive")
+    with _export_lock(input_root) as acquired:
+        if not acquired:
+            return 0
+        return _export_pending(settings, input_root, output_root)
+
+
+def _export_pending(settings: dict, input_root: Path, output_root: Path) -> int:
     count = 0
     failures = 0
     for source in pending_sources(input_root, output_root):

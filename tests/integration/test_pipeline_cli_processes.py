@@ -11,6 +11,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 import pandas as pd
+import pytest
 
 from app.domain.entities.pipeline_job import PipelineJobStatus
 from app.infrastructure.repositories.pipeline_job_repository import (
@@ -39,7 +40,10 @@ def _run_stage(config_path: Path, stage: str) -> subprocess.CompletedProcess[str
     )
 
 
-def test_pipeline_stages_handoff_across_separate_processes(tmp_path: Path) -> None:
+@pytest.mark.parametrize("export_destination_available", [True, False])
+def test_pipeline_stages_handoff_across_separate_processes(
+    tmp_path: Path, export_destination_available: bool
+) -> None:
     job_id = f"{date.today():%Y%m%d}120000"
     csv_name = f"{job_id}_BOARD01.csv"
     image_name = f"{job_id}_BOARD01_J1701_1_2.jpg"
@@ -61,6 +65,25 @@ def test_pipeline_stages_handoff_across_separate_processes(tmp_path: Path) -> No
 
     machine_return = tmp_path / "machine-return"
     machine_return.mkdir()
+    export_output = tmp_path / "upload"
+    if not export_destination_available:
+        export_output.write_text("destination temporarily unavailable")
+    export_config = tmp_path / "export.json"
+    export_config.write_text(
+        json.dumps(
+            dict(
+                site="SX",
+                factory="SX",
+                line="SPI",
+                station_id="SPI",
+                # Integration must use the active pipeline backup root instead.
+                input_path=str(tmp_path / "unused-input"),
+                output_path=str(export_output),
+                source_settle_seconds=0,
+                poll_seconds=0.1,
+            )
+        )
+    )
     config = {
         "paths": {
             "external_output_root": str(machine_return),
@@ -107,6 +130,7 @@ def test_pipeline_stages_handoff_across_separate_processes(tmp_path: Path) -> No
             "database_path": str(tmp_path / "state" / "pipeline.sqlite3"),
             "staging_root": None,
             "result_root": str(tmp_path / "artifacts"),
+            "db_export_config_path": str(export_config),
             "source_settle_seconds": 0,
             "publisher_lease_seconds": 1,
             "publisher_heartbeat_interval_seconds": 0.25,
@@ -138,3 +162,33 @@ def test_pipeline_stages_handoff_across_separate_processes(tmp_path: Path) -> No
         / "ai_result"
         / "manifest.json"
     ).exists()
+    processed = (
+        job.original_backup_folder
+        / "ai_result"
+        / "processed"
+        / f"{Path(csv_name).stem}_processed.csv"
+    )
+    primary = machine_return / csv_name
+    primary_mtime = primary.stat().st_mtime_ns
+    if not export_destination_available:
+        # Export failure preserves both DONE and the machine receipt.
+        assert processed.is_file()
+        export_output.unlink()
+        completed = _run_stage(config_path, "publisher")
+        assert completed.returncode == 0, completed.stderr
+        assert repository.get(job_id).status is PipelineJobStatus.DONE
+        assert primary.stat().st_mtime_ns == primary_mtime
+    ng = next(export_output.rglob("*_NG.csv"))
+    ok = next(export_output.rglob("*_OK.csv"))
+    assert pd.read_csv(ng)["is_pass"].tolist() == [23]
+    assert pd.read_csv(ng)["ai_defect_name"].tolist() == ["AI_SKIP"]
+    assert pd.read_csv(ok).empty
+    assert not processed.exists()
+    assert (processed.parent.parent / "exported" / processed.name).is_file()
+    # MiNiFi consumption must not trigger export or machine return again.
+    ng.unlink()
+    ok.unlink()
+    completed = _run_stage(config_path, "publisher")
+    assert completed.returncode == 0, completed.stderr
+    assert not list(export_output.rglob("*.csv"))
+    assert primary.stat().st_mtime_ns == primary_mtime

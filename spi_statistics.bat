@@ -1,5 +1,6 @@
 @echo off
 setlocal enableextensions
+REM SPI statistics utility; separate from the three-stage production pipeline.
 cd /d "%~dp0"
 call "%~dp0resolve_python.bat"
 if errorlevel 1 exit /b 1
