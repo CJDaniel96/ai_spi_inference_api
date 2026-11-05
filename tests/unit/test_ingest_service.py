@@ -10,13 +10,13 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from app.application.services.ingest_service import (
+from app.application.ingest.io import backup_images
+from app.application.ingest.service import (
     IngestCollisionError,
     IngestService,
     IngestValidationError,
     SourceChangedError,
 )
-from app.infrastructure.input.pipeline_io import backup_images
 
 _JOB_ID = "20260826112233"
 _READY_AT = datetime(2026, 8, 26, 3, 22, 4, tzinfo=UTC)
@@ -248,7 +248,7 @@ def test_detects_source_change_while_copying_and_publishes_no_target(
         return copied
 
     monkeypatch.setattr(
-        "app.application.services.ingest_service.shutil.copytree", copy_then_mutate
+        "app.application.ingest.service.shutil.copytree", copy_then_mutate
     )
 
     with pytest.raises(SourceChangedError, match="changed during copy"):

@@ -11,14 +11,6 @@ import time
 from datetime import date
 from pathlib import Path, PureWindowsPath
 
-import httpx
-
-from app.application.services.pipeline_inference_service import (
-    PipelineInferenceService,
-)
-from app.application.services.pipeline_publisher_service import (
-    PipelinePublisherService,
-)
 from app.core.config import AppConfig, load_config, resolve_under_project_root
 from app.core.logging import get_logger, setup_logging
 from app.infrastructure.deadline_io import DeadlineIO
@@ -88,7 +80,7 @@ def _run_ingest(
     target_date: date | None = None,
 ) -> None:
     # Lazy import keeps the inference/publisher processes independent from cv2.
-    from app.application.workers.ingest_worker import IngestWorker
+    from app.application.ingest.worker import IngestWorker
 
     watch_root_value = config.pipeline.watch_root
     if not watch_root_value:
@@ -124,7 +116,10 @@ def _run_ingest(
 
 
 async def _run_inference(config: AppConfig, *, worker_id: str, once: bool) -> None:
-    from app.application.workers.inference_worker import InferenceWorker
+    import httpx
+
+    from app.application.inference.service import PipelineInferenceService
+    from app.application.inference.worker import InferenceWorker
 
     async with httpx.AsyncClient() as http_client:
         service = PipelineInferenceService(
@@ -145,8 +140,10 @@ async def _run_inference(config: AppConfig, *, worker_id: str, once: bool) -> No
 
 
 def _run_publisher(config: AppConfig, *, worker_id: str, once: bool) -> None:
-    from app.application.workers.db_export_worker import DbExportWorker
-    from app.application.workers.publisher_worker import PublisherWorker
+    from app.application.publisher.db_export_worker import DbExportWorker
+    from app.application.publisher.service import PipelinePublisherService
+    from app.application.publisher.worker import PublisherWorker
+    from app.application.shared.fallback_result import FallbackResultBuilder
 
     result_root = _configured_path(config.pipeline.result_root)
     db_export_worker = None
@@ -168,7 +165,7 @@ def _run_publisher(config: AppConfig, *, worker_id: str, once: bool) -> None:
         config=config,
         repository=_repository(config),
         publisher=publisher,
-        fallback_builder=PipelineInferenceService(
+        fallback_builder=FallbackResultBuilder(
             config=config,
             result_root=result_root,
         ),

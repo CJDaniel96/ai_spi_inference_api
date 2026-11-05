@@ -1,4 +1,4 @@
-"""Independent Stage 3 worker: deadline takeover, primary, then local backup."""
+"""Stage 3: deadline takeover, Primary, background backup and MiNiFi export."""
 
 from __future__ import annotations
 
@@ -8,13 +8,15 @@ from datetime import UTC, datetime
 from pathlib import Path
 from threading import Event, Thread
 
-from app.application.services.pipeline_inference_service import (
-    PipelineInferenceService,
+from app.application.publisher.backup import (
+    finalize_result_backup,
+    preserve_csv_snapshot,
 )
-from app.application.services.pipeline_publisher_service import (
+from app.application.publisher.db_export_worker import DbExportWorker
+from app.application.publisher.service import (
     PipelinePublisherService,
 )
-from app.application.workers.db_export_worker import DbExportWorker
+from app.application.shared.fallback_result import FallbackResultBuilder
 from app.core.config import AppConfig
 from app.core.logging import get_logger
 from app.domain.entities.pipeline_result import (
@@ -22,10 +24,6 @@ from app.domain.entities.pipeline_result import (
     PipelineResultManifest,
 )
 from app.infrastructure.deadline_io import DeadlineExceeded, DeadlineIO
-from app.infrastructure.output.pipeline_backup import (
-    finalize_result_backup,
-    preserve_csv_snapshot,
-)
 from app.infrastructure.output.sinic_csv_output import PublishCompletionUnknown
 from app.infrastructure.repositories.pipeline_job_repository import (
     PipelineJobRepository,
@@ -49,7 +47,7 @@ class PublisherWorker:
         config: AppConfig,
         repository: PipelineJobRepository,
         publisher: PipelinePublisherService,
-        fallback_builder: PipelineInferenceService,
+        fallback_builder: FallbackResultBuilder,
         worker_id: str,
         logger: logging.Logger | None = None,
         finalize_io: DeadlineIO | None = None,

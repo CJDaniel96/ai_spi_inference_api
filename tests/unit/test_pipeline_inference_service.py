@@ -9,10 +9,10 @@ import httpx
 import pandas as pd
 import pytest
 
-from app.application.services.pipeline_inference_service import (
+from app.application.inference.service import (
     PipelineInferenceService,
 )
-from app.application.services.pipeline_publisher_service import PipelinePublisherService
+from app.application.publisher.service import PipelinePublisherService
 from app.core.config import (
     AppConfig,
     DefectRuleConfig,

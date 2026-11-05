@@ -108,10 +108,10 @@ Publisher 對快路徑要求「CSV 快照及結果已持久化」，不再要求
 | 範圍 | 主要檔案 |
 |---|---|
 | 設定與驗證 | `app/core/config.py`、`config/ai_server.json`、`config/ai_server.example.json` |
-| CSV readiness 與觀測 | `app/infrastructure/input/sinic_folder_input.py`、`app/application/services/ingest_service.py`、`app/application/workers/ingest_worker.py` |
+| CSV readiness 與觀測 | `app/infrastructure/input/sinic_folder_input.py`、`app/application/ingest/service.py`、`app/application/ingest/worker.py` |
 | 狀態、遷移與期限 | `app/domain/entities/pipeline_job.py`、`app/infrastructure/repositories/pipeline_job_repository.py` |
-| 超量結果與晚到防護 | `app/application/services/pipeline_inference_service.py`、`app/application/workers/inference_worker.py` |
-| 發布、重試與 I/O 監督 | `app/application/services/pipeline_publisher_service.py`、`app/application/workers/publisher_worker.py`、`app/infrastructure/output/sinic_csv_output.py`、新增 I/O 監督模組 |
+| 超量結果與晚到防護 | `app/application/shared/fallback_result.py`、`app/application/inference/service.py`、`app/application/inference/worker.py` |
+| 發布、重試與 I/O 監督 | `app/application/publisher/service.py`、`app/application/publisher/worker.py`、`app/infrastructure/output/sinic_csv_output.py`、新增 I/O 監督模組 |
 | Worker 啟動與資源回收 | `app/pipeline.py` |
 | 報表、文件及回歸測試 | `app/tools/spi_statistics.py`、`docs/spi_statistics.md`、`README.md`、相關 `tests/unit/` 與 `tests/integration/` |
 

@@ -1,1 +1,1 @@
-"""Application layer: use cases that orchestrate domain and infrastructure."""
+"""Stage-owned pipeline orchestration, shared result builders and API use cases."""

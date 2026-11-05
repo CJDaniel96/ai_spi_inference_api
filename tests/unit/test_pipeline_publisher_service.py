@@ -5,7 +5,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from app.application.services.pipeline_publisher_service import (
+from app.application.publisher.service import (
     PipelinePublisherService,
 )
 from app.core.config import (

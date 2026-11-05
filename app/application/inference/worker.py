@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from app.application.services.pipeline_inference_service import (
+from app.application.inference.service import (
     PipelineInferenceService,
 )
 from app.core.config import AppConfig

@@ -11,17 +11,18 @@ from pathlib import Path
 
 import pytest
 
-from app.application.services.ingest_service import IngestService
-from app.application.services.pipeline_inference_service import PipelineInferenceService
-from app.application.services.pipeline_publisher_service import PipelinePublisherService
-from app.application.workers.inference_worker import InferenceWorker
-from app.application.workers.ingest_worker import IngestWorker
-from app.application.workers.publisher_worker import PublisherWorker
+from app.application.inference.service import PipelineInferenceService
+from app.application.inference.worker import InferenceWorker
+from app.application.ingest.io import backup_images
+from app.application.ingest.service import IngestService
+from app.application.ingest.worker import IngestWorker
+from app.application.publisher.service import PipelinePublisherService
+from app.application.publisher.worker import PublisherWorker
+from app.application.shared.fallback_result import FallbackResultBuilder
 from app.core.config import AppConfig
 from app.domain.entities.inference_result import ModelInferenceResult
 from app.domain.entities.pipeline_job import PipelineJobStatus
 from app.infrastructure.deadline_io import DeadlineExceeded, DeadlineIO
-from app.infrastructure.input.pipeline_io import backup_images
 from app.infrastructure.output.sinic_csv_output import SinicCsvOutput
 from app.infrastructure.repositories.pipeline_job_repository import (
     PipelineJobRepository,
@@ -87,7 +88,7 @@ def case(tmp_path):
         config=config,
         repository=repository,
         publisher=service,
-        fallback_builder=PipelineInferenceService(
+        fallback_builder=FallbackResultBuilder(
             config=config, result_root=Path(config.pipeline.result_root)
         ),
         worker_id="publisher",

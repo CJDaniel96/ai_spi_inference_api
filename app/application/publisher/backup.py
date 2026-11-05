@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import shutil
 
-from app.application.services.pipeline_publisher_service import PipelinePublisherService
+from app.application.publisher.service import PipelinePublisherService
 
 
 def preserve_csv_snapshot(job) -> None:

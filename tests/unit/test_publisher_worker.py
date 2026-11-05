@@ -8,10 +8,10 @@ from pathlib import Path
 
 import pytest
 
-from app.application.services.pipeline_inference_service import PipelineInferenceService
-from app.application.services.pipeline_publisher_service import PipelinePublisherService
-from app.application.workers.db_export_worker import DbExportWorker
-from app.application.workers.publisher_worker import PublisherWorker
+from app.application.publisher.db_export_worker import DbExportWorker
+from app.application.publisher.service import PipelinePublisherService
+from app.application.publisher.worker import PublisherWorker
+from app.application.shared.fallback_result import FallbackResultBuilder
 from app.core.config import AppConfig, DefectRuleConfig, PathConfig, PipelineConfig
 from app.domain.entities.pipeline_job import PipelineJobStatus
 from app.domain.entities.pipeline_result import (
@@ -49,7 +49,7 @@ def publisher_case(tmp_path):
         config=config,
         repository=repository,
         publisher=PipelinePublisherService(config=config),
-        fallback_builder=PipelineInferenceService(
+        fallback_builder=FallbackResultBuilder(
             config=config, result_root=tmp_path / "results"
         ),
         worker_id="publisher",

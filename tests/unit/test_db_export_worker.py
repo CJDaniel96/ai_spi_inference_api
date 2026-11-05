@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from app.application.workers.db_export_worker import DbExportWorker
+from app.application.publisher.db_export_worker import DbExportWorker
 from app.infrastructure.deadline_io import DeadlineExceeded
 
 

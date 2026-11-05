@@ -9,13 +9,13 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
-from app.application.services.ingest_service import IngestService, SourceChangedError
-from app.application.services.pipeline_inference_service import PipelineInferenceService
+from app.application.ingest import io as ingest_io
+from app.application.ingest.service import IngestService, SourceChangedError
+from app.application.shared.fallback_result import FallbackResultBuilder
 from app.core.config import AppConfig, resolve_under_project_root
 from app.core.logging import get_logger
 from app.domain.entities.pipeline_job import PipelineJobStatus
 from app.infrastructure.deadline_io import DeadlineExceeded, DeadlineIO
-from app.infrastructure.input import pipeline_io
 from app.infrastructure.input.sinic_folder_input import (
     FileSettleTracker,
     SinicFolderInput,
@@ -69,7 +69,7 @@ class IngestWorker:
         self._background_legacy = False
         self._pending_validations = {}
         self._result_root = resolve_under_project_root(config.pipeline.result_root)
-        self._fallback = PipelineInferenceService(
+        self._fallback = FallbackResultBuilder(
             config=config,
             result_root=self._result_root,
             clock=lambda: self._clock().timestamp(),
@@ -114,7 +114,7 @@ class IngestWorker:
                     )
                 else:
                     validated = self._call(
-                        pipeline_io.validate_source,
+                        ingest_io.validate_source,
                         self._config,
                         claimed.source_folder,
                         claimed.csv_snapshot_folder,
@@ -141,7 +141,7 @@ class IngestWorker:
                     )
             else:
                 result = self._call(
-                    pipeline_io.archive_source,
+                    ingest_io.archive_source,
                     self._config,
                     validated,
                     self._backup_root,
@@ -217,7 +217,7 @@ class IngestWorker:
             folders = self._adapter.list_candidates(self._watch_root, target_date)
         else:
             folders = self._call(
-                pipeline_io.candidates,
+                ingest_io.candidates,
                 extensions,
                 self._watch_root,
                 target_date,
@@ -242,7 +242,7 @@ class IngestWorker:
             )
             try:
                 files, csv_snapshot, full_snapshot = self._call(
-                    pipeline_io.inspect_source,
+                    ingest_io.inspect_source,
                     extensions,
                     folder,
                     threshold,
@@ -281,7 +281,7 @@ class IngestWorker:
                     self._result_root / "csv_inputs" / uuid.uuid4().hex / folder.name
                 )
                 self._call(
-                    pipeline_io.snapshot_csv,
+                    ingest_io.snapshot_csv,
                     self._config,
                     folder,
                     csv_target,
@@ -310,7 +310,7 @@ class IngestWorker:
                         )
                         if self._io is None
                         else self._call(
-                            pipeline_io.validate_source,
+                            ingest_io.validate_source,
                             self._config,
                             folder,
                             csv_target,
@@ -379,7 +379,7 @@ class IngestWorker:
             self._background_legacy = job.first_seen_at is None
             if self._background_legacy:
                 self._background.submit(
-                    pipeline_io.recover_legacy_archive,
+                    ingest_io.recover_legacy_archive,
                     self._config,
                     job,
                     self._backup_root,
@@ -389,7 +389,7 @@ class IngestWorker:
                 )
             else:
                 self._background.submit(
-                    pipeline_io.backup_images,
+                    ingest_io.backup_images,
                     job.source_folder,
                     job.original_backup_folder / "raw",
                     job.csv_snapshot_folder,

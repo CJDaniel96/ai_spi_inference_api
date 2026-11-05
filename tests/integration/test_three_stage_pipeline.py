@@ -14,16 +14,17 @@ import pandas as pd
 import pytest
 
 from app import db_export
-from app.application.services.ingest_service import IngestService
-from app.application.services.pipeline_inference_service import (
+from app.application.inference.service import (
     PipelineInferenceService,
 )
-from app.application.services.pipeline_publisher_service import (
+from app.application.inference.worker import InferenceWorker
+from app.application.ingest.service import IngestService
+from app.application.ingest.worker import IngestWorker
+from app.application.publisher.service import (
     PipelinePublisherService,
 )
-from app.application.workers.inference_worker import InferenceWorker
-from app.application.workers.ingest_worker import IngestWorker
-from app.application.workers.publisher_worker import PublisherWorker
+from app.application.publisher.worker import PublisherWorker
+from app.application.shared.fallback_result import FallbackResultBuilder
 from app.core.config import (
     AppConfig,
     DefectRuleConfig,
@@ -141,11 +142,10 @@ async def _good_runner(config, job_folder, **kwargs):
     ]
 
 
-def _publisher_worker(config, repository, *, runner=_good_runner) -> PublisherWorker:
-    fallback_builder = PipelineInferenceService(
+def _publisher_worker(config, repository) -> PublisherWorker:
+    fallback_builder = FallbackResultBuilder(
         config=config,
         result_root=Path(config.pipeline.result_root),
-        model_client_runner=runner,
     )
     return PublisherWorker(
         config=config,

@@ -36,14 +36,16 @@ background backup behavior are documented in
 
 ## Architecture
 
-Layered application with independently runnable workers under `app/`:
+Stage-owned application packages with shared domain and infrastructure under `app/`:
 
 ```
 app/
   api/                     # FastAPI compatibility routes and schemas
   application/
-    services/              # ingest, inference-artifact, and publisher services
-    workers/               # three independent durable worker loops
+    ingest/                # 01: worker, validation/archive service, supervised IO
+    inference/             # 02: worker and model-inference service
+    publisher/             # 03: worker, publication, backup, and MiNiFi export
+    shared/                # all-23 fallback builder and common result artifacts
     use_cases/             # legacy synchronous ProcessJobUseCase
   domain/                  # jobs, pipeline states/results, classification logic
   infrastructure/
@@ -53,6 +55,13 @@ app/
   core/                    # Pydantic config, logging, and error hierarchy
   pipeline.py              # `python -m app.pipeline <stage>` CLI
 ```
+
+Each stage keeps its worker, service, and stage-specific IO operations together.
+`FallbackResultBuilder` is shared by all three stages, so ingest bypass and
+Publisher deadline takeover do not import the inference service or model clients.
+`ResultArtifactWriter` keeps normal and fallback processed CSVs in the same
+manifest-compatible layout. Stage packages are loaded lazily by the CLI.
+See [三階段程式結構](docs/pipeline_stage_structure.md) for ownership and deployment.
 
 Production components:
 

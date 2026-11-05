@@ -1,4 +1,4 @@
-"""Picklable share operations for the pipeline's supervised IO lanes."""
+"""Picklable share operations for ingest's supervised IO lanes."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import shutil
 from dataclasses import replace
 from pathlib import Path
 
-from app.application.services.ingest_service import IngestService, SourceChangedError
+from app.application.ingest.service import IngestService, SourceChangedError
 from app.infrastructure.input.sinic_folder_input import (
     MachineJobFiles,
     SinicFolderInput,
