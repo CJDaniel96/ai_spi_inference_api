@@ -14,7 +14,9 @@ app/
       io.py                 # 可供 spawned 子程序執行的接收與原始影像備份函式
     inference/
       worker.py             # 02：依期限認領工作、保存結果狀態、排除晚到結果
-      service.py            # 模型呼叫、完整性檢查、合併與規則判定
+      contracts.py          # 共用的結果準備介面
+      obb_service.py        # SX：常駐 OBB、CSV 逐列門檻判定與結果保存
+      service.py            # Legacy HTTP：模型呼叫、合併與舊規則判定
     publisher/
       worker.py             # 03：截止接管、Primary 回傳、備份與匯出通道排程
       service.py            # 機台 CSV 發布及本機結果備份
@@ -26,10 +28,12 @@ app/
     use_cases/              # 相容 API 的同步處理流程
   domain/                   # 工作狀態、manifest、缺陷規則、衍生數值
   infrastructure/           # SQLite、模型 HTTP client、通用 I/O 與機台 CSV adapter
+    inference/              # OBB 後端與常駐模型子程序；GPU 函式庫只在子程序載入
   core/                     # 設定、日誌、例外
 ```
 
 每個階段的 `worker.py` 處理工作認領、租約、重試與狀態轉換，`service.py` 執行該階段的資料處理。
+02 依 `inference.mode` 選擇 native `obb_service.py` 或 legacy `service.py`，同用結果準備介面。
 接收與備份的專用子程序函式放回所屬階段，讓共用 infrastructure 元件只處理通用機制。
 
 三個階段都使用 `shared.fallback_result.FallbackResultBuilder`：

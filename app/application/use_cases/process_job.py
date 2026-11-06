@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
 from app.api.schemas.requests import ProcessJobRequest
 from app.core.config import AppConfig, get_config, resolve_under_project_root
-from app.core.errors import CsvSchemaError
+from app.core.errors import ConfigError, CsvSchemaError
 from app.core.logging import get_logger
 from app.domain.entities.defect import FAIL_CODE, DefectLabel
 from app.domain.entities.inference_result import ModelInferenceResult
@@ -85,6 +85,10 @@ class ProcessJobUseCase:
                 model calls; when omitted the runner creates one per request.
         """
         self._config = config or get_config()
+        if self._config.inference.mode != "legacy_http":
+            raise ConfigError(
+                "Native OBB jobs must use the Stage 02 pipeline, not /process"
+            )
         self._logger = logger or get_logger("process_job")
         self._run_model_clients = model_client_runner or run_enabled_model_clients
         self._http_client = http_client

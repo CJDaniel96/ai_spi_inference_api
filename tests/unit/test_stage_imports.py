@@ -37,6 +37,10 @@ import pytest
             ),
         ),
         (
+            "app.infrastructure.inference.resident_process",
+            ("ultralytics", "torch", "cv2", "onnxruntime"),
+        ),
+        (
             "app.application.shared.fallback_result",
             (
                 "cv2",

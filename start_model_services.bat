@@ -8,6 +8,14 @@ cd /d "%~dp0"
 call "%~dp0resolve_python.bat"
 if errorlevel 1 exit /b 1
 if not defined AI_CONFIG_PATH set "AI_CONFIG_PATH=%~dp0config\ai_server.json"
+REM Native SX OBB runs inside Stage 02's resident subprocess, without HTTP.
+"%PYTHON_EXE%" -c "from app.core.config import load_config; import sys; sys.exit(0 if load_config().inference.mode == 'yolo_obb' else 2)"
+if errorlevel 3 exit /b 1
+if not errorlevel 1 (
+    echo Native OBB mode: start 02_pipeline_inference.bat to load the model.
+    exit /b 0
+)
+if not errorlevel 2 exit /b 1
 if not defined SPI_MODEL_DEVICE set "SPI_MODEL_DEVICE=cuda:0"
 if not defined PATCHCORE_MODEL_PATH set "PATCHCORE_MODEL_PATH=models\patchcore\model_fp16.engine"
 if not defined DISTANCE_CENTER_MODEL_PATH set "DISTANCE_CENTER_MODEL_PATH=models\distance\center.engine"

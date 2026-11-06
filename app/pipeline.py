@@ -116,10 +116,43 @@ def _run_ingest(
 
 
 async def _run_inference(config: AppConfig, *, worker_id: str, once: bool) -> None:
+    from app.application.inference.worker import InferenceWorker
+
+    async def run(service, prepare_runtime=None):
+        worker = InferenceWorker(
+            config=config,
+            repository=_repository(config),
+            service=service,
+            worker_id=worker_id,
+            prepare_runtime=prepare_runtime,
+        )
+        if once:
+            await worker.run_once()
+        else:
+            await worker.run_forever()
+
+    if config.inference.mode == "yolo_obb":
+        from app.application.inference.obb_service import ObbInspectionService
+        from app.infrastructure.inference.resident_process import ResidentObbRuntime
+
+        settings = config.inference.obb.model_copy(
+            update={
+                "model_path": str(_configured_path(config.inference.obb.model_path))
+            }
+        )
+        runtime = ResidentObbRuntime(settings)
+        service = ObbInspectionService(
+            config=config,
+            result_root=_configured_path(config.pipeline.result_root),
+            runtime=runtime,
+        )
+        async with runtime:
+            await run(service, runtime.start)
+        return
+
     import httpx
 
     from app.application.inference.service import PipelineInferenceService
-    from app.application.inference.worker import InferenceWorker
 
     async with httpx.AsyncClient() as http_client:
         service = PipelineInferenceService(
@@ -127,16 +160,7 @@ async def _run_inference(config: AppConfig, *, worker_id: str, once: bool) -> No
             result_root=_configured_path(config.pipeline.result_root),
             http_client=http_client,
         )
-        worker = InferenceWorker(
-            config=config,
-            repository=_repository(config),
-            service=service,
-            worker_id=worker_id,
-        )
-        if once:
-            await worker.run_once()
-        else:
-            await worker.run_forever()
+        await run(service)
 
 
 def _run_publisher(config: AppConfig, *, worker_id: str, once: bool) -> None:

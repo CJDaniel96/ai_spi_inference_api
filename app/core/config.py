@@ -30,6 +30,7 @@ from pydantic import (
 )
 
 from app.core.errors import ConfigError
+from app.core.inspection_config import InferenceConfig
 
 _DEFAULT_CONFIG_RELPATH = "config/ai_server.json"
 _CONFIG_PATH_ENV = "AI_CONFIG_PATH"
@@ -310,6 +311,7 @@ class AppConfig(BaseModel):
     paths: PathConfig
     processing: ProcessingConfig = Field(default_factory=ProcessingConfig)
     model_clients: list[ModelClientConfig] = Field(default_factory=list)
+    inference: InferenceConfig = Field(default_factory=InferenceConfig)
     defect_rules: DefectRuleConfig
     output: OutputConfig = Field(default_factory=OutputConfig)
     reliability: ReliabilityConfig = Field(default_factory=ReliabilityConfig)
@@ -357,7 +359,11 @@ class AppConfig(BaseModel):
                 "pipeline.publisher_lease_seconds must be less than "
                 "reliability.primary_publish_reserve_seconds"
             )
-        if self.pipeline.enabled and not self.required_enabled_model_clients():
+        if (
+            self.pipeline.enabled
+            and self.inference.mode == "legacy_http"
+            and not self.required_enabled_model_clients()
+        ):
             raise ValueError(
                 "an enabled pipeline requires at least one enabled, required model"
             )

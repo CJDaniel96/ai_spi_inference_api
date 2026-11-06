@@ -16,7 +16,9 @@ from app.infrastructure.model_clients.runner import (
     run_enabled_model_clients_until,
 )
 
-_REAL_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config" / "ai_server.json"
+_REAL_CONFIG_PATH = (
+    Path(__file__).resolve().parents[2] / "config" / "ai_server.legacy.example.json"
+)
 
 
 class _FakeClient:

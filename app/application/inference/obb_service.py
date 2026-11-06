@@ -1,0 +1,208 @@
+"""Native OBB appearance followed by measurements against each CSV row's limits."""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+import math
+import time
+from dataclasses import replace
+from pathlib import Path
+
+from app.application.shared.fallback_result import FallbackResultBuilder
+from app.application.shared.result_artifacts import ResultArtifactWriter
+from app.core.config import AppConfig
+from app.core.errors import CsvSchemaError
+from app.domain.entities.obb_result import ObbBatchResult, ObbDetection
+from app.domain.entities.pipeline_result import PipelineOutcome, PipelineResultManifest
+from app.domain.services.component_judge import RULE_ORDER, ComponentJudge
+from app.domain.services.csv_merger import CsvMerger
+from app.infrastructure.repositories.csv_repository import CsvRepository
+from app.infrastructure.repositories.file_system_job_repository import (
+    FileSystemJobRepository,
+)
+
+
+class ObbInspectionService:
+    def __init__(
+        self,
+        *,
+        config: AppConfig,
+        result_root: Path,
+        runtime,
+        clock=time.time,
+    ) -> None:
+        self._config = config
+        self._runtime = runtime
+        self._clock = clock
+        self._site_id = config.inference.site_id
+        self._thresholds = dict(config.inference.obb.class_thresholds)
+        self._judge = ComponentJudge(self._thresholds)
+        self._policy = self._judge.policy_definition()
+        definition = {
+            "site_id": self._site_id,
+            "policy": self._policy,
+            "rule_order": list(RULE_ORDER),
+            "class_thresholds": self._thresholds,
+            "model_conf": config.inference.obb.conf,
+        }
+        self._version = hashlib.sha256(
+            json.dumps(definition, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        self._jobs = FileSystemJobRepository(config.processing.image_extensions)
+        self._csv = CsvRepository()
+        self._merger = CsvMerger()
+        self._artifacts = ResultArtifactWriter(result_root)
+        self._fallback = FallbackResultBuilder(
+            config=config, result_root=result_root, clock=clock
+        )
+
+    def _metadata(self, result: ObbBatchResult | None = None) -> dict:
+        return {
+            "site_id": self._site_id,
+            "rule_version": self._version,
+            "policy": self._policy,
+            "limit_source": "csv",
+            "rule_order": list(RULE_ORDER),
+            "class_thresholds": self._thresholds,
+            "model_conf": self._config.inference.obb.conf,
+            "model_version": result.model_version if result else None,
+            "device": result.device if result else self._config.inference.obb.device,
+        }
+
+    def _inputs(self, folder: Path):
+        job = self._jobs.load(str(folder))
+        frames = []
+        images = {}
+        for source in job.csv_files:
+            frame = self._merger.add_image_name_column(
+                self._csv.read_for_output(source),
+                source_column=self._config.processing.image_name_source_column,
+                template=self._config.processing.image_name_template,
+                csv_stem=source.stem,
+            )
+            if frame.empty:
+                raise CsvSchemaError(f"CSV has no data rows: {source.name}")
+            for key in frame["img_name"]:
+                image = folder / key
+                if (
+                    not key
+                    or key in images
+                    or Path(key).name != key
+                    or "\\" in key
+                    or image.resolve().parent != folder.resolve()
+                    or not image.is_file()
+                ):
+                    raise CsvSchemaError(
+                        f"Missing, duplicate or invalid image key: {key!r}"
+                    )
+                images[key] = str(image)
+            frames.append((source, frame))
+        return job, frames, images
+
+    @staticmethod
+    def _validate_result(result: ObbBatchResult, images: dict) -> None:
+        if set(result.results) != set(images):
+            raise ValueError(
+                "Required OBB results do not cover exactly the expected images"
+            )
+        if not math.isfinite(result.inference_ms) or result.inference_ms < 0:
+            raise ValueError("Invalid OBB inference time")
+        for boxes in result.results.values():
+            if not isinstance(boxes, tuple) or not all(
+                isinstance(b, ObbDetection) for b in boxes
+            ):
+                raise ValueError("Invalid OBB detection result")
+
+    async def prepare(
+        self, *, job_id: str, staged_folder: Path, deadline_at: float
+    ) -> tuple[PipelineResultManifest, Path]:
+        cutoff = deadline_at - self._config.reliability.primary_publish_reserve_seconds
+        try:
+            job, frames, images = await asyncio.to_thread(self._inputs, staged_folder)
+        except (ValueError, CsvSchemaError) as exc:
+            return await self._fail(job_id, staged_folder, "invalid_input", str(exc))
+        if job.image_count > self._config.processing.folder_images_num_threshold:
+            return await self._fail(
+                job_id,
+                staged_folder,
+                "images_exceed_threshold",
+                "Image threshold exceeded",
+            )
+        if self._clock() >= cutoff:
+            return await self._fail(
+                job_id,
+                staged_folder,
+                "required_model_timeout",
+                "OBB cutoff reached before inference",
+            )
+        try:
+            result = await self._runtime.infer(images, deadline_at=cutoff)
+            self._validate_result(result, images)
+        except TimeoutError as exc:
+            return await self._fail(
+                job_id, staged_folder, "required_model_timeout", str(exc)
+            )
+        except Exception as exc:
+            return await self._fail(
+                job_id, staged_folder, "required_model_failure", str(exc)
+            )
+        if self._clock() >= cutoff:
+            return await self._fail(
+                job_id,
+                staged_folder,
+                "required_model_timeout",
+                "OBB completed after cutoff",
+            )
+        try:
+            return await asyncio.to_thread(self._evaluate, job_id, frames, result)
+        except ValueError as exc:
+            return await self._fail(
+                job_id, staged_folder, "invalid_measurement", str(exc)
+            )
+
+    async def _fail(self, job_id, folder, reason, error):
+        manifest, path = await asyncio.to_thread(
+            self._fallback.build_csv_fallback,
+            job_id=job_id,
+            csv_folder=folder,
+            reason=reason,
+            errors=(error,),
+        )
+        manifest = replace(manifest, inspection_metadata=self._metadata())
+        await asyncio.to_thread(manifest.write_atomic, path)
+        return manifest, path
+
+    def _evaluate(self, job_id, frames, result):
+        artifact_dir = self._artifacts.new_artifact_dir(job_id)
+        csv_results = []
+        counts = {"pass_count": 0, "fail_count": 0}
+        for source, frame in frames:
+            audits = []
+            for row in frame.to_dict("records"):
+                boxes = result.results[row["img_name"]]
+                decision = self._judge.judge(row, boxes)
+                audits.append(self._judge.audit_row(decision, boxes))
+                counts["pass_count" if decision.passed else "fail_count"] += 1
+                if decision.defect:
+                    counts[decision.defect] = counts.get(decision.defect, 0) + 1
+            out = frame.copy()
+            for column in audits[0]:
+                out[column] = [audit[column] for audit in audits]
+            out["ai_site_id"] = self._site_id
+            out["ai_rule_version"] = self._version
+            out["ai_model_version"] = result.model_version
+            csv_results.append(
+                self._artifacts.persist_csv_result(artifact_dir, source, out)
+            )
+        manifest = PipelineResultManifest(
+            job_id=job_id,
+            outcome=PipelineOutcome.NORMAL,
+            created_at=self._clock(),
+            csv_results=tuple(csv_results),
+            counts=counts,
+            model_timings_ms={"yolo_obb": result.inference_ms},
+            inspection_metadata=self._metadata(result),
+        )
+        return manifest, manifest.write_atomic(artifact_dir / "manifest.json")

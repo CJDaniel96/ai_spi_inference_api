@@ -6,6 +6,12 @@ soft-real-time deadline. Ingest, inference, and publication run as independent
 processes coordinated through a local SQLite database. The original synchronous
 FastAPI `/process` workflow remains available for compatibility.
 
+The shipped SX configuration uses **one resident YOLO OBB subprocess owned by
+Stage 02**, followed by volume, area, height, and X/Y shift checks using each
+machine CSV row's own limits. Model HTTP servers are unnecessary in this mode.
+Configure `inference.obb.model_path` before startup; `.pt`, `.onnx`, and `.engine`
+select their backend by suffix. See [SX OBB 推論與判定](docs/sx_obb_inference.md).
+
 ## What This Project Does
 
 Given a timestamp folder containing SPI CSV(s) and pad images, the durable pipeline:
@@ -16,11 +22,12 @@ Given a timestamp folder containing SPI CSV(s) and pad images, the durable pipel
    60 actual image files takes a CSV-only all-`23` bypass without decoding images.
 3. For normal inference, checks image metadata, streams the original tree once
    from the share while hashing, then verifies/decodes the local copy before READY.
-4. Calls the **enabled** model endpoints against the immutable local copy.
-5. Verifies that every required model returned a finite result for every expected
-   image. Required-model failure or timeout produces an all-`23` fail-safe result.
-6. Merges results, calculates derived values, classifies defects, and writes a
-   durable result manifest without publishing to the machine share.
+4. Runs native OBB inference against the immutable local copy. Explicit
+   `legacy_http` configs can still call the enabled historical model endpoints.
+5. Verifies complete model results for every expected image. Required-model
+   failure or timeout produces an all-`23` fail-safe result.
+6. In SX mode, filters OBB boxes by class confidence and applies each row's CSV
+   limits in order, normalizing reversed low/high values before comparison.
 7. Publishes Primary CSVs atomically, checkpointing each success. Failed writes
    retry only within the remaining job budget; expired jobs are never auto-resent.
 8. Saves local result backups in a supervised background process after Primary,
@@ -71,10 +78,11 @@ Production components:
 | Inference worker | — | Earliest-deadline-first model execution and result manifest creation |
 | Publisher worker | — | Deadline takeover, Primary-first publication, local result backup, and background MiNiFi export |
 | SQLite WAL database | — | Durable job state, leases, attempts, timestamps, and crash recovery |
-| PatchCore anomaly | `8000` | Returns `anomaly_score` |
+| Resident YOLO OBB | — | SX appearance inference; Stage 02 loads, warms and supervises the child |
+| PatchCore anomaly (legacy) | `8000` | Returns `anomaly_score` |
 | Paste detection | `8001` | Returns `paste_pixels` — **disabled by default** |
 | Distance detection | `8002` | Returns `min_center_to_pad_distance` |
-| Merge server (`app.main`) | `5050` | Compatibility API (`/process`, `/health`, `/ready`) |
+| Merge server (`app.main`) | `5050` | Legacy compatibility API; `/process` requires `legacy_http` mode |
 
 **Entry points**
 
@@ -98,7 +106,7 @@ Ingest Worker
        ▼
 Inference Worker
   earliest deadline first
-  required models within deadline - publish reserve
+  resident OBB + SX CSV rules, within deadline - publish reserve
   normal decision or all-23 fallback manifest
        │ RESULT_READY / FALLBACK_READY
        ▼
@@ -196,6 +204,10 @@ a required model is unavailable).
 ```
 
 ### POST /process
+
+This compatibility route requires `inference.mode="legacy_http"`. It rejects
+native OBB configs so it cannot accidentally publish using only historical CSV
+rules. A legacy config example is `config/ai_server.legacy.example.json`.
 
 This endpoint intentionally keeps the original synchronous contract. It runs
 `ProcessJobUseCase` inline and **does not enqueue or update the three-stage SQLite
@@ -297,6 +309,16 @@ contract validation is the implemented definition of "folder ready".
 
 ## CSV Required Columns
 
+Native SX mode uses `insp_vol`, `insp_area`, `insp_hei`, `insp_x`, and `insp_y`,
+their `vol_l_ng/h_ng`, `area_l_ng/h_ng`, `hei_l_ng/h_ng`, and `shift_x_ng/y_ng`
+limits, plus the configured image-name fields and `is_pass`.
+The three `insp_*` measurement values are percentages; X/Y shift values are mm.
+Every row uses its own limits. Percentage ranges use `min(l_ng, h_ng)` and
+`max(l_ng, h_ng)`, inclusive, so reversed source fields work without changing
+their stored values. Shift checks compare absolute displacement against each
+axis's nonnegative limit. There is no component threshold file or Excel lookup.
+The historical-mode columns follow:
+
 - **Required** by the shipped SINIC template: `component_name`, `Array_id`, and
   `Pad_id`; the CSV stem represents `{Insp_st_time}_{BoardBarcode}`.
 - **Optional**, consulted by defect rules only when present:
@@ -305,7 +327,10 @@ contract validation is the implemented definition of "folder ready".
   `min_pad_distance`, and `paste_pixels` (only if the paste model is enabled).
   Missing model columns become `NaN` — rules that need them are simply skipped.
 
-## Model Client Configuration
+## Legacy HTTP Model Client Configuration
+
+This section applies to `inference.mode="legacy_http"`. Native SX OBB settings
+are described in [SX OBB 推論與判定](docs/sx_obb_inference.md).
 
 Model endpoints are **not** hard-coded. The service calls only the enabled entries
 in `model_clients`:
@@ -330,7 +355,11 @@ in `model_clients`:
   and `timeout_seconds`, then set `"enabled": true`. No code change required.
 - The paste client (`8001`) ships **disabled** (see compatibility notes).
 
-## Defect Classification Rules
+## Legacy Defect Classification Rules
+
+Native SX mode uses OBB → volume → area → height → shift with each source CSV
+row's normalized limits. The `defect_rules` section below is used by legacy
+HTTP processing only.
 
 Applied in the order listed by `defect_rules.rule_order`; only the **first**
 matching rule per row assigns a label. Remove a name from `rule_order` to disable
@@ -566,6 +595,12 @@ See the extras in `pyproject.toml` (`cuda`, `tensorrt-export`, `mac`,
 `analytics`, `paste`).
 
 ## Multi-format GPU inference
+
+Native OBB selects `.pt` / `.onnx` / `.engine` from
+`inference.obb.model_path`. Fixed ONNX batch sizes are read from the model input;
+fixed TensorRT defaults to eight images, with tail padding discarded. See the
+[native configuration guide](docs/sx_obb_inference.md). The following server
+examples apply to legacy HTTP mode.
 
 The model services select their inference backend from the model filename:
 
@@ -834,8 +869,10 @@ most one inference job.
 All Windows launchers call `resolve_python.bat`: an explicitly configured
 `PYTHON_EXE` wins, followed by `.venv`, the setup-created Conda environment, and
 finally Python on `PATH`. Python 3.12 is validated before startup. The launchers
-also default `AI_CONFIG_PATH` to the checked-in config. `start_model_services.bat`
-starts only ports `8000` and `8002`. `legacy_scan.bat` requires the explicit safety
+also default `AI_CONFIG_PATH` to the checked-in config. In native mode,
+`start_model_services.bat` directs the operator to Stage 02 without opening model
+HTTP ports. In legacy mode it starts ports `8000` and `8002`.
+`legacy_scan.bat` requires the explicit safety
 flag `SPI_ENABLE_LEGACY_SCANNER=1` and must be used only while Stage 01 is stopped.
 The unnumbered compatibility and utility launchers are deliberately outside the
 three-stage production data flow.
@@ -848,8 +885,8 @@ The standalone utilities use descriptive names without stage numbers:
 | `spi_statistics.bat` | Generate SPI statistics reports from config or offline data |
 
 The numbers are not the production boot order. Start Stage 03 Publisher first,
-then required model services (`8000` and `8002`) and wait until both are healthy,
-then start Stage 02 Inference, and finally Stage 01 Ingest. Publisher must stay
+then Stage 02 and wait for its `event=obb.ready` warmup log, then start Stage 01.
+Legacy HTTP mode starts its required model services before Stage 02. Publisher must stay
 available even when models are down because it owns the deadline fallback.
 
 Each stage writes a separate system log derived from `logging.system_log_file`, for

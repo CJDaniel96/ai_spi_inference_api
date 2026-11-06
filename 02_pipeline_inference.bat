@@ -5,6 +5,8 @@ cd /d "%~dp0"
 REM Stage 02 - claim durable READY jobs and run AI inference only.  Result
 REM manifests are fenced by the shared deadline; this stage never publishes
 REM directly to the machine return share.
+REM In yolo_obb mode Stage 02 owns the warm model subprocess; no model HTTP
+REM service is required. Configure inference.obb.model_path before startup.
 call "%~dp0resolve_python.bat"
 if errorlevel 1 exit /b 1
 if not defined AI_CONFIG_PATH set "AI_CONFIG_PATH=%~dp0config\ai_server.json"

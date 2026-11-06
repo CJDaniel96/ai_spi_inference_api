@@ -20,32 +20,7 @@
     "image_name_source_column": null,
     "image_name_template": "{csv_stem}_{component_name}_{Array_id}_{Pad_id}.jpg"
   },
-  "model_clients": [
-    {
-      "name": "anomaly",
-      "enabled": true,
-      "required": true,
-      "url": "http://127.0.0.1:8000/inference",
-      "target_column": "anomaly_score",
-      "timeout_seconds": 25
-    },
-    {
-      "name": "paste",
-      "enabled": false,
-      "required": false,
-      "url": "http://127.0.0.1:8001/inference",
-      "target_column": "paste_pixels",
-      "timeout_seconds": 25
-    },
-    {
-      "name": "distance",
-      "enabled": true,
-      "required": true,
-      "url": "http://127.0.0.1:8002/inference",
-      "target_column": "min_pad_distance",
-      "timeout_seconds": 25
-    }
-  ],
+  "model_clients": [],
   "defect_rules": {
     "rule_order": [
       "anomaly",
@@ -107,5 +82,29 @@
   "scanner_max_retries": 5,
   "scanner_client_error_max_attempts": 2,
   "scanner_backoff_base_seconds": 5,
-  "scanner_backoff_max_seconds": 300
+  "scanner_backoff_max_seconds": 300,
+  "inference": {
+    "mode": "yolo_obb",
+    "site_id": "SX",
+    "obb": {
+      "model_path": "models/appearance/best.pt",
+      "device": "cuda:0",
+      "imgsz": 640,
+      "batch_size": 8,
+      "engine_fixed_batch": true,
+      "conf": 0.25,
+      "iou": 0.7,
+      "max_det": 100,
+      "startup_timeout_seconds": 120,
+      "class_thresholds": {
+        "Solder_Paste": 0.7,
+        "Stain": 0.25,
+        "Missing": 0.25,
+        "Insufficient": 0.25,
+        "Slump": 0.25,
+        "Foreign_object": 0.25,
+        "Bridge": 0.25
+      }
+    }
+  }
 }

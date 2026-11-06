@@ -103,12 +103,11 @@ def test_loads_real_repo_config() -> None:
     assert config.pipeline.staging_root is None
     assert config.pipeline.source_settle_seconds == 2.0
     assert config.pipeline.publisher_poll_interval_seconds == 0.05
-    assert len(config.model_clients) == 4
-    area = next(
-        client for client in config.model_clients if client.name == "area_ratio"
-    )
-    assert area.enabled is False and area.required is True
-    assert area.target_column == "cover%"
+    assert config.model_clients == []
+    assert config.inference.mode == "yolo_obb"
+    assert config.inference.site_id == "SX"
+    assert config.inference.obb.class_thresholds["Solder_Paste"] == 0.7
+    assert config.inference.obb.batch_size == 8
 
 
 def test_enabled_model_clients_excludes_disabled(tmp_path: Path) -> None:
@@ -135,12 +134,12 @@ def test_required_enabled_model_clients_excludes_optional_and_disabled(
     assert [c.name for c in config.required_enabled_model_clients()] == ["anomaly"]
 
 
-def test_paste_client_disabled_by_default() -> None:
-    """The shipped config ships the paste client as disabled."""
+def test_native_config_has_no_http_model_clients() -> None:
+    """The SX config delegates appearance to the resident OBB process."""
     config = load_config(_REAL_CONFIG_PATH)
 
-    paste = next(c for c in config.model_clients if c.name == "paste")
-    assert paste.enabled is False
+    assert config.model_clients == []
+    assert config.inference.mode == "yolo_obb"
 
 
 def test_missing_required_section_raises_clear_error(tmp_path: Path) -> None:

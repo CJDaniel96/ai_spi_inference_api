@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 
-from app.application.inference.service import (
-    PipelineInferenceService,
-)
+from app.application.inference.contracts import InferencePreparation
 from app.core.config import AppConfig
 from app.core.logging import get_logger
 from app.domain.entities.pipeline_result import PipelineOutcome
@@ -25,17 +24,23 @@ class InferenceWorker:
         *,
         config: AppConfig,
         repository: PipelineJobRepository,
-        service: PipelineInferenceService,
+        service: InferencePreparation,
         worker_id: str,
         logger: logging.Logger | None = None,
+        prepare_runtime: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self._config = config
         self._repository = repository
         self._service = service
         self._worker_id = worker_id
         self._logger = logger or get_logger("pipeline.inference_worker")
+        self._prepare_runtime = prepare_runtime
 
     async def run_once(self) -> bool:
+        # Cold recovery must not repeatedly consume a claimed job's budget.
+        # Publisher can still take over queued jobs while the model warms up.
+        if self._prepare_runtime is not None:
+            await self._prepare_runtime()
         job = self._repository.claim_for_inference(
             worker_id=self._worker_id,
             lease_seconds=self._config.pipeline.worker_lease_seconds,

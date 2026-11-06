@@ -65,6 +65,7 @@ class PipelineResultManifest:
     model_timings_ms: dict[str, float] = field(default_factory=dict)
     counts: dict[str, int] = field(default_factory=dict)
     schema_version: int = _SCHEMA_VERSION
+    inspection_metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.schema_version != _SCHEMA_VERSION:
@@ -87,6 +88,11 @@ class PipelineResultManifest:
             "model_timings_ms": self.model_timings_ms,
             "counts": self.counts,
             "csv_results": [item.to_dict() for item in self.csv_results],
+            **(
+                {"inspection_metadata": self.inspection_metadata}
+                if self.inspection_metadata
+                else {}
+            ),
         }
 
     @classmethod
@@ -108,6 +114,7 @@ class PipelineResultManifest:
             csv_results=tuple(
                 CsvPipelineResult.from_dict(item) for item in data["csv_results"]
             ),
+            inspection_metadata=dict(data.get("inspection_metadata", {})),
         )
 
     def write_atomic(self, path: Path) -> Path:
