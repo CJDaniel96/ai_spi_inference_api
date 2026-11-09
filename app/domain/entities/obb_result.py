@@ -16,6 +16,11 @@ OBB_CLASSES = (
 )
 
 
+def canonical_obb_class_name(name: str) -> str:
+    """Share the known class spelling alias between model and configuration."""
+    return "Foreign_object" if name == "Foreign_Object" else name
+
+
 @dataclass(frozen=True)
 class ObbDetection:
     class_name: str

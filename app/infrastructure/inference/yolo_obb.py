@@ -7,18 +7,18 @@ import time
 from pathlib import Path
 
 from app.core.inspection_config import ObbConfig
-from app.domain.entities.obb_result import OBB_CLASSES, ObbBatchResult, ObbDetection
+from app.domain.entities.obb_result import (
+    OBB_CLASSES,
+    ObbBatchResult,
+    ObbDetection,
+    canonical_obb_class_name,
+)
 from app.infrastructure.model_runtime import (
     detect_model_format,
     normalize_device,
     onnx_execution_providers,
     ultralytics_device,
 )
-
-
-def _canonical_class_name(name: str) -> str:
-    """Map the known export spelling to the configured NG class name."""
-    return "Foreign_object" if name == "Foreign_Object" else name
 
 
 def _onnx_fixed_batch(path: Path) -> int | None:
@@ -64,7 +64,7 @@ class YoloObbModel:
         self._predict([black] * batch)
         names = self._model.names
         class_names = [
-            _canonical_class_name(name)
+            canonical_obb_class_name(name)
             for name in (names.values() if isinstance(names, dict) else names)
         ]
         if len(class_names) != len(OBB_CLASSES) or set(class_names) != set(OBB_CLASSES):
@@ -137,7 +137,7 @@ class YoloObbModel:
                 polygons = boxes.xyxyxyxy.cpu().numpy().tolist()
                 output[key] = tuple(
                     ObbDetection(
-                        _canonical_class_name(result.names[int(class_id)]),
+                        canonical_obb_class_name(result.names[int(class_id)]),
                         float(score),
                         tuple(tuple(float(v) for v in point) for point in polygon),
                     )

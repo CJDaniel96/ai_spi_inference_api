@@ -142,6 +142,22 @@ def test_native_config_has_no_http_model_clients() -> None:
     assert config.inference.mode == "yolo_obb"
 
 
+@pytest.mark.parametrize("label", ["Foreign_object", "Foreign_Object"])
+def test_loads_native_config_with_foreign_object_threshold_spelling(
+    tmp_path: Path, label: str
+) -> None:
+    data = json.loads(_REAL_CONFIG_PATH.read_text(encoding="utf-8"))
+    thresholds = data["inference"]["obb"]["class_thresholds"]
+    del thresholds["Foreign_object"]
+    thresholds[label] = 0.65
+
+    config = load_config(_write_config(tmp_path, data))
+
+    assert config.inference.obb.class_thresholds["Foreign_object"] == 0.65
+    assert "Foreign_Object" not in config.inference.obb.class_thresholds
+    assert len(config.inference.obb.class_thresholds) == 7
+
+
 def test_missing_required_section_raises_clear_error(tmp_path: Path) -> None:
     """Omitting a required section raises a ConfigError naming the field."""
     data = _valid_config_dict()

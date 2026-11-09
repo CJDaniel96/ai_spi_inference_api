@@ -8,7 +8,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app.domain.entities.obb_result import OBB_CLASSES
+from app.domain.entities.obb_result import OBB_CLASSES, canonical_obb_class_name
 
 
 class ObbConfig(BaseModel):
@@ -36,10 +36,31 @@ class ObbConfig(BaseModel):
             raise ValueError("OBB model must use .pt, .onnx or .engine")
         return value
 
+    @field_validator("class_thresholds")
+    @classmethod
+    def _normalize_threshold_names(cls, value: dict[str, float]) -> dict[str, float]:
+        normalized = {}
+        sources = {}
+        for name, threshold in value.items():
+            canonical = canonical_obb_class_name(name)
+            if canonical in normalized:
+                raise ValueError(
+                    f"Duplicate OBB class threshold for {canonical!r}: "
+                    f"{sources[canonical]!r} and {name!r}; configure only one spelling"
+                )
+            normalized[canonical] = threshold
+            sources[canonical] = name
+        return normalized
+
     @model_validator(mode="after")
     def _thresholds_match_classes(self) -> ObbConfig:
-        if set(self.class_thresholds) != set(OBB_CLASSES):
-            raise ValueError("Configure exactly the seven OBB class thresholds")
+        missing = sorted(set(OBB_CLASSES) - set(self.class_thresholds))
+        unexpected = sorted(set(self.class_thresholds) - set(OBB_CLASSES))
+        if missing or unexpected:
+            raise ValueError(
+                "Configure exactly the seven OBB class thresholds; "
+                f"missing={missing}; unexpected={unexpected}"
+            )
         if any(
             not math.isfinite(value) or not self.conf <= value <= 1
             for value in self.class_thresholds.values()

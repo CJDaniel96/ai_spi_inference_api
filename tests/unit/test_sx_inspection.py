@@ -226,6 +226,65 @@ def test_invalid_inference_settings_are_rejected(changes):
         ObbConfig(**changes)
 
 
+@pytest.mark.parametrize("label", ["Foreign_object", "Foreign_Object"])
+def test_threshold_spelling_preserves_custom_ng_confidence(label):
+    thresholds = ObbConfig().class_thresholds
+    del thresholds["Foreign_object"]
+    thresholds[label] = 0.65
+    original = dict(thresholds)
+
+    settings = ObbConfig(class_thresholds=thresholds)
+
+    assert thresholds == original
+    assert settings.model_dump()["class_thresholds"]["Foreign_object"] == 0.65
+    assert set(settings.class_thresholds) == set(OBB_CLASSES)
+    classifier = AppearanceClassifier(settings.class_thresholds)
+    assert classifier.classify((box(), box("Foreign_object", 0.649))).passed
+    decision = classifier.classify((box(), box("Foreign_object", 0.65)))
+    assert not decision.passed
+    assert decision.reason == "Foreign_object"
+
+
+@pytest.mark.parametrize("alias_first", [False, True])
+@pytest.mark.parametrize("alias_threshold", [0.25, 0.9])
+def test_duplicate_threshold_aliases_are_rejected(alias_first, alias_threshold):
+    thresholds = ObbConfig().class_thresholds
+    if alias_first:
+        thresholds = {"Foreign_Object": alias_threshold, **thresholds}
+    else:
+        thresholds["Foreign_Object"] = alias_threshold
+
+    with pytest.raises(ValidationError, match="Duplicate OBB class threshold") as exc:
+        ObbConfig(class_thresholds=thresholds)
+
+    assert "Foreign_object" in str(exc.value)
+    assert "Foreign_Object" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    ("removed", "added", "missing", "unexpected"),
+    [
+        ("Bridge", None, ["Bridge"], []),
+        (None, "Unknown", [], ["Unknown"]),
+        ("Foreign_object", "Foreign_Objects", ["Foreign_object"], ["Foreign_Objects"]),
+    ],
+)
+def test_invalid_threshold_names_report_missing_and_unexpected(
+    removed, added, missing, unexpected
+):
+    thresholds = ObbConfig().class_thresholds
+    if removed is not None:
+        del thresholds[removed]
+    if added is not None:
+        thresholds[added] = 0.25
+
+    with pytest.raises(ValidationError) as exc:
+        ObbConfig(class_thresholds=thresholds)
+
+    assert f"missing={missing}" in str(exc.value)
+    assert f"unexpected={unexpected}" in str(exc.value)
+
+
 class FakeRuntime:
     def __init__(self, *, detections=None, error=None, missing=False):
         self.detections = (box(),) if detections is None else detections
