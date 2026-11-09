@@ -40,7 +40,6 @@ explicit = true
 [tool.ruff]
 line-length = 88
 target-version = "py312"
-extend-exclude = [".venv", "tmp_artifacts", "output", "doc", "demo_html", "fan_out"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]
@@ -49,4 +48,3 @@ select = ["E", "F", "I", "B", "UP"]
 testpaths = ["tests"]
 addopts = "-ra"
 pythonpath = ["."]
-norecursedirs = [".venv", "tmp_artifacts", "output", "doc", "demo_html", "fan_out"]

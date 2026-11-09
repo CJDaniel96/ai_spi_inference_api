@@ -1,8 +1,7 @@
-"""Unit tests for stage-one validation and immutable raw archival."""
+"""Input validation and immutable raw archival for the single controller."""
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from pathlib import Path
 
 import cv2
@@ -19,7 +18,6 @@ from app.application.ingest.service import (
 )
 
 _JOB_ID = "20260826112233"
-_READY_AT = datetime(2026, 8, 26, 3, 22, 4, tzinfo=UTC)
 _TEMPLATE = "{csv_stem}_{component_name}_{Array_id}_{Pad_id}.jpg"
 
 
@@ -50,14 +48,14 @@ def _create_job(tmp_path: Path, *, rows: list[dict] | None = None) -> Path:
 def _service(**overrides) -> IngestService:
     values = {
         "image_name_template": _TEMPLATE,
-        "primary_return_deadline_seconds": 30,
-        "clock": lambda: _READY_AT,
     }
     values.update(overrides)
     return IngestService(**values)
 
 
-def test_validate_sets_ready_at_after_complete_decodable_contract(tmp_path) -> None:
+def test_validate_captures_complete_source_snapshot_and_expected_images(
+    tmp_path,
+) -> None:
     source = _create_job(tmp_path)
 
     validated = _service().validate(source)
@@ -66,11 +64,13 @@ def test_validate_sets_ready_at_after_complete_decodable_contract(tmp_path) -> N
     assert validated.expected_image_keys == (
         "20260826112233_BOARD01_J1701_133_27346.jpg",
     )
-    assert validated.ready_at == _READY_AT
-    assert (validated.deadline_at - validated.ready_at).total_seconds() == 30
+    assert validated.images_decoded
+    assert {item.relative_path for item in validated.source_snapshot} == {
+        path.name for path in source.iterdir()
+    }
 
 
-def test_default_archive_uses_immutable_backup_as_staging(tmp_path) -> None:
+def test_archive_preserves_one_immutable_dated_backup(tmp_path) -> None:
     source = _create_job(tmp_path)
     nested = source / "machine_metadata"
     nested.mkdir()
@@ -80,9 +80,7 @@ def test_default_archive_uses_immutable_backup_as_staging(tmp_path) -> None:
     result = service.archive(service.validate(source), backup_root=tmp_path / "backup")
 
     expected = tmp_path / "backup" / "2026-08-26" / _JOB_ID
-    assert result.staged_folder == expected
     assert result.original_backup_folder == expected
-    assert result.ready_at == _READY_AT
     assert (expected / "machine_metadata" / "trace.txt").read_text() == "original"
     assert sorted(
         path.relative_to(source) for path in source.rglob("*") if path.is_file()
@@ -90,52 +88,6 @@ def test_default_archive_uses_immutable_backup_as_staging(tmp_path) -> None:
         path.relative_to(expected) for path in expected.rglob("*") if path.is_file()
     )
     assert list((tmp_path / "backup").rglob("*.tmp")) == []
-
-
-def test_archive_plan_can_be_persisted_before_copy_starts(tmp_path) -> None:
-    source = _create_job(tmp_path)
-    service = _service()
-    validated = service.validate(source)
-
-    plan = service.plan_archive(validated, backup_root=tmp_path / "backup")
-
-    expected = tmp_path / "backup" / "2026-08-26" / _JOB_ID
-    assert plan.staged_folder == expected
-    assert plan.original_backup_folder == expected
-    assert not expected.exists()
-
-
-def test_distinct_staging_root_creates_two_atomic_complete_copies(tmp_path) -> None:
-    source = _create_job(tmp_path)
-    service = _service()
-
-    result = service.archive(
-        service.validate(source),
-        staging_root=tmp_path / "staging",
-        backup_root=tmp_path / "backup",
-    )
-
-    assert result.staged_folder == tmp_path / "staging" / _JOB_ID
-    assert result.original_backup_folder == (
-        tmp_path / "backup" / "2026-08-26" / _JOB_ID
-    )
-    assert result.staged_folder != result.original_backup_folder
-    assert result.staged_folder.is_dir()
-    assert result.original_backup_folder.is_dir()
-    assert result.staging_reused is False
-    assert result.backup_reused is False
-
-
-def test_same_root_uses_only_dated_backup_target(tmp_path) -> None:
-    source = _create_job(tmp_path)
-    root = tmp_path / "local"
-
-    result = _service().ingest(source, staging_root=root, backup_root=root)
-
-    expected = root / "2026-08-26" / _JOB_ID
-    assert result.staged_folder == expected
-    assert result.original_backup_folder == expected
-    assert not (root / _JOB_ID).exists()
 
 
 def test_archive_is_idempotent_for_identical_existing_content(tmp_path) -> None:
@@ -148,9 +100,7 @@ def test_archive_is_idempotent_for_identical_existing_content(tmp_path) -> None:
 
     assert first.reused is False
     assert second.reused is True
-    assert second.staged_folder == first.staged_folder
-    assert second.ready_at == first.ready_at
-    assert second.deadline_at == first.deadline_at
+    assert second.original_backup_folder == first.original_backup_folder
 
 
 def test_template_can_use_explicit_image_filename(tmp_path) -> None:
@@ -295,9 +245,7 @@ def test_existing_different_target_is_never_overwritten(tmp_path) -> None:
     assert marker.read_text(encoding="utf-8") == "do not overwrite"
 
 
-def test_pipeline_reads_share_image_once_even_with_distinct_staging(
-    tmp_path, monkeypatch
-):
+def test_archive_reads_each_shared_file_once(tmp_path, monkeypatch):
     source = _create_job(
         tmp_path,
         rows=[
@@ -324,12 +272,11 @@ def test_pipeline_reads_share_image_once_even_with_distinct_staging(
     result = service.archive(
         validated,
         backup_root=tmp_path / "backup",
-        staging_root=tmp_path / "staging",
         csv_snapshot=snapshot,
     )
     assert opens.count(next(source.glob("*.jpg")).name) == 1
     assert opens.count(next(source.glob("*.csv")).name) == 1
-    assert result.staged_folder.is_dir() and result.original_backup_folder.is_dir()
+    assert result.original_backup_folder.is_dir()
 
 
 def test_bad_image_is_rejected_locally_before_archive_commit(tmp_path):

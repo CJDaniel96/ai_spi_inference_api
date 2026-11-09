@@ -46,20 +46,35 @@ def test_settle_tracker_resets_when_file_set_changes(tmp_path) -> None:
     adapter = SinicFolderInput()
     tracker = FileSettleTracker(settle_seconds=2.0)
 
-    assert tracker.observe(adapter.load(folder), now=10.0) is False
-    assert tracker.observe(adapter.load(folder), now=12.0) is True
+    first = adapter.load(folder)
+    assert (
+        tracker.observe_snapshot(str(folder), adapter.snapshot(first), True, now=10.0)
+        is False
+    )
+    assert (
+        tracker.observe_snapshot(str(folder), adapter.snapshot(first), True, now=12.0)
+        is True
+    )
 
     (folder / "two.jpg").write_bytes(b"2")
-    assert tracker.observe(adapter.load(folder), now=12.1) is False
-    assert tracker.observe(adapter.load(folder), now=14.1) is True
+    changed = adapter.load(folder)
+    assert (
+        tracker.observe_snapshot(str(folder), adapter.snapshot(changed), True, now=12.1)
+        is False
+    )
+    assert (
+        tracker.observe_snapshot(str(folder), adapter.snapshot(changed), True, now=14.1)
+        is True
+    )
 
 
-def test_settle_tracker_requires_an_image_by_default(tmp_path) -> None:
+def test_settle_tracker_does_not_accept_missing_required_files(tmp_path) -> None:
     folder = tmp_path / "20260821112233"
     folder.mkdir()
     (folder / "result.csv").write_text("is_pass\n", encoding="utf-8")
     adapter = SinicFolderInput()
     tracker = FileSettleTracker(settle_seconds=0)
 
-    assert tracker.observe(adapter.load(folder), now=1.0) is False
-    assert tracker.observe(adapter.load(folder), now=2.0) is False
+    snapshot = adapter.snapshot(adapter.load(folder))
+    assert tracker.observe_snapshot(str(folder), snapshot, False, now=1.0) is False
+    assert tracker.observe_snapshot(str(folder), snapshot, False, now=2.0) is False

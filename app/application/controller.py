@@ -5,8 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
-from dataclasses import replace
-from datetime import UTC, date, datetime
+from datetime import date, datetime
 from pathlib import Path
 
 from app.application.inference.obb_service import ObbInspectionService
@@ -319,12 +318,6 @@ class Controller:
                                     Path(job.csv_snapshot_folder),
                                     deadline_at=self._io_deadline(job),
                                 )
-                                validated = replace(
-                                    validated,
-                                    deadline_at=datetime.fromtimestamp(
-                                        job.deadline_at, UTC
-                                    ),
-                                )
                                 job.status = "BACKING_UP"
                                 self._save(job, "input.raw_backup_started")
                                 await call_io(
@@ -333,7 +326,6 @@ class Controller:
                                     self.config,
                                     validated,
                                     Path(self.config.paths.backup_output_root),
-                                    None,
                                     Path(job.csv_snapshot_folder),
                                     deadline_at=self._io_deadline(job),
                                 )

@@ -17,9 +17,9 @@ import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from app.infrastructure.local_store import fsync_directory
 
 from app.infrastructure.deadline_io import DeadlineExceeded
+from app.infrastructure.local_store import fsync_directory
 
 _ENCODING_CANDIDATES = ("utf-8", "cp950", "big5")
 

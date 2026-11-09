@@ -7,6 +7,7 @@ import math
 from dataclasses import dataclass
 from typing import Any
 
+from app.domain.entities.defect import FAIL_CODE, PASS_CODE
 from app.domain.entities.obb_result import ObbDetection
 from app.domain.services.appearance_classifier import AppearanceClassifier
 
@@ -150,7 +151,7 @@ class ComponentJudge:
         appearance = decision.checks[0]
         return {
             "ai_defect_name": decision.defect,
-            "is_pass": 22 if decision.passed else 23,
+            "is_pass": PASS_CODE if decision.passed else FAIL_CODE,
             "ai_failed_rule": decision.failed_rule,
             "ai_reason": decision.reason,
             "ai_limit_source": decision.limit_source,

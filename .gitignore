@@ -229,3 +229,8 @@ data/
 *.pth
 *.ckpt
 *.zip
+
+# Generated document previews and exports are not application sources.
+/tmp_artifacts/
+/output/
+/fan_out/

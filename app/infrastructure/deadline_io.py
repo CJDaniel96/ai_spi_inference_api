@@ -46,28 +46,6 @@ class DeadlineIO:
         self._connection = None
         self._stop_at = None
         self._deadline_at = None
-        self.last_terminated_pid = None
-
-    def call(
-        self,
-        function: Callable[..., Any],
-        *args: Any,
-        deadline_at: float,
-        function_kwargs: dict | None = None,
-        **kwargs: Any,
-    ) -> Any:
-        self.submit(
-            function,
-            *args,
-            deadline_at=deadline_at,
-            function_kwargs=function_kwargs,
-            **kwargs,
-        )
-        while True:
-            done, result = self.poll()
-            if done:
-                return result
-            time.sleep(0.005)
 
     def submit(
         self,
@@ -75,7 +53,6 @@ class DeadlineIO:
         *args: Any,
         deadline_at: float,
         function_kwargs: dict | None = None,
-        **kwargs: Any,
     ) -> None:
         """Start one background operation without blocking the caller."""
         if self._stop_at is not None:
@@ -97,9 +74,7 @@ class DeadlineIO:
                     self._process.start()
                 finally:
                     child.close()
-            self._connection.send(
-                (function, args, {**kwargs, **(function_kwargs or {})}, deadline_at)
-            )
+            self._connection.send((function, args, function_kwargs or {}, deadline_at))
         except BaseException:
             self.close()
             raise
@@ -130,8 +105,6 @@ class DeadlineIO:
         if self._connection is not None:
             self._connection.close()
         if self._process is not None and self._process.pid is not None:
-            if self._stop_at is not None:
-                self.last_terminated_pid = self._process.pid
             if self._process.is_alive():
                 self._process.terminate()
             self._process.join(timeout=0.05)

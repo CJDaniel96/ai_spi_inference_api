@@ -1,17 +1,8 @@
-"""Stage-one validation and immutable archival for timestamp-folder jobs.
+"""Validate input and atomically preserve one immutable raw backup.
 
-The service deliberately separates :meth:`validate` from :meth:`archive`.
-The durable worker validates CSVs and image metadata on the share, then decodes
-the byte-verified local copy before marking the job READY. Its original absolute
-deadline is persisted before either step. Standalone validation can still decode
-images immediately for callers that require that behavior.
-
-Archival copies the complete source tree into temporary directories on the
-destination filesystem, verifies their byte content, and atomically renames
-them into place.  Existing byte-identical targets are reused, making retries
-idempotent.  By default the immutable raw backup is also the staging folder,
-so the shared-folder payload is read only once.  A distinct staging root may be
-provided when an installation explicitly needs two local copies.
+The controller owns all timestamps and deadlines. This service checks source
+stability, copies source bytes once with hashes, validates the local images,
+and publishes the verified backup by renaming its temporary directory.
 """
 
 from __future__ import annotations
@@ -22,9 +13,8 @@ import re
 import shutil
 import stat
 import tempfile
-from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 import cv2
@@ -46,23 +36,17 @@ _HASH_CHUNK_SIZE = 1024 * 1024
 class IngestValidationError(AppError, ValueError):
     """The source job does not satisfy the machine-input contract."""
 
-    status_code = 400
-
 
 class SourceChangedError(IngestValidationError):
     """The source tree changed during validation or archival."""
 
 
 class IngestStorageError(AppError):
-    """A local staging or backup operation failed."""
-
-    status_code = 500
+    """A local raw-backup operation failed."""
 
 
 class IngestCollisionError(IngestStorageError):
     """An existing job target has different content and cannot be overwritten."""
-
-    status_code = 409
 
 
 @dataclass(frozen=True)
@@ -91,42 +75,21 @@ ContentManifest = tuple[ContentManifestEntry, ...]
 
 @dataclass(frozen=True)
 class ValidatedIngest:
-    """Stable, decoded source job ready to be queued and archived."""
+    """Source snapshot and expected image keys; decoding may be deferred locally."""
 
     source_folder: Path
     job_id: str
     expected_image_keys: tuple[str, ...]
-    ready_at: datetime
-    deadline_at: datetime
     source_snapshot: TreeSnapshot
     images_decoded: bool = True
 
 
 @dataclass(frozen=True)
-class ArchivePlan:
-    """Deterministic local paths that may be persisted before copying starts."""
-
-    staged_folder: Path
-    original_backup_folder: Path
-
-
-@dataclass(frozen=True)
 class IngestResult:
-    """Local immutable paths and deadline carried to the inference worker."""
+    """The verified backup destination and whether identical data was reused."""
 
-    source_folder: Path
-    staged_folder: Path
     original_backup_folder: Path
-    expected_image_keys: tuple[str, ...]
-    ready_at: datetime
-    deadline_at: datetime
-    staging_reused: bool
-    backup_reused: bool
-
-    @property
-    def reused(self) -> bool:
-        """Return whether every required local target already existed."""
-        return self.staging_reused and self.backup_reused
+    reused: bool
 
 
 @dataclass(frozen=True)
@@ -137,7 +100,7 @@ class _PreparedCopy:
 
 
 class IngestService:
-    """Validate one timestamp job and create immutable local raw copies."""
+    """Validate one timestamp job and create its immutable local raw backup."""
 
     def __init__(
         self,
@@ -145,14 +108,8 @@ class IngestService:
         image_name_template: str = (
             "{csv_stem}_{component_name}_{Array_id}_{Pad_id}.jpg"
         ),
-        primary_return_deadline_seconds: float = 30.0,
-        clock: Callable[[], datetime] | None = None,
     ) -> None:
-        if primary_return_deadline_seconds <= 0:
-            raise ValueError("primary_return_deadline_seconds must be positive")
         self._template = image_name_template
-        self._deadline_seconds = primary_return_deadline_seconds
-        self._clock = clock or (lambda: datetime.now(UTC))
         self._csv_merger = CsvMerger()
 
     def snapshot_csv(self, source_folder: Path, destination: Path) -> Path:
@@ -228,11 +185,10 @@ class IngestService:
         decode_images: bool = True,
         csv_snapshot: Path | None = None,
     ) -> ValidatedIngest:
-        """Validate CSV/image completeness and establish the job deadline.
+        """Validate completeness against a stable source snapshot.
 
-        With ``decode_images=False``, decoding is deferred to the verified local
-        archive. The durable worker records its ready_at only after that succeeds;
-        copying and decoding still consume the original end-to-end budget.
+        With decode_images=False, decoding happens on the verified local copy.
+        Timing and the decision to proceed remain with the controller.
         """
         source = self._resolve_source(source_folder)
         job_id = self._validate_job_id(source.name)
@@ -277,13 +233,10 @@ class IngestService:
                 image_keys.append(image_key)
 
         self._assert_snapshot_unchanged(source, initial_snapshot, "validation")
-        ready_at = self._aware_now()
         return ValidatedIngest(
             source_folder=source,
             job_id=job_id,
             expected_image_keys=tuple(image_keys),
-            ready_at=ready_at,
-            deadline_at=ready_at + timedelta(seconds=self._deadline_seconds),
             source_snapshot=initial_snapshot,
             images_decoded=decode_images,
         )
@@ -293,32 +246,24 @@ class IngestService:
         validated: ValidatedIngest,
         *,
         backup_root: str | Path,
-        staging_root: str | Path | None = None,
         csv_snapshot: Path | None = None,
     ) -> IngestResult:
-        """Atomically archive a validated source tree to local storage.
-
-        When ``staging_root`` is omitted, the immutable backup is returned as
-        ``staged_folder``.  The same optimization is applied when staging and
-        backup roots resolve to the same directory.
-        """
+        """Copy and verify a single raw backup without touching the source."""
         source = validated.source_folder
-        self._assert_snapshot_unchanged(source, validated.source_snapshot, "copy")
-        plan = self.plan_archive(
-            validated, backup_root=backup_root, staging_root=staging_root
+        backup_target = (
+            Path(backup_root).expanduser().resolve(strict=False)
+            / self._job_date(validated.job_id).isoformat()
+            / validated.job_id
         )
-        backup_target = plan.original_backup_folder
-        staging_target = plan.staged_folder
-
-        targets = tuple(dict.fromkeys((backup_target, staging_target)))
-        prepared: dict[Path, _PreparedCopy] = {}
-        committed_targets: set[Path] = set()
+        self._validate_target(source, backup_target)
+        self._assert_snapshot_unchanged(source, validated.source_snapshot, "copy")
+        prepared = None
+        committed = False
         try:
-            first, source_manifest = self._prepare_streamed_copy(
+            prepared, manifest = self._prepare_streamed_copy(
                 source, backup_target, validated.source_snapshot
             )
-            prepared[backup_target] = first
-            local_source = first.temporary or first.target
+            local_source = prepared.temporary or prepared.target
             if csv_snapshot is not None:
                 expected = {
                     p.name: p.read_bytes() for p in self._csv_files(csv_snapshot)
@@ -331,91 +276,21 @@ class IngestService:
             if not validated.images_decoded:
                 for image_key in validated.expected_image_keys:
                     self._validate_image(local_source / image_key, image_key)
-            for target in targets[1:]:
-                prepared[target] = self._prepare_copy(
-                    local_source, target, source_manifest
-                )
             self._assert_snapshot_unchanged(source, validated.source_snapshot, "copy")
-            for target in targets:
-                before_commit = prepared[target]
-                prepared[target] = self._commit_copy(before_commit, source_manifest)
-                if before_commit.temporary is not None and not prepared[target].reused:
-                    committed_targets.add(target)
+            before_commit = prepared
+            prepared = self._commit_copy(prepared, manifest)
+            committed = before_commit.temporary is not None and not prepared.reused
             self._assert_snapshot_unchanged(source, validated.source_snapshot, "copy")
         except SourceChangedError:
-            # These directories were atomically committed by this call but have
-            # not been returned/enqueued as READY.  Removing only our own new
-            # targets lets a fresh stable version of the same job id retry;
-            # pre-existing idempotent targets are never touched.
-            for target in committed_targets:
-                shutil.rmtree(target, ignore_errors=True)
+            # Roll back only the destination this attempt created, never an
+            # existing, byte-identical backup reused during recovery.
+            if committed:
+                shutil.rmtree(backup_target, ignore_errors=True)
             raise
         finally:
-            for item in prepared.values():
-                if item.temporary is not None:
-                    shutil.rmtree(item.temporary, ignore_errors=True)
-
-        staging_reused = prepared[staging_target].reused
-        backup_reused = prepared[backup_target].reused
-        return IngestResult(
-            source_folder=source,
-            staged_folder=staging_target,
-            original_backup_folder=backup_target,
-            expected_image_keys=validated.expected_image_keys,
-            ready_at=validated.ready_at,
-            deadline_at=validated.deadline_at,
-            staging_reused=staging_reused,
-            backup_reused=backup_reused,
-        )
-
-    def plan_archive(
-        self,
-        validated: ValidatedIngest,
-        *,
-        backup_root: str | Path,
-        staging_root: str | Path | None = None,
-    ) -> ArchivePlan:
-        """Return immutable target paths without touching local storage.
-
-        The ingest worker can persist these paths with ``ready_at`` and
-        ``deadline_at`` before starting the archive, so a process crash during
-        copy is recoverable from the durable ``INGESTING`` state.
-        """
-        source = validated.source_folder
-        backup_base = Path(backup_root).expanduser().resolve(strict=False)
-        backup_target = (
-            backup_base
-            / self._job_date(validated.job_id).isoformat()
-            / validated.job_id
-        )
-        if staging_root is None:
-            staging_target = backup_target
-        else:
-            staging_base = Path(staging_root).expanduser().resolve(strict=False)
-            if staging_base == backup_base:
-                staging_target = backup_target
-            else:
-                staging_target = staging_base / validated.job_id
-
-        self._validate_target(source, backup_target)
-        self._validate_target(source, staging_target)
-        return ArchivePlan(
-            staged_folder=staging_target,
-            original_backup_folder=backup_target,
-        )
-
-    def ingest(
-        self,
-        source_folder: str | Path,
-        *,
-        backup_root: str | Path,
-        staging_root: str | Path | None = None,
-    ) -> IngestResult:
-        """Validate and archive in one call for simple worker deployments."""
-        validated = self.validate(source_folder)
-        return self.archive(
-            validated, backup_root=backup_root, staging_root=staging_root
-        )
+            if prepared is not None and prepared.temporary is not None:
+                shutil.rmtree(prepared.temporary, ignore_errors=True)
+        return IngestResult(backup_target, prepared.reused)
 
     @staticmethod
     def _resolve_source(source_folder: str | Path) -> Path:
@@ -517,14 +392,6 @@ class IngestService:
         if decoded is None or decoded.size == 0:
             raise IngestValidationError(f"Expected image is not decodable: {image_key}")
 
-    def _aware_now(self) -> datetime:
-        current = self._clock()
-        if current.tzinfo is None or current.utcoffset() is None:
-            raise ValueError(
-                "IngestService clock must return a timezone-aware datetime"
-            )
-        return current
-
     @classmethod
     def _snapshot_tree(cls, root: Path) -> TreeSnapshot:
         try:
@@ -568,7 +435,7 @@ class IngestService:
         return tuple(paths)
 
     @classmethod
-    def _content_manifest(cls, root: Path, *, source: bool = False) -> ContentManifest:
+    def _content_manifest(cls, root: Path) -> ContentManifest:
         entries: list[ContentManifestEntry] = []
         try:
             for path in cls._walk_tree(root):
@@ -578,8 +445,9 @@ class IngestService:
                     entries.append(ContentManifestEntry(relative, "directory", 0, ""))
                     continue
                 if not stat.S_ISREG(metadata.st_mode):
-                    error_type = IngestValidationError if source else IngestStorageError
-                    raise error_type(f"Tree contains a non-regular entry: {relative}")
+                    raise IngestStorageError(
+                        f"Tree contains a non-regular entry: {relative}"
+                    )
                 digest = hashlib.sha256()
                 with path.open("rb") as stream:
                     for chunk in iter(lambda: stream.read(_HASH_CHUNK_SIZE), b""):
@@ -592,13 +460,9 @@ class IngestService:
                         digest.hexdigest(),
                     )
                 )
-        except (IngestValidationError, IngestStorageError):
+        except IngestStorageError:
             raise
         except OSError as exc:
-            if source:
-                raise SourceChangedError(
-                    f"Source changed while calculating content manifest: {root}"
-                ) from exc
             raise IngestStorageError(
                 f"Unable to verify local ingest target {root}: {exc}"
             ) from exc
@@ -691,53 +555,6 @@ class IngestService:
         except Exception:
             shutil.rmtree(temporary, ignore_errors=True)
             raise
-
-    @classmethod
-    def _prepare_copy(
-        cls,
-        source: Path,
-        target: Path,
-        source_manifest: ContentManifest,
-    ) -> _PreparedCopy:
-        if target.exists():
-            if not target.is_dir():
-                raise IngestCollisionError(
-                    f"Ingest target exists and is not a directory: {target}"
-                )
-            if cls._content_manifest(target) != source_manifest:
-                raise IngestCollisionError(
-                    f"Ingest target already exists with different content: {target}"
-                )
-            return _PreparedCopy(target=target, temporary=None, reused=True)
-
-        try:
-            ensure_directory(target.parent)
-            temporary = Path(
-                tempfile.mkdtemp(
-                    prefix=f".{target.name}.", suffix=".tmp", dir=target.parent
-                )
-            )
-            try:
-                shutil.copytree(
-                    source,
-                    temporary,
-                    dirs_exist_ok=True,
-                    copy_function=shutil.copy2,
-                )
-                if cls._content_manifest(temporary) != source_manifest:
-                    raise SourceChangedError(
-                        f"Source changed while copying job: {source}"
-                    )
-            except Exception:
-                shutil.rmtree(temporary, ignore_errors=True)
-                raise
-            return _PreparedCopy(target=target, temporary=temporary, reused=False)
-        except (IngestValidationError, IngestStorageError):
-            raise
-        except OSError as exc:
-            raise IngestStorageError(
-                f"Unable to prepare local ingest target {target}: {exc}"
-            ) from exc
 
     @classmethod
     def _commit_copy(

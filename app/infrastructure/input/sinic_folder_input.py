@@ -125,28 +125,11 @@ class SinicFolderInput:
 class FileSettleTracker:
     """Track when a machine job's complete input file set becomes stable."""
 
-    def __init__(
-        self, settle_seconds: float = 2.0, *, allow_no_images: bool = False
-    ) -> None:
+    def __init__(self, settle_seconds: float = 2.0) -> None:
         if settle_seconds < 0:
             raise ValueError("settle_seconds must be greater than or equal to zero")
         self._settle_seconds = settle_seconds
-        self._allow_no_images = allow_no_images
         self._states: dict[str, _ObservedState] = {}
-
-    @property
-    def settle_seconds(self) -> float:
-        return self._settle_seconds
-
-    def observe(self, job: MachineJobFiles, *, now: float | None = None) -> bool:
-        """Return ``True`` once required files have remained unchanged long enough."""
-        now = time.monotonic() if now is None else now
-        key = str(job.folder)
-        snapshot = SinicFolderInput.snapshot(job)
-        has_required_files = bool(job.csv_files) and (
-            self._allow_no_images or bool(job.image_files)
-        )
-        return self.observe_snapshot(key, snapshot, has_required_files, now=now)
 
     def observe_snapshot(
         self,

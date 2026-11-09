@@ -13,6 +13,7 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
+from app.domain.entities.defect import FAIL_CODE, PASS_CODE
 from app.domain.entities.pipeline_result import PipelineResultManifest
 from app.domain.minifi_schema import CSV_RENAME_MAP, MINIFI_COLUMNS
 from app.infrastructure.local_store import fsync_directory
@@ -50,7 +51,7 @@ def convert_rows(
             code = Decimal(row["is_pass"])
         except InvalidOperation as exc:
             raise ValueError(f"Invalid is_pass at row {index}: {source}") from exc
-        if code not in (Decimal(22), Decimal(23)) or (
+        if code not in (Decimal(PASS_CODE), Decimal(FAIL_CODE)) or (
             expected_codes is not None and code != expected_codes[index]
         ):
             raise ValueError(
@@ -58,7 +59,7 @@ def convert_rows(
             )
         row["is_pass"] = str(int(code))
         row["ai_defect_name"] = row.get("ai_defect_name", "").strip()
-        if code == 23 and not row["ai_defect_name"]:
+        if code == FAIL_CODE and not row["ai_defect_name"]:
             row["ai_defect_name"] = "AI_SKIP"
         identity = json.dumps(
             [
@@ -80,7 +81,7 @@ def convert_rows(
         for key in MINIFI_COLUMNS:
             if key.startswith("dat_"):
                 row[key] = ""
-        groups["OK" if code == 22 else "NG"].append(
+        groups["OK" if code == PASS_CODE else "NG"].append(
             {key: row.get(key, "") for key in MINIFI_COLUMNS}
         )
     return groups

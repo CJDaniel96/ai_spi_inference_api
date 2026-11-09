@@ -28,7 +28,6 @@ def inspect_source(extensions, folder, threshold):
 def _service(config):
     return IngestService(
         image_name_template=config.processing.image_name_template,
-        primary_return_deadline_seconds=config.reliability.end_to_end_timeout_seconds,
     )
 
 
@@ -47,11 +46,10 @@ def validate_source(config, source, csv_snapshot=None):
     )
 
 
-def archive_source(config, validated, backup_root, staging_root, csv_snapshot=None):
+def archive_source(config, validated, backup_root, csv_snapshot=None):
     return _service(config).archive(
         validated,
         backup_root=backup_root,
-        staging_root=staging_root,
         csv_snapshot=csv_snapshot,
     )
 

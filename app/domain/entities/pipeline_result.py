@@ -10,10 +10,11 @@ from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from app.domain.entities.defect import FAIL_CODE, PASS_CODE
 from app.infrastructure.local_store import fsync_directory
 
 _SCHEMA_VERSION = 1
-_VALID_RESULT_CODES = frozenset({22, 23})
+_VALID_RESULT_CODES = frozenset({PASS_CODE, FAIL_CODE})
 
 
 class PipelineOutcome(StrEnum):

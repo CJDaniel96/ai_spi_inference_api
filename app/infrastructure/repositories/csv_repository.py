@@ -1,4 +1,4 @@
-"""Infrastructure: CSV read/write with distinct processing vs. output modes."""
+"""Read CSV values without coercing identifiers and atomically write results."""
 
 from __future__ import annotations
 
@@ -15,13 +15,6 @@ from app.infrastructure.output.sinic_csv_output import _read_document
 
 class CsvRepository:
     """Reads and writes CSV files for the processing pipeline."""
-
-    def read_for_processing(self, path: Path) -> pd.DataFrame:
-        """Read a CSV with pandas' default typing (for computation)."""
-        document = _read_document(path)
-        return pd.read_csv(
-            path, encoding=document.encoding, sep=document.dialect.delimiter
-        )
 
     def read_for_output(self, path: Path) -> pd.DataFrame:
         """Read a CSV as strings, preserving original numeric formatting.

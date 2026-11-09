@@ -52,7 +52,6 @@ def test_verified_raw_backup_recovers_when_spi_source_is_gone(tmp_path):
         config,
         validate_source(config, source, csv_root),
         Path(config.paths.backup_output_root),
-        None,
         csv_root,
     )
     now = time.time()
