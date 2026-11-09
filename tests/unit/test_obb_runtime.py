@@ -12,6 +12,7 @@ import pytest
 
 from app.core.inspection_config import ObbConfig
 from app.domain.entities.obb_result import OBB_CLASSES, ObbBatchResult, ObbDetection
+from app.domain.services.appearance_classifier import AppearanceClassifier
 from app.infrastructure.inference import yolo_obb
 from app.infrastructure.inference.resident_process import (
     ObbRuntimeError,
@@ -138,18 +139,22 @@ class FakeYolo:
     def __init__(self):
         # Deliberately change the numeric class order.
         self.names = dict(enumerate(reversed(OBB_CLASSES)))
+        self.detected_names = ("Solder_Paste",)
         self.calls = []
 
     def predict(self, *, source, **kwargs):
         self.calls.append((len(source), kwargs))
-        class_id = next(i for i, name in self.names.items() if name == "Solder_Paste")
+        class_ids = [
+            next(i for i, name in self.names.items() if name == detected_name)
+            for detected_name in self.detected_names
+        ]
         return [
             SimpleNamespace(
                 names=self.names,
                 obb=SimpleNamespace(
-                    cls=FakeTensor([class_id]),
-                    conf=FakeTensor([0.8]),
-                    xyxyxyxy=FakeTensor([POLYGON]),
+                    cls=FakeTensor(class_ids),
+                    conf=FakeTensor([0.8] * len(class_ids)),
+                    xyxyxyxy=FakeTensor([POLYGON] * len(class_ids)),
                 ),
             )
             for _image in source
@@ -217,11 +222,56 @@ def test_formats_share_adapter_and_fixed_engine_tail_is_discarded(
     assert len(result.model_version) == 64
 
 
-def test_incomplete_model_classes_are_rejected(tmp_path, monkeypatch):
+@pytest.mark.parametrize("suffix", [".pt", ".onnx", ".engine"])
+@pytest.mark.parametrize("label", ["Foreign_object", "Foreign_Object"])
+def test_foreign_object_export_spelling_uses_configured_ng_threshold(
+    tmp_path, monkeypatch, suffix, label
+):
+    path = tmp_path / f"model{suffix}"
+    path.write_bytes(b"fake exported weights")
+    fake = FakeYolo()
+    foreign_id = next(i for i, name in fake.names.items() if name == "Foreign_object")
+    fake.names[foreign_id] = label
+    fake.detected_names = ("Solder_Paste", label)
+    monkeypatch.setitem(
+        sys.modules, "ultralytics", SimpleNamespace(YOLO=lambda *a, **kw: fake)
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "onnxruntime",
+        SimpleNamespace(get_available_providers=lambda: ["CPUExecutionProvider"]),
+    )
+    monkeypatch.setattr(yolo_obb, "_onnx_fixed_batch", lambda path: None)
+    settings = ObbConfig(
+        model_path=str(path), device="cuda:0" if suffix == ".engine" else "cpu"
+    )
+    model = YoloObbModel(settings)
+    image = tmp_path / "pad.png"
+    assert cv2.imwrite(str(image), np.zeros((8, 8, 3), dtype=np.uint8))
+    detections = model.infer({"pad": str(image)}, time.time() + 5).results["pad"]
+
+    assert [box.class_name for box in detections] == ["Solder_Paste", "Foreign_object"]
+    decision = AppearanceClassifier(settings.class_thresholds).classify(detections)
+    assert not decision.passed
+    assert (decision.ok_count, decision.ng_count, decision.reason) == (
+        1,
+        1,
+        "Foreign_object",
+    )
+    thresholds = {**settings.class_thresholds, "Foreign_object": 0.9}
+    assert AppearanceClassifier(thresholds).classify(detections).passed
+
+
+@pytest.mark.parametrize("invalid_label", [None, "Foreign_Objects", "Bridge"])
+def test_invalid_model_classes_are_rejected(tmp_path, monkeypatch, invalid_label):
     path = tmp_path / "model.pt"
     path.write_bytes(b"fake")
     fake = FakeYolo()
-    fake.names.pop(0)
+    foreign_id = next(i for i, name in fake.names.items() if name == "Foreign_object")
+    if invalid_label is None:
+        fake.names.pop(foreign_id)
+    else:
+        fake.names[foreign_id] = invalid_label
     monkeypatch.setitem(
         sys.modules, "ultralytics", SimpleNamespace(YOLO=lambda *a, **kw: fake)
     )

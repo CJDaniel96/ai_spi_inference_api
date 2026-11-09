@@ -37,6 +37,7 @@
 - ONNX 固定批次從模型 NCHW 輸入維度讀取並自動補齊；動態批次使用設定的 `batch_size`。
 - `imgsz`、TensorRT batch 與裝置需符合實際匯出的模型；副檔名選擇後端不代表自動轉換權重。
 - ONNX 需對應的 ONNX／ONNX Runtime 套件；TensorRT 需 CUDA 裝置及相容 runtime。類別依名稱解析，不假設固定的 class ID 順序。
+- 模型類別名稱 `Foreign_Object` 相容於設定中的 `Foreign_object`；啟動驗證與推論結果會統一為 `Foreign_object`，套用同一個 NG 信心門檻。設定檔與輸出紀錄維持使用 `Foreign_object`。缺少、重複或其他未知類別仍會啟動失敗。
 - 範例權重路徑是預留位置，專案未包含權重；缺檔會明確啟動失敗，不自動下載其他模型。
 
 ## 固定判定順序

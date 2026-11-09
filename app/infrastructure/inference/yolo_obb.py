@@ -16,6 +16,11 @@ from app.infrastructure.model_runtime import (
 )
 
 
+def _canonical_class_name(name: str) -> str:
+    """Map the known export spelling to the configured NG class name."""
+    return "Foreign_object" if name == "Foreign_Object" else name
+
+
 def _onnx_fixed_batch(path: Path) -> int | None:
     import importlib
 
@@ -58,7 +63,10 @@ class YoloObbModel:
         black = np.zeros((settings.imgsz, settings.imgsz, 3), dtype=np.uint8)
         self._predict([black] * batch)
         names = self._model.names
-        class_names = list(names.values()) if isinstance(names, dict) else list(names)
+        class_names = [
+            _canonical_class_name(name)
+            for name in (names.values() if isinstance(names, dict) else names)
+        ]
         if len(class_names) != len(OBB_CLASSES) or set(class_names) != set(OBB_CLASSES):
             raise ValueError(
                 f"OBB class names do not match configured classes: {names}"
@@ -129,7 +137,7 @@ class YoloObbModel:
                 polygons = boxes.xyxyxyxy.cpu().numpy().tolist()
                 output[key] = tuple(
                     ObbDetection(
-                        result.names[int(class_id)],
+                        _canonical_class_name(result.names[int(class_id)]),
                         float(score),
                         tuple(tuple(float(v) for v in point) for point in polygon),
                     )
