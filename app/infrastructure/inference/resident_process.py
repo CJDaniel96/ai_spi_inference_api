@@ -65,7 +65,7 @@ class ResidentObbRuntime:
         self._ready = False
         self._busy = False
         self.metadata = {}
-        self._logger = get_logger("pipeline.obb")
+        self._logger = get_logger("controller.obb")
 
     @property
     def pid(self) -> int | None:

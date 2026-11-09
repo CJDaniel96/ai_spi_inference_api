@@ -1,32 +1,20 @@
 name: CI
-
-on:
-  push:
-  pull_request:
-
+on: [push, pull_request]
 jobs:
   lint-and-test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.12"
-
-      # The maintained surface (app/ + tests/unit + tests/integration) only needs
-      # the lightweight web/data stack plus dev tooling. The heavy ML deps
-      # (torch/opencv/ultralytics/anomalib) and the import-only smoke test are
-      # exercised on the deployment machine, not in CI, to keep it fast/reliable.
-      - name: Install lightweight test dependencies
-        run: uv pip install fastapi httpx pandas pydantic -r requirements-dev.txt
-
+      - name: Install controller test dependencies
+        run: uv pip install pydantic==2.11.3 pandas==2.1.4 numpy==1.26.4 opencv-python==4.11.0.86 -r requirements-dev.txt
       - name: Ruff lint
         run: uv run --no-sync ruff check .
-
-      - name: Ruff format check
+      - name: Ruff format
         run: uv run --no-sync ruff format --check .
-
-      - name: Pytest
-        run: uv run --no-sync pytest tests/unit tests/integration
+      - name: Configuration validation
+        run: uv run --no-sync python -m app.main --check-config --config config/ai_server.example.json
+      - name: Tests with real supervised processes and fake models
+        run: uv run --no-sync pytest -q

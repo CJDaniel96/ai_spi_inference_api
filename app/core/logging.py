@@ -3,9 +3,8 @@
 Configures a single ``app.system`` logger with a rotating file handler
 (``<log_dir>/<system_log_file>``) plus a console handler. The log directory and
 system-log filename come from config (``logging.log_dir`` /
-``logging.system_log_file``). The directory is created if missing, so logging
-never crashes on a non-existent path. The per-job metrics CSV is written
-separately by ``RequestLogWriter`` (also config-driven).
+``logging.system_log_file``). The directory is created when needed.
+Job facts are persisted separately in the local event journal.
 """
 
 from __future__ import annotations

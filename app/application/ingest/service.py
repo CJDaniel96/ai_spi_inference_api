@@ -33,6 +33,7 @@ import pandas as pd
 
 from app.core.errors import AppError, CsvSchemaError
 from app.domain.services.csv_merger import CsvMerger
+from app.infrastructure.local_store import ensure_directory, fsync_directory
 from app.infrastructure.output.sinic_csv_output import _parse_document
 from app.infrastructure.repositories.csv_repository import CsvRepository
 
@@ -141,14 +142,14 @@ class IngestService:
     def __init__(
         self,
         *,
-        image_name_source_column: str | None = None,
-        image_name_template: str | None = None,
+        image_name_template: str = (
+            "{csv_stem}_{component_name}_{Array_id}_{Pad_id}.jpg"
+        ),
         primary_return_deadline_seconds: float = 30.0,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         if primary_return_deadline_seconds <= 0:
             raise ValueError("primary_return_deadline_seconds must be positive")
-        self._source_column = image_name_source_column
         self._template = image_name_template
         self._deadline_seconds = primary_return_deadline_seconds
         self._clock = clock or (lambda: datetime.now(UTC))
@@ -189,7 +190,6 @@ class IngestService:
             frame = pd.DataFrame(document.rows)
             frame = self._csv_merger.add_image_name_column(
                 frame,
-                source_column=self._source_column,
                 template=self._template,
                 csv_stem=path.stem,
             )
@@ -201,7 +201,7 @@ class IngestService:
             payloads[path.name] = payload
         if snapshot() != initial:
             raise SourceChangedError("CSV set changed during snapshot")
-        destination.parent.mkdir(parents=True, exist_ok=True)
+        ensure_directory(destination.parent)
         temporary = Path(tempfile.mkdtemp(prefix=".csv-", dir=destination.parent))
         try:
             for name, payload in payloads.items():
@@ -214,6 +214,7 @@ class IngestService:
                     raise IngestCollisionError("Persisted CSV snapshot differs")
             else:
                 os.replace(temporary, destination)
+                fsync_directory(destination.parent)
         finally:
             shutil.rmtree(temporary, ignore_errors=True)
         if snapshot() != initial:
@@ -249,7 +250,6 @@ class IngestService:
             try:
                 frame = self._csv_merger.add_image_name_column(
                     frame,
-                    source_column=self._source_column,
                     template=self._template,
                     csv_stem=csv_path.stem,
                 )
@@ -464,7 +464,7 @@ class IngestService:
     @staticmethod
     def _read_csv(csv_path: Path) -> pd.DataFrame:
         try:
-            return CsvRepository().read_for_processing(csv_path)
+            return CsvRepository().read_for_output(csv_path)
         except (OSError, UnicodeError, pd.errors.ParserError) as exc:
             raise IngestValidationError(
                 f"Unable to parse CSV {csv_path.name}: {exc}"
@@ -627,7 +627,7 @@ class IngestService:
         cls, source: Path, target: Path, snapshot: TreeSnapshot
     ) -> tuple[_PreparedCopy, ContentManifest]:
         """Read source bytes once, hashing during copy and verifying locally."""
-        target.parent.mkdir(parents=True, exist_ok=True)
+        ensure_directory(target.parent)
         temporary = Path(
             tempfile.mkdtemp(
                 prefix=f".{target.name}.", suffix=".tmp", dir=target.parent
@@ -660,6 +660,8 @@ class IngestService:
                     writer.write(chunk)
                     digest.update(chunk)
                     size += len(chunk)
+                writer.flush()
+                os.fsync(writer.fileno())
             if size != entry.size:
                 raise SourceChangedError(f"Source changed during copy: {relative}")
             shutil.copystat(path, dst)
@@ -709,7 +711,7 @@ class IngestService:
             return _PreparedCopy(target=target, temporary=None, reused=True)
 
         try:
-            target.parent.mkdir(parents=True, exist_ok=True)
+            ensure_directory(target.parent)
             temporary = Path(
                 tempfile.mkdtemp(
                     prefix=f".{target.name}.", suffix=".tmp", dir=target.parent
@@ -746,7 +748,15 @@ class IngestService:
         if prepared.temporary is None:
             return prepared
         try:
+            for folder in sorted(
+                (entry for entry in prepared.temporary.rglob("*") if entry.is_dir()),
+                key=lambda path: len(path.parts),
+                reverse=True,
+            ):
+                fsync_directory(folder)
+            fsync_directory(prepared.temporary)
             prepared.temporary.rename(prepared.target)
+            fsync_directory(prepared.target.parent)
             return _PreparedCopy(target=prepared.target, temporary=None, reused=False)
         except OSError as exc:
             # A concurrent idempotent worker may have won the rename race.

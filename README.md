@@ -1,1273 +1,150 @@
-# AI SPI Inference API
+# SPI AI 單一主控
 
-A durable three-stage pipeline that enriches SPI (Solder Paste Inspection) machine
-output with AI results and returns the machine-facing CSV within a configurable
-soft-real-time deadline. Ingest, inference, and publication run as independent
-processes coordinated through a local SQLite database. The original synchronous
-FastAPI `/process` workflow remains available for compatibility.
+本版本只保留同一台 AIPC 上的原生 OBB 推論流程。啟動一個主程式，由它管理資料接收、原始備份、模型推論、六秒期限、SPI 回傳、背景結果備份與 MiNiFi 匯出。
 
-The shipped SX configuration uses **one resident YOLO OBB subprocess owned by
-Stage 02**, followed by volume, area, height, and X/Y shift checks using each
-machine CSV row's own limits. Model HTTP servers are unnecessary in this mode.
-Configure `inference.obb.model_path` before startup; `.pt`, `.onnx`, and `.engine`
-select their backend by suffix. See [SX OBB 推論與判定](docs/sx_obb_inference.md).
+接收、推論、發布仍是分開的服務模組，但不再透過 SQLite 或交接資料夾認領工作。模型與可能阻塞的 I/O 放在由主控管理的子程序；SQLite 只保存本機事件的背景查詢副本。
 
-## What This Project Does
+## 啟動
 
-Given a timestamp folder containing SPI CSV(s) and pad images, the durable pipeline:
-
-1. Watches today's timestamp folders and persists the first CSV observation and
-   absolute end-to-end deadline before waiting for stability.
-2. Validates the CSV set and saves immutable original CSV snapshots. More than
-   60 actual image files takes a CSV-only all-`23` bypass without decoding images.
-3. For normal inference, checks image metadata, streams the original tree once
-   from the share while hashing, then verifies/decodes the local copy before READY.
-4. Runs native OBB inference against the immutable local copy. Explicit
-   `legacy_http` configs can still call the enabled historical model endpoints.
-5. Verifies complete model results for every expected image. Required-model
-   failure or timeout produces an all-`23` fail-safe result.
-6. In SX mode, filters OBB boxes by class confidence and applies each row's CSV
-   limits in order, normalizing reversed low/high values before comparison.
-7. Publishes Primary CSVs atomically, checkpointing each success. Failed writes
-   retry only within the remaining job budget; expired jobs are never auto-resent.
-8. Saves local result backups in a supervised background process after Primary,
-   without blocking later returns. Oversized raw images use a separate background
-   lane; missing source files are reported as incomplete.
-9. Exports completed processed backups to MiNiFi OK/NG CSVs in another supervised
-   background lane when `pipeline.db_export_config_path` is configured. The
-   shipped config enables this, so a standalone export process is unnecessary.
-
-The optional resident Detection → Segmentation service, single-read ingest, and
-background backup behavior are documented in
-[模型串接與 I/O 改善](docs/model_flow_io_improvements.md).
-
-## Architecture
-
-Stage-owned application packages with shared domain and infrastructure under `app/`:
-
-```
-app/
-  api/                     # FastAPI compatibility routes and schemas
-  application/
-    ingest/                # 01: worker, validation/archive service, supervised IO
-    inference/             # 02: worker and model-inference service
-    publisher/             # 03: worker, publication, backup, and MiNiFi export
-    shared/                # all-23 fallback builder and common result artifacts
-    use_cases/             # legacy synchronous ProcessJobUseCase
-  domain/                  # jobs, pipeline states/results, classification logic
-  infrastructure/
-    repositories/          # CSV/filesystem adapters and SQLite job repository
-    model_clients/         # deadline-aware HTTP model clients
-    output/                # atomic machine-facing CSV output
-  core/                    # Pydantic config, logging, and error hierarchy
-  pipeline.py              # `python -m app.pipeline <stage>` CLI
-```
-
-Each stage keeps its worker, service, and stage-specific IO operations together.
-`FallbackResultBuilder` is shared by all three stages, so ingest bypass and
-Publisher deadline takeover do not import the inference service or model clients.
-`ResultArtifactWriter` keeps normal and fallback processed CSVs in the same
-manifest-compatible layout. Stage packages are loaded lazily by the CLI.
-See [三階段程式結構](docs/pipeline_stage_structure.md) for ownership and deployment.
-
-Production components:
-
-| Component | Port | Role |
-| --- | --- | --- |
-| Ingest worker | — | Validate today's timestamp folders and create local immutable input |
-| Inference worker | — | Earliest-deadline-first model execution and result manifest creation |
-| Publisher worker | — | Deadline takeover, Primary-first publication, local result backup, and background MiNiFi export |
-| SQLite WAL database | — | Durable job state, leases, attempts, timestamps, and crash recovery |
-| Resident YOLO OBB | — | SX appearance inference; Stage 02 loads, warms and supervises the child |
-| PatchCore anomaly (legacy) | `8000` | Returns `anomaly_score` |
-| Paste detection | `8001` | Returns `paste_pixels` — **disabled by default** |
-| Distance detection | `8002` | Returns `min_center_to_pad_distance` |
-| Merge server (`app.main`) | `5050` | Legacy compatibility API; `/process` requires `legacy_http` mode |
-
-**Entry points**
-
-- Durable production pipeline: `python -m app.pipeline ingest`, `inference`, and
-  `publisher` in three separate processes.
-- Compatibility API: `python -m app.main`.
-- Deprecated legacy server: `python ai_server_fastapi.py`.
-
-## Runtime Flow
+主要程式位置：
 
 ```text
-SPI shared folder
-       │
-       ▼
-Ingest Worker
-  persist DISCOVERED + first_seen_at/deadline_at
-  stable CSV set + immutable CSV-only snapshot
-  >60 images: all-23 FALLBACK_READY directly to Publisher
-  <=60 images: validate + atomically archive raw input
-       │ READY
-       ▼
-Inference Worker
-  earliest deadline first
-  resident OBB + SX CSV rules, within deadline - publish reserve
-  normal decision or all-23 fallback manifest
-       │ RESULT_READY / FALLBACK_READY
-       ▼
-Publisher Worker
-  normal result, or cutoff takeover from INGESTING/READY/INFERENCING
-  use durable CSV snapshot for fallback without waiting for raw images
-  publish each Primary CSV atomically, recording per-file acknowledgements
-  retry within the original deadline; otherwise EXPIRED
-       │ PRIMARY_RETURNED
-       ▼
-  local returned CSV + processed CSV + manifest backup
-       │ DONE
-       ▼
-SQLite WAL state and stage-specific logs retain the evidence
+app/main.py                         # 單一 CLI 入口
+app/application/controller.py       # 工作生命週期、期限、結果選定及發布
+app/application/ingest/              # CSV／影像驗證與不可變備份
+app/application/inference/          # OBB 結果與 CSV 逐列判定
+app/application/operations.py        # 受監督的發布與背景備份操作
+app/infrastructure/local_store.py   # 本機事件、快照及單一主控鎖
+app/infrastructure/audit.py         # 背景 SQLite 投影
+app/minifi.py                       # 明確結果 manifest 的 MiNiFi 匯出
 ```
 
-After result backups are complete, Publisher's independent export lane scans
-them for MiNiFi delivery. `DONE` records successful Primary and backup completion;
-MiNiFi export may still be pending. Export failures retain the processed backup
-for retry and do not change the job's Primary receipt or `DONE` state.
+需要 Python 3.12。Windows / NVIDIA AIPC：
 
-Persisted states are `DISCOVERED`, `INGESTING`, `READY`, `INFERENCING`, `RESULT_READY`,
-`FALLBACK_READY`, `PUBLISHING`, `PRIMARY_RETURNED`, `DONE`, `FAILED`, and `EXPIRED`.
-Claims use SQLite transactions and expiring worker leases, so an expired stage can
-be reclaimed after a process crash. Jobs are ordered by the earliest deadline.
+```bat
+setup.bat
+start_spi_ai.bat
+```
 
-### Configurable end-to-end deadline (6 seconds by default)
+`setup.bat` 使用 uv 安裝 inference 與 cuda extras。也可以先自行準備 Python 3.12 環境，透過 `PYTHON_EXE` 指定解譯器。TensorRT 必須另外安裝與實機 CUDA／驅動相符的版本。
 
-New jobs persist `first_seen_at` when CSV input is first observed, before settle,
-validation, copying, queueing, inference, or publication. This is a conservative
-AI-side observation, not a machine export-completion event or folder-name time.
-`ready_at` is recorded once complete CSV/image validation on the local raw copy
-has passed and the new job transitions to READY. Existing legacy values remain.
-CSV-only bypass jobs have no `ready_at` because their images are never decoded.
+跨平台指令：
+
+```sh
+python -m app.main --check-config
+python -m app.main
+python -m app.main --config config/ai_server.json --once --date 2026-11-09
+```
+
+`--once` 掃描一批工作，等候各工作完成回傳或到期，再嘗試一次背景備份、匯出與 DB 補登。失敗的背景工作保留在本機，重啟後繼續。若本次有 FAILED、EXPIRED 或 PUBLICATION_UNKNOWN 工作，--once 會以 exit code 2 結束；背景補登失敗則保留紀錄等待下次處理。長駐模式持續掃描輸入並獨立執行背景工作。`--date` 僅用於 `--once`。
+
+## 單一設定檔
+
+正式設定為 `config/ai_server.json`；可用 `AI_CONFIG_PATH` 或 `--config` 指定另一份完整設定。`config/ai_server.example.json` 是使用相對路徑的範本。相對路徑以專案根目錄解析。
+
+| 區塊 | 用途 |
+|---|---|
+| identity | site、factory、line、station_id，供判定紀錄及 MiNiFi 使用 |
+| paths | SPI 輸入、SPI 回傳、不可變原始備份、本機工作狀態根目錄 |
+| processing | 影像副檔名、影像名稱 template、實際影像數上限、穩定等待 |
+| reliability | 唯一整體期限及發布預留時間 |
+| runtime | 掃描與監督間隔、同時接收數量、背景嘗試期限與重試間隔 |
+| inference.obb | 權重、GPU、批次大小、模型過濾與各類別判定門檻 |
+| output | SPI 回傳是否保留 job 資料夾；回傳固定只更新原 CSV 的 is_pass |
+| database | 背景紀錄開關、SQLite 位置、補登間隔、鎖等待時間 |
+| minifi | 背景匯出開關、輸出位置、處理間隔；輸入固定為已完成的結果備份 |
+| logging | 系統日誌目錄及檔名 |
+
+設定啟動時載入及驗證一次，再傳給內部子程序；修改後重啟生效。每筆工作保存當時的設定快照與期限。尚未回傳的工作若在設定變更後重啟，會停止機台回傳並標記 `configuration_changed`，不會用新模型或新目的地偷偷續跑。已回傳工作的背景匯出沿用原始設定快照。
+
+舊的 `server`、`model_clients`、`defect_rules`、`pipeline`、scanner 設定及獨立 `db_export.json`／`yolo_area.json` 已移除；未知設定會直接被拒絕。輸入、回傳、備份、狀態與 MiNiFi 目錄必須分開，不可互相包含。`state_root` 與 SQLite 應放在 AIPC 本機磁碟。
+
+## 每份工作如何處理
+
+輸入是一個 14 碼時間戳資料夾，內含一份或多份 CSV 與對應影像。主控只自動掃描當日資料夾；歷史日期用 `--once --date` 指定。
+
+1. 首次觀測 CSV 即保存工作與期限；來源 CSV 集合在穩定窗口內不變後，保存不可變 CSV 快照。
+2. 依 template 與 CSV 原始字串組成影像名稱，保留 `001` 等識別值的前導零。預設為 `{csv_stem}_{component_name}_{Array_id}_{Pad_id}.jpg`。
+3. 正常工作驗證影像、串流複製並核對雜湊，在本機驗證影像可解碼，再允許推論。
+4. 常駐 OBB 子程序執行推論；同一時間只跑一筆 GPU 工作。先判斷外觀，再依 CSV 每列的 volume、area、height、shift 門檻判定，細節見 `docs/sx_obb_inference.md`。
+5. 主控只選定一份結果，保存後依原檔名逐份回傳 SPI。原 CSV 的欄位、編碼、列序與非 is_pass 值保留。
+6. SPI 回傳成功後，背景保存回傳版、完整 processed CSV 與 manifest，再轉成 MiNiFi OK／NG CSV。這些背景工作不阻擋下一筆回傳。
+
+超過 60 張實際影像時（嚴格大於；60 張仍推論），保存完整 CSV 後直接全 23，不等待影像解碼與完整原始影像備份。原始影像改為背景嘗試；若 SPI 回傳後來源已刪除，可能無法完整留存，狀態會明確記錄。CSV 列數不作為影像數。
+
+## 六秒期限與保護
 
 ```text
-deadline_at = first_seen_at + end_to_end_timeout_seconds
-publish_cutoff = deadline_at - primary_publish_reserve_seconds
+first_seen_at       = AI 首次觀測到 CSV 的時間
+inference_cutoff_at = first_seen_at + 6 秒 - 1 秒
+primary_deadline_at = first_seen_at + 6 秒
 ```
 
-The shipped total is 6 seconds, with 1 second reserved for publication. Every
-retry/restart reuses the persisted deadline. At the cutoff, Publisher may select
-an all-`23` fallback from the durable CSV snapshot. At the deadline, unpublished
-jobs become terminal `EXPIRED`; they are not inferred, retried, or auto-resent.
-Per-file checkpoints prevent repeating successful CSVs after a partial failure.
+沒有機台完成旗標時，檔案穩定只是完成推估，部署時需確認機台寫檔與來源保留契約。
 
-Blocking share reads/writes run in supervised spawned IO processes. A timeout
-terminates the IO lane so the main worker can schedule other jobs. An uncertain
-SMB rename acknowledgement is recorded as `publish_completion_unknown`, not as
-definite failure or success, and is not automatically replayed. The remote server
-may still complete a rename already submitted; absolute rejection of late results
-requires machine-side job/expiry checks. Cancelled HTTP waits also do not promise
-to preempt GPU computation in a downstream model server.
+六秒涵蓋檔案穩定等待、驗證、正常原始備份、GPU 排隊、推論及 SPI 回傳。結果提早完成就立即發布；到推論截止點仍無有效結果，但已有完整 CSV 快照時，主控選擇全 23。CSV 無法完整解析時不捏造全 23，到期停止。
 
-CSV stability is inferred from an unchanged complete CSV set during
-`source_settle_seconds`; without a machine completion marker this cannot prove
-that another CSV will never arrive. Oversized jobs preserve original CSVs and
-decisions before publication, but background image backup can be incomplete if
-the machine deletes the source after receiving the result. Inspect
-`image_backup_status` and arrange source retention when all images must be kept.
+重試與重啟不重新給時間。程序內另使用單調時鐘，避免系統時鐘往回調整延長同一筆工作。等待發布的工作依截止時間排序，進行中的共享磁碟操作有受監督的期限；晚到模型結果不會覆蓋已選定結果。
 
-Stop all three workers before upgrading an existing database. Startup performs a
-transactional schema migration and saves `DATABASE.pre-e2e.sqlite3` first.
-Historical timestamps and deadlines remain unchanged; do not run old workers
-against the migrated schema. Use the pre-migration snapshot for an explicit rollback.
+本系統為軟即時流程。Windows／SMB、磁碟與 GPU 實際耗時需在現場量測；遠端 SMB 伺服器可能完成已送出的 rename，即使回應逾時或本機終止了 I/O 子程序。無法確認的發布會標記 `PUBLICATION_UNKNOWN` 並停止自動重送。若要機台絕對拒絕晚到結果，需要 SPI 端也驗證工作識別與有效期限。
 
-## API Reference
-
-### GET /health
-
-Cheap liveness probe — returns immediately with the current UTC+8 timestamp.
-
-```json
-{ "status": "healthy", "time": "2026-07-09T10:00:00+08:00" }
-```
-
-### GET /ready
-
-Readiness probe. Returns **200** when the config loads (the service can accept
-jobs) or **503** when it cannot. Each enabled model endpoint's `/health` is probed
-(short timeout) and reported for diagnostics, but a model being down does **not**
-flip readiness (`/process` publishes the configured all-23 fail-safe result when
-a required model is unavailable).
-
-```json
-{
-  "status": "ready",
-  "config_ok": true,
-  "config_error": null,
-  "models": [
-    { "name": "anomaly",  "url": "http://127.0.0.1:8000/health", "healthy": true,  "detail": "status=200" },
-    { "name": "distance", "url": "http://127.0.0.1:8002/health", "healthy": false, "detail": "ConnectError" }
-  ]
-}
-```
-
-### POST /process
-
-This compatibility route requires `inference.mode="legacy_http"`. It rejects
-native OBB configs so it cannot accidentally publish using only historical CSV
-rules. A legacy config example is `config/ai_server.legacy.example.json`.
-
-This endpoint intentionally keeps the original synchronous contract. It runs
-`ProcessJobUseCase` inline and **does not enqueue or update the three-stage SQLite
-pipeline**. It remains useful for existing clients and manual processing, but its
-deadline starts when the request begins rather than at the durable pipeline's
-first CSV observation. Its existing `primary_return_deadline_seconds` setting is
-separate from the new durable-pipeline total budget.
-
-Do not run `scan_jobs.py` and the new Ingest Worker against the same watched folders
-at the same time: they are two separate execution paths and can publish the same
-job concurrently. For production, choose one mode:
-
-- Durable mode: run the three `app.pipeline` workers; the API is optional.
-- Compatibility mode: run `scan_jobs.py` plus `app.main`; do not run the new Ingest
-  Worker for that share.
-
-Body:
-
-```json
-{ "job_folder": "D:/path/to/job" }
-```
-
-Success (200):
-
-```json
-{
-  "status": "ok",
-  "saved_files": [".../AI/xxx.csv", ".../backup/.../xxx.csv", ".../xxx_processed.csv"],
-  "errors": [],
-  "csv_count": 1
-}
-```
-
-Fail-safe result (200, required model failure or inference-budget timeout):
-
-```json
-{
-  "status": "ok",
-  "fallback": true,
-  "reason": "required_model_failure",
-  "img_numbers": 4,
-  "csv_count": 1,
-  "saved_files": ["..."],
-  "errors": ["distance boom"]
-}
-```
-
-Skipped (200, image count over threshold):
-
-```json
-{
-  "status": "finished scanning",
-  "skipped": true,
-  "reason": "images_exceed_threshold",
-  "img_numbers": 812,
-  "csv_count": 1,
-  "saved_files": ["..."],
-  "errors": []
-}
-```
-
-Errors:
-
-| Situation | HTTP | Body |
-| --- | --- | --- |
-| Job folder missing / not a directory | 400 | `{ "detail": "..." }` |
-| No CSV files in folder | 400 | `{ "detail": "..." }` |
-| CSV missing required columns / bad values | 400 | `{ "detail": "..." }` |
-| Required model fails/times out/returns incomplete data | 200 | all rows are returned as `23` |
-| Optional model endpoint fails | 200 | normal result with the message in `errors` |
-| Config invalid / output write fails / unexpected | 500 | `{ "detail": "Internal Server Error" }` |
-
-`curl` example:
-
-```bash
-curl -X POST "http://127.0.0.1:5050/process" \
-  -H "Content-Type: application/json" \
-  -d '{ "job_folder": "D:/Dre/JQ_SPI_02_AI_API/data/20250523135357" }'
-```
-
-## Input Job Folder Requirements
-
-- A 14-digit timestamp directory (`YYYYMMDDHHMMSS`) for today's date containing
-  **one or more `.csv` files**. Automatic processing scans only today; a historical
-  date can be submitted manually with
-  `app.pipeline ingest --once --date YYYY-MM-DD`.
-- SINIC pad images named
-  `{Insp_st_time}_{BoardBarcode}_{component_name}_{Array_id}_{Pad_id}.jpg`.
-  The shipped template uses the equivalent
-  `{csv_stem}_{component_name}_{Array_id}_{Pad_id}.jpg`.
-- Every CSV must contain at least one data row, and expected image names must be
-  unique across every CSV in the job.
-- Every expected image must be a regular file, have non-zero size, and be decodable
-  by OpenCV. The source snapshot must remain unchanged during validation and copy.
-
-The settle duration comes from `pipeline.source_settle_seconds`. Because the
-machine supplies neither a completion file nor an atomic folder rename, settle +
-contract validation is the implemented definition of "folder ready".
-
-## CSV Required Columns
-
-Native SX mode uses `insp_vol`, `insp_area`, `insp_hei`, `insp_x`, and `insp_y`,
-their `vol_l_ng/h_ng`, `area_l_ng/h_ng`, `hei_l_ng/h_ng`, and `shift_x_ng/y_ng`
-limits, plus the configured image-name fields and `is_pass`.
-The three `insp_*` measurement values are percentages; X/Y shift values are mm.
-Every row uses its own limits. Percentage ranges use `min(l_ng, h_ng)` and
-`max(l_ng, h_ng)`, inclusive, so reversed source fields work without changing
-their stored values. Shift checks compare absolute displacement against each
-axis's nonnegative limit. There is no component threshold file or Excel lookup.
-The historical-mode columns follow:
-
-- **Required** by the shipped SINIC template: `component_name`, `Array_id`, and
-  `Pad_id`; the CSV stem represents `{Insp_st_time}_{BoardBarcode}`.
-- **Optional**, consulted by defect rules only when present:
-  `insp_vol`, `vol_l_ng`, `vol_h_ng`, `insp_hei`, `Width`, `Length`.
-- **Produced by models** (added during merge): `anomaly_score`,
-  `min_pad_distance`, and `paste_pixels` (only if the paste model is enabled).
-  Missing model columns become `NaN` — rules that need them are simply skipped.
-
-## Legacy HTTP Model Client Configuration
-
-This section applies to `inference.mode="legacy_http"`. Native SX OBB settings
-are described in [SX OBB 推論與判定](docs/sx_obb_inference.md).
-
-Model endpoints are **not** hard-coded. The service calls only the enabled entries
-in `model_clients`:
-
-```json
-{
-  "name": "anomaly",
-  "enabled": true,
-  "required": true,
-  "url": "http://127.0.0.1:8000/inference",
-  "target_column": "anomaly_score",
-  "timeout_seconds": 25
-}
-```
-
-- **Disable** a client: set `"enabled": false` (its column is left `NaN`).
-- **Required** client: set `"required": true`; any error, missing image key,
-  `None`, `NaN`, or infinite result triggers the all-23 fail-safe output.
-- **Optional** client: set `"required": false`; its failure is reported but does
-  not trigger the fail-safe policy.
-- **Add** a client: append an object with a unique `name`, `url`, `target_column`,
-  and `timeout_seconds`, then set `"enabled": true`. No code change required.
-- The paste client (`8001`) ships **disabled** (see compatibility notes).
-
-## Legacy Defect Classification Rules
-
-Native SX mode uses OBB → volume → area → height → shift with each source CSV
-row's normalized limits. The `defect_rules` section below is used by legacy
-HTTP processing only.
-
-Applied in the order listed by `defect_rules.rule_order`; only the **first**
-matching rule per row assigns a label. Remove a name from `rule_order` to disable
-that rule, or use an empty list to disable all six rules. Unknown or duplicate
-names are rejected when configuration is loaded. Thresholds/offsets also come
-from `defect_rules`.
-
-| # | Condition | Label |
-| --- | --- | --- |
-| 1 | `anomaly_score > anomaly_threshold` | `FM/color` |
-| 2 | `insp_vol > vol_h_ng + high_vol_offset` | `high vol` |
-| 3 | `insp_vol < vol_l_ng + low_vol_offset` | `low vol` |
-| 4 | `cover% > high_cover_threshold` | `high cover` |
-| 5 | `min_pad_distance < short_distance_threshold` | `short distance` |
-| 6 | `insp_hei > high_paste_height_threshold` | `high paste` |
-
-The corresponding configuration names are `anomaly`, `high_vol`, `low_vol`,
-`high_cover`, `short_distance`, and `high_paste`. For example, this evaluates
-short distance first and disables anomaly and high-cover classification:
-
-```json
-"rule_order": ["short_distance", "high_vol", "low_vol", "high_paste"]
-```
-
-Restart every running pipeline worker (and the compatibility API when used) after
-changing the config. `rule_order` controls only classification; model execution
-and fail-safe requirements remain controlled by the corresponding
-`model_clients[].enabled` and `model_clients[].required` settings.
-
-`is_pass` = `22` when `ai_defect_name` is empty/whitespace, else `23`.
-
-Note rule 5 uses **`<` (less than)** the threshold.
-
-## Output Files
-
-### Durable pipeline paths
-
-| File | Path | Contents |
-| --- | --- | --- |
-| Original source copy | `{backup_output_root}/{YYYY-MM-DD}/{job_id}/...` | Complete byte-verified source payload before inference; source files are never modified |
-| CSV snapshot | `{pipeline.result_root}/csv_inputs/{snapshot-id}/{job_id}/{csv}` | Immutable CSV bytes required before any new-policy publication |
-| Oversized raw backup | `{backup_output_root}/{YYYY-MM-DD}/{job_id}/raw/...` | Background byte-verified payload; may be incomplete if the source disappears |
-| Optional staging copy | `{pipeline.staging_root}/{job_id}/...` | Separate local inference copy only when `staging_root` is set |
-| Result artifact | `{pipeline.result_root}/{job_id}/{attempt-id}/manifest.json` | Normal/fallback decision, row-aligned result codes, errors, timings, and counts |
-| Staged processed CSV | `{pipeline.result_root}/{job_id}/{attempt-id}/processed/{stem}_processed.csv` | Full AI/debug schema used by Publisher |
-| Primary | `{external_output_root}/{csv}` | Original CSV format with only `is_pass` replaced; atomic per file |
-| Primary with preserved job folder | `{external_output_root}/{job_id}/{csv}` | Used when `output.preserve_job_folder=true` |
-| Returned result backup | `{backup_output_root}/{YYYY-MM-DD}/{job_id}/ai_result/returned/{csv}` | Local copy of the machine-facing result |
-| Processed result backup | `{backup_output_root}/{YYYY-MM-DD}/{job_id}/ai_result/processed/{stem}_processed.csv` | Full AI/debug schema after Primary is visible |
-| Result manifest backup | `{backup_output_root}/{YYYY-MM-DD}/{job_id}/ai_result/manifest.json` | Durable outcome/reason/errors and CSV result codes |
-
-When `pipeline.staging_root` is `null` (the recommended default), the preserved
-original source copy is also the inference staging directory, avoiding a second
-full copy inside the configured total budget. When it is set to a different local root,
-Ingest creates and verifies two complete atomic copies.
-
-Publisher writes **all Primary CSVs before any** returned/processed backup. A local
-result-backup failure leaves the state at `PRIMARY_RETURNED`; a later Publisher
-claim retries finalization without rerunning inference or changing the Primary.
-
-When the durable pipeline is enabled, startup validation requires
-`primary_csv_mode="is_pass_only"` and `primary_path_layout="machine_return"`.
-It uses the machine-return contract implemented by `SinicCsvOutput`: source
-encoding, delimiter, column order, quoting, and line endings are preserved while
-`is_pass` changes. The compatibility `/process` workflow can use its other modes
-only when the durable pipeline is disabled. Publisher also uses
-`output.preserve_job_folder` and `output.require_existing_is_pass`.
-
-### Compatibility `/process` paths
-
-The synchronous compatibility path retains its previous output layout:
-
-| File | Path |
-| --- | --- |
-| Primary (`machine_return`) | `{external_output_root}/{csv}` |
-| Primary (legacy layout) | `{external_output_root}/{job}/AI/{csv}` |
-| Backup | `{backup_output_root}/{year}/{month}/{job}/{csv}` |
-| Processed | `{backup_output_root}/{year}/{month}/{job}/{stem}_processed.csv` |
-
-`output.primary_csv_mode`:
-
-- `is_pass_only` (default): the original columns with **only `is_pass` updated**
-  (original numeric formatting preserved).
-- `full_ai_columns`: the full processed frame, including `img_name`, model score
-  columns, `ai_defect_name`, and `is_pass`.
-
-On the compatibility path, backup and `_processed.csv` are unchanged by the mode.
-The `*_processed.csv` carries the full AI schema and is intended for debugging.
-
-The compatibility `/process` per-job metrics row (`log/log.csv`) keeps its
-18-column schema:
-`job_folder, img_numbers, request_start_at, request_end_at, anomaly_request_ms,
-paste_request_ms, distance_request_ms, compute_total_ms, request_latency_ms,
-pass_count, fail_count, anomaly_count, distance_count, low_vol_count,
-high_vol_count, high_cover_count, high_paste_count, logged_at`.
-
-## Config Reference
-
-Single file: `config/ai_server.json` (override the path with the `AI_CONFIG_PATH`
-environment variable). Validated on load by `app/core/config.py`.
-`config/ai_server.example.json` is a committed template with placeholder paths —
-copy it (or point `AI_CONFIG_PATH` at a deployment-specific file) rather than
-baking environment-specific paths into a shared file.
-
-```json
-{
-  "server": { "host": "127.0.0.1", "port": 5050 },
-  "paths": {
-    "external_output_root": "D:/Dre/JQ_SPI_02_AI_API/data",
-    "backup_output_root": "D:/Dre/JQ_SPI_02_AI_API/backup"
-  },
-  "processing": {
-    "folder_images_num_threshold": 60,
-    "image_extensions": [".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif"],
-    "image_name_source_column": null,
-    "image_name_template": "{csv_stem}_{component_name}_{Array_id}_{Pad_id}.jpg"
-  },
-  "model_clients": [
-    { "name": "anomaly",  "enabled": true,  "required": true,  "url": "http://127.0.0.1:8000/inference", "target_column": "anomaly_score",    "timeout_seconds": 25 },
-    { "name": "paste",    "enabled": false, "required": false, "url": "http://127.0.0.1:8001/inference", "target_column": "paste_pixels",     "timeout_seconds": 25 },
-    { "name": "distance", "enabled": true,  "required": true,  "url": "http://127.0.0.1:8002/inference", "target_column": "min_pad_distance", "timeout_seconds": 25 }
-  ],
-  "defect_rules": {
-    "rule_order": [
-      "anomaly", "high_vol", "low_vol", "high_cover",
-      "short_distance", "high_paste"
-    ],
-    "anomaly_threshold": 0.9,
-    "high_cover_threshold": 180.0,
-    "short_distance_threshold": 6.8,
-    "low_vol_offset": -10.0,
-    "high_vol_offset": 20.0,
-    "high_paste_height_threshold": 200.0
-  },
-  "output": {
-    "primary_csv_mode": "is_pass_only",
-    "primary_path_layout": "machine_return",
-    "preserve_job_folder": false,
-    "require_existing_is_pass": true
-  },
-  "reliability": {
-    "primary_return_deadline_seconds": 30.0,
-    "end_to_end_timeout_seconds": 6.0,
-    "primary_publish_reserve_seconds": 1.0,
-    "scanner_http_timeout_grace_seconds": 5.0,
-    "required_model_failure_policy": "fail_all_23"
-  },
-  "pipeline": {
-    "enabled": true,
-    "watch_root": "D:/spi_ai/output/01/sfcTemp",
-    "database_path": "D:/Dre/JQ_SPI_02_AI_API/state/pipeline.sqlite3",
-    "staging_root": null,
-    "result_root": "D:/Dre/JQ_SPI_02_AI_API/pipeline_results",
-    "source_settle_seconds": 2.0,
-    "ingest_poll_interval_seconds": 0.25,
-    "inference_poll_interval_seconds": 0.05,
-    "publisher_poll_interval_seconds": 0.05,
-    "publisher_lease_seconds": 0.5,
-    "publisher_heartbeat_interval_seconds": 0.1,
-    "worker_lease_seconds": 60.0
-  },
-  "logging": {
-    "log_dir": "log", "system_log_file": "system", "request_log_file": "log.csv",
-    "request_log_max_bytes": 52428800, "request_log_backup_count": 5
-  },
-
-  "watch_root": "D:/spi_ai/output/01/sfcTemp",
-  "scanner_input_mode": "sinic_timestamp",
-  "scanner_settle_seconds": 2.0,
-  "process_api_url": "http://127.0.0.1:5050/process",
-  "processed_registry_path": "log/processed.json",
-  "rescan_interval_ms": 500
-}
-```
-
-Pipeline settings:
-
-| Field | Meaning |
-| --- | --- |
-| `enabled` | Must be `true` or `app.pipeline` exits at startup |
-| `watch_root` | Shared root scanned by the new Ingest Worker; distinct from the legacy top-level key |
-| `database_path` | Local file-backed SQLite WAL database; never place it on SMB/network storage |
-| `staging_root` | `null` reuses the preserved original copy; otherwise creates `{staging_root}/{job_id}` |
-| `result_root` | Local transient result-manifest and processed-artifact root |
-| `db_export_config_path` | Publisher's background MiNiFi export settings file; `null` disables export. Relative paths resolve under the project root |
-| `source_settle_seconds` | Stable snapshot window before full CSV/image validation |
-| `*_poll_interval_seconds` | Delay between worker polling iterations |
-| `publisher_lease_seconds` | Short Primary claim lease; must fit inside the publish reserve |
-| `publisher_heartbeat_interval_seconds` | How often a live Publisher renews its short lease |
-| `worker_lease_seconds` | Ingest/inference/finalize lease; must exceed the deadline |
-
-Publisher actively renews its short lease while building/publishing Primary files.
-If that process crashes, another Publisher can recover inside the reserved window.
-Ingest/inference use the longer `worker_lease_seconds`; deadline takeover still
-fences them at the publish cutoff.
-
-The top-level `watch_root`, `scanner_settle_seconds`, `process_api_url`,
-`processed_registry_path`, and `rescan_interval_ms` keys are legacy settings read
-by `scan_jobs.py`. Durable Ingest reads `pipeline.watch_root` and
-`pipeline.source_settle_seconds`.
-
-`end_to_end_timeout_seconds` defaults to 6 seconds for new durable jobs; the reserve
-must fit inside it. `primary_return_deadline_seconds` remains the synchronous
-`/process` target, measured from HTTP request start. `scanner_http_timeout_grace_seconds`
-applies only to `scan_jobs.py`. Historical in-flight jobs keep their saved deadlines.
-
-Config is cached independently in each process. Restart all three workers (and the
-API when used) after changing settings. `scan_jobs.py` continues to load its own
-legacy configuration.
-
-## How to Install
-
-The project uses [`uv`](https://docs.astral.sh/uv/). `pyproject.toml` is the
-canonical dependency source; `requirements-*.txt` are pinned mirrors for non-uv
-installs. Python `>=3.12,<3.13`.
-
-```bash
-# Install uv (macOS/Linux)
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# Windows/Linux + CUDA
-uv venv --python 3.12
-uv pip install torch==2.7.1 torchvision==0.22.1 --index-url https://download.pytorch.org/whl/cu128
-uv sync --extra cuda --group dev
-
-# macOS (CPU / Apple Silicon) — no CUDA-only packages
-uv venv --python 3.12
-uv sync --extra mac --group dev
-```
-
-CUDA-only packages (`pycuda`, `onnxruntime-gpu`, TensorRT) never install on macOS.
-See the extras in `pyproject.toml` (`cuda`, `tensorrt-export`, `mac`,
-`analytics`, `paste`).
-
-## Multi-format GPU inference
-
-Native OBB selects `.pt` / `.onnx` / `.engine` from
-`inference.obb.model_path`. Fixed ONNX batch sizes are read from the model input;
-fixed TensorRT defaults to eight images, with tail padding discarded. See the
-[native configuration guide](docs/sx_obb_inference.md). The following server
-examples apply to legacy HTTP mode.
-
-The model services select their inference backend from the model filename:
-
-| Artifact | PatchCore backend | YOLO distance/paste backend | GPU setting |
-| --- | --- | --- | --- |
-| `.pt` | PyTorch | Ultralytics + PyTorch | `--device cuda:0` |
-| `.onnx` | ONNX Runtime | Ultralytics + ONNX Runtime | CUDAExecutionProvider |
-| `.engine` | TensorRT/pycuda | Ultralytics + TensorRT | CUDA only |
-
-TensorRT and pycuda are imported lazily, so they are not required when every
-selected model is `.pt` or `.onnx`. GPU ONNX inference requires the
-`onnxruntime-gpu` package and matching CUDA/cuDNN libraries. Startup fails
-instead of silently falling back to CPU when `--device cuda:N` is requested but
-the matching GPU provider is unavailable. Confirm the selected backend in each
-service's `/health` response.
-
-Distance YOLO examples (the center and pad models may use different formats):
-
-```bat
-python distance_detection_api_trt.py --center-model models\distance\center.pt --pad-model models\distance\pad.pt --device cuda:0
-python distance_detection_api_trt.py --center-model models\distance\center.onnx --pad-model models\distance\pad.onnx --device cuda:0
-python distance_detection_api_trt.py --center-model models\distance\center.engine --pad-model models\distance\pad.engine --device cuda:0
-```
-
-The distance service sends batches of eight. A YOLO ONNX graph must therefore
-have a dynamic batch dimension or a fixed batch of eight.
-
-PatchCore examples:
-
-```bat
-python patchcore_api_trt.py --model-path models\patchcore\model_runtime.onnx --device cuda:0 --input-size 256 256
-python patchcore_api_trt.py --model-path models\patchcore\model.pt --device cuda:0 --trust-pickle --preprocess imagenet --input-size 256 256 --center-crop 224 224
-python patchcore_api_trt.py --model-path models\patchcore\model_fp16.engine --device cuda:0
-```
-
-Only pass `--trust-pickle` for a trusted anomalib `.pt` artifact. A raw
-PatchCore state dictionary additionally needs the exact training architecture,
-for example `--backbone efficientnet_b5 --layers blocks.2 blocks.4`. PatchCore
-ONNX must consume NCHW RGB float32 `[0,1]` input and expose a scalar score per
-image; use `--score-output NAME` if its score output has a non-standard name.
-
-`start_model_services.bat` can select artifacts without editing source code:
-
-```bat
-set SPI_MODEL_DEVICE=cuda:0
-set PATCHCORE_MODEL_PATH=models\patchcore\model_runtime.onnx
-set DISTANCE_CENTER_MODEL_PATH=models\distance\center.onnx
-set DISTANCE_PAD_MODEL_PATH=models\distance\pad.onnx
-start_model_services.bat
-```
-
-For a trusted PatchCore `.pt`, also set the required runtime options, for
-example `set PATCHCORE_MODEL_ARGS=--trust-pickle --preprocess imagenet
---input-size 256 256 --center-crop 224 224`.
-
-## TensorRT Model Conversion Tool
-
-Build TensorRT engines on the target NVIDIA AIPC. TensorRT plans are tied to
-the GPU architecture and TensorRT/CUDA runtime; do not build on a development
-PC and assume the plan is portable. The converter requires TensorRT 10.x except
-10.1.x and supports FP32/FP16. INT8 is deliberately excluded until a
-representative calibration set and SPI 22/23 decision-parity test are available.
-Treat every model artifact as executable input: only convert trusted `.pt`,
-`.pth`, `.ckpt`, TorchScript, and ONNX files. In particular, both Ultralytics
-and Python-pickled anomalib checkpoints may execute code while loading.
-
-Install the optional converter dependencies in the normal CUDA environment:
-
-```bat
-pip install -r requirements-tensorrt-export.txt
-```
-
-TensorRT itself is installed separately from NVIDIA so it can match the AIPC
-driver/CUDA image. The tool imports converter dependencies lazily and does not
-change production worker startup.
-
-### YOLO `.pt` to `.engine`
-
-The Distance service currently pads center/pad inference to a fixed batch of 8,
-so the production defaults are FP16, batch 8, and 640x640:
-
-```bat
-python convert_to_tensorrt.py yolo ^
-  --input models\distance\pad.pt ^
-  --output models\distance\pad.engine ^
-  --task detect ^
-  --precision fp16 ^
-  --batch 8 ^
-  --imgsz 640 640 ^
-  --workspace-gib 4 ^
-  --save-onnx models\distance\pad.onnx
-```
-
-Add `--test-image D:\path\to\pad.jpg` to run a full padded inference batch
-after structural engine verification. The `.pt` route uses the pinned
-Ultralytics 8.3.187 exporter to produce ONNX, then uses this project's builder
-to create an exact TensorRT profile.
-
-### YOLO `.onnx` to `.engine`
-
-Ultralytics cannot re-export a loaded ONNX model. This route uses TensorRT's
-ONNX parser and writes the metadata prefix required by `YOLO(engine)`. An ONNX
-exported by Ultralytics normally contains names/task metadata. Otherwise provide
-them explicitly. When NMS metadata is also absent, declare the graph's real
-output as `raw` or `end2end`; this declaration never rewrites the graph:
-
-```bat
-python convert_to_tensorrt.py yolo ^
-  --input D:\models\center.onnx ^
-  --output models\distance\center.engine ^
-  --task detect ^
-  --class-names center ^
-  --onnx-output-contract raw ^
-  --precision fp16 ^
-  --batch 8 ^
-  --imgsz 640 640
-```
-
-For a dynamic ONNX, use an explicit profile. Height/width remain fixed for the
-current services:
-
-```bat
-python convert_to_tensorrt.py yolo ^
-  --input D:\models\center_dynamic.onnx ^
-  --output D:\models\center_dynamic.engine ^
-  --task detect --class-names center --onnx-output-contract raw ^
-  --dynamic --min-batch 1 --batch 4 --max-batch 8 ^
-  --imgsz 640 640
-```
-
-### PatchCore `.pt`/checkpoint to `.engine`
-
-PatchCore output is normalized to the current runtime contract:
-
-- one `input` tensor in NCHW RGB `[0,1]` format;
-- `anomaly_map` and `pred_score` outputs;
-- a dynamic batch profile of 1/8/8 by default;
-- a raw TensorRT plan without the Ultralytics metadata prefix.
-
-An anomalib-exported `model.pt` contains a Python-pickled module. Only load a
-trusted file and explicitly acknowledge that boundary. Standard anomalib 0.7
-preprocessing commonly resizes to 256, center-crops to 224, and applies
-ImageNet normalization; those operations must match training. For a canonical
-anomalib export, the converter reads its authoritative `metadata.transform` and
-rejects a conflicting Resize, CenterCrop, Normalize/ToFloat, or unsupported
-evaluation operation:
-
-```bat
-python convert_to_tensorrt.py patchcore ^
-  --input D:\models\patchcore\model.pt ^
-  --output models\patchcore\model_fp16.engine ^
-  --trust-pickle ^
-  --preprocess imagenet ^
-  --input-size 256 256 ^
-  --center-crop 224 224 ^
-  --dynamic --min-batch 1 --batch 8 --max-batch 8 ^
-  --precision fp16 ^
-  --save-onnx models\patchcore\model_runtime.onnx
-```
-
-`--ignore-artifact-transform` is an explicit escape hatch for a trusted `.pt`
-whose metadata cannot be represented by this tool. Use it only after comparing
-PyTorch and TensorRT scores plus final 22/23 decisions on a representative
-dataset; the override is recorded in the manifest.
-
-For a Lightning/raw `state_dict`, architecture cannot be recovered from tensor
-weights. Supply the exact training values:
-
-```bat
-python convert_to_tensorrt.py patchcore ^
-  --input D:\models\patchcore\model.ckpt ^
-  --output models\patchcore\model_fp16.engine ^
-  --preprocess none ^
-  --input-size 256 256 ^
-  --backbone efficientnet_b5 ^
-  --layers blocks.2 blocks.4
-```
-
-`--preprocess none` matches the existing legacy runtime assumption, but is only
-correct when training also used unnormalized RGB `[0,1]`. The converter rejects
-an empty PatchCore memory bank and strictly loads state dictionaries.
-
-### PatchCore `.onnx` to `.engine`
-
-```bat
-python convert_to_tensorrt.py patchcore ^
-  --input D:\models\patchcore\model_runtime.onnx ^
-  --output models\patchcore\model_fp16.engine ^
-  --preprocess none ^
-  --input-size 256 256 ^
-  --dynamic --min-batch 1 --batch 8 --max-batch 8
-```
-
-An existing PatchCore ONNX is accepted only as a canonical runtime graph that
-already consumes NCHW RGB `[0,1]`, so it requires `--preprocess none`. The tool
-does not pretend to add ImageNet/custom normalization to an arbitrary graph;
-use the `.pt` route to embed those operations. A static batch-1 PatchCore ONNX
-is rejected for the current batch-8 API. Re-export a dynamic ONNX from `.pt`
-instead of editing only the ONNX input dimension.
-
-Every successful conversion writes `<model>.engine.json` with source/engine
-SHA256, exact profile and bindings, preprocessing contract, TensorRT/CUDA/GPU
-versions, requested precision, and the enabled TensorRT builder precision mode.
-TensorRT may still select a higher-precision tactic for an individual FP16
-layer, so this is intentionally not labelled as the exact per-layer precision.
-Existing outputs are protected; use `--force` for an intentional replacement.
-The engine and manifest are staged together and restored as a pair if either
-filesystem switch fails.
-
-On Windows, `convert_to_tensorrt.bat` resolves the same project Python 3.12
-runtime as the service launchers and forwards all CLI arguments, for example:
-
-```bat
-convert_to_tensorrt.bat yolo --input pad.pt --output pad.engine --task detect
-```
-
-## How to Run
-
-```bash
-# Durable pipeline: run each command in a separate terminal/process
-uv run python -m app.pipeline ingest
-uv run python -m app.pipeline inference
-uv run python -m app.pipeline publisher
-
-# Process at most one claim and exit (diagnostics/tests)
-uv run python -m app.pipeline ingest --once
-uv run python -m app.pipeline inference --once --worker-id manual-inference
-uv run python -m app.pipeline publisher --once
-
-# Manually submit a historical date through the same durable pipeline
-uv run python -m app.pipeline ingest --once --date 2026-08-26
-
-# Explicit deployment config (AI_CONFIG_PATH remains supported)
-uv run python -m app.pipeline publisher --config D:/path/to/ai_server.json
-
-# Optional compatibility API; binds server.host:port (default 127.0.0.1:5050)
-uv run python -m app.main
-
-# Required model servers only; does not start the 5050 API or scan_jobs.py
-start_model_services.bat
-
-# Optional synchronous compatibility API on port 5050
-start_legacy_api.bat
-```
-
-The Windows launcher numbers describe the **data-flow stages**, and each launcher
-runs as an independent foreground process:
-
-```bat
-01_pipeline_ingest.bat
-02_pipeline_inference.bat
-03_pipeline_publisher.bat
-```
-
-| Launcher | Responsibility | Does not do |
-| --- | --- | --- |
-| `01_pipeline_ingest.bat` | Persist first observation, validate/snapshot CSVs, route oversized jobs to all-23, archive normal input and background oversized images | Model inference or machine return |
-| `02_pipeline_inference.bat` | Claim durable ready jobs and write a deadline-fenced result manifest | Scan the SPI share or publish Primary CSVs |
-| `03_pipeline_publisher.bat` | Publish Primary CSVs first, apply all-23 deadline fallback, save result backups, and export completed processed backups to MiNiFi | Monitor new folders or invoke model inference |
-
-All three forward optional CLI arguments. For example,
-`01_pipeline_ingest.bat --once --date 2026-08-26` submits one historical-date
-job, and `02_pipeline_inference.bat --once --worker-id manual-inference` claims at
-most one inference job.
-
-All Windows launchers call `resolve_python.bat`: an explicitly configured
-`PYTHON_EXE` wins, followed by `.venv`, the setup-created Conda environment, and
-finally Python on `PATH`. Python 3.12 is validated before startup. The launchers
-also default `AI_CONFIG_PATH` to the checked-in config. In native mode,
-`start_model_services.bat` directs the operator to Stage 02 without opening model
-HTTP ports. In legacy mode it starts ports `8000` and `8002`.
-`legacy_scan.bat` requires the explicit safety
-flag `SPI_ENABLE_LEGACY_SCANNER=1` and must be used only while Stage 01 is stopped.
-The unnumbered compatibility and utility launchers are deliberately outside the
-three-stage production data flow.
-
-The standalone utilities use descriptive names without stage numbers:
-
-| Utility | Purpose |
-| --- | --- |
-| `db_export.bat` | Manually export processed CSVs to MiNiFi OK/NG files |
-| `spi_statistics.bat` | Generate SPI statistics reports from config or offline data |
-
-The numbers are not the production boot order. Start Stage 03 Publisher first,
-then Stage 02 and wait for its `event=obb.ready` warmup log, then start Stage 01.
-Legacy HTTP mode starts its required model services before Stage 02. Publisher must stay
-available even when models are down because it owns the deadline fallback.
-
-Each stage writes a separate system log derived from `logging.system_log_file`, for
-example `system.ingest`, `system.inference`, and `system.publisher` under
-`logging.log_dir`. Background export details use `system.db_export`; export
-completion/failure summaries also appear in the Publisher log.
-The legacy entry point `uv run python ai_server_fastapi.py`
-remains available but is deprecated.
-
-## Deployment / Operations
-
-### Windows services with NSSM
-
-Use one service per worker so failure or restart of one stage does not stop the
-others. Example, from an elevated command prompt:
-
-```bat
-set REPO=D:\Dre\JQ_SPI_02_AI_API
-set PYTHON_EXE=%REPO%\.venv\Scripts\python.exe
-set CONFIG=D:\Dre\JQ_SPI_02_AI_API\config\ai_server.json
-
-nssm install SPI_Model_Anomaly "%PYTHON_EXE%" patchcore_api_trt.py --host 127.0.0.1 --port 8000
-nssm set SPI_Model_Anomaly AppDirectory "%REPO%"
-nssm set SPI_Model_Anomaly Start SERVICE_AUTO_START
-
-nssm install SPI_Model_Distance "%PYTHON_EXE%" distance_detection_api_trt.py --host 127.0.0.1 --port 8002
-nssm set SPI_Model_Distance AppDirectory "%REPO%"
-nssm set SPI_Model_Distance Start SERVICE_AUTO_START
-
-nssm install SPI_01_Ingest "%PYTHON_EXE%" -m app.pipeline ingest
-nssm set SPI_01_Ingest AppDirectory "%REPO%"
-nssm set SPI_01_Ingest AppEnvironmentExtra "AI_CONFIG_PATH=%CONFIG%"
-nssm set SPI_01_Ingest Start SERVICE_AUTO_START
-
-nssm install SPI_02_Inference "%PYTHON_EXE%" -m app.pipeline inference
-nssm set SPI_02_Inference AppDirectory "%REPO%"
-nssm set SPI_02_Inference AppEnvironmentExtra "AI_CONFIG_PATH=%CONFIG%"
-nssm set SPI_02_Inference Start SERVICE_AUTO_START
-
-nssm install SPI_03_Publisher "%PYTHON_EXE%" -m app.pipeline publisher
-nssm set SPI_03_Publisher AppDirectory "%REPO%"
-nssm set SPI_03_Publisher AppEnvironmentExtra "AI_CONFIG_PATH=%CONFIG%"
-nssm set SPI_03_Publisher Start SERVICE_AUTO_START
-
-nssm start SPI_03_Publisher
-nssm start SPI_Model_Anomaly
-nssm start SPI_Model_Distance
-nssm start SPI_02_Inference
-nssm start SPI_01_Ingest
-```
-
-If Python comes from Conda, set `PYTHON_EXE` to that environment's `python.exe`.
-Before starting Inference/Ingest for the first production run, confirm both model
-`/health` payloads report `status=healthy`; HTTP 200 alone is not sufficient while
-a TensorRT engine is still initializing.
-Configure NSSM stdout/stderr rotation as required by the plant's operations policy;
-application event logs are already written under `logging.log_dir`.
-
-Operational requirements and recovery behavior:
-
-- **Local durable state**: keep `pipeline.database_path`,
-  `paths.backup_output_root`, optional `pipeline.staging_root`, and
-  `pipeline.result_root` on the AIPC's local disk. SQLite WAL is not supported for
-  this design on the machine SMB share.
-- **Crash recovery**: claims use `BEGIN IMMEDIATE`, owner IDs, attempt counters,
-  and expiring leases. A restarted worker reclaims the earliest-deadline eligible
-  job. Publisher uses a short heartbeat-renewed lease so a crash can be recovered
-  inside the publish reserve. Atomic directories/manifests are reused when
-  byte-identical.
-- **At-least-once publication**: Primary CSV writes are atomic and deterministic,
-  but there is no multi-file transaction. A crash halfway through a multi-CSV job
-  can cause the retry to overwrite already returned CSVs with the same decisions.
-- **Primary before backup**: `PRIMARY_RETURNED` is persisted immediately after the
-  last Primary write. Local returned/processed backups run as a separate finalize
-  claim; failure there never reruns inference.
-- **Failed result backups**: a missing artifact makes only the post-primary backup
-  terminal (`FAILED`, with `primary_returned_at` preserved). Other backup errors
-  retry up to five total attempts with 5/10/20/40-second delays persisted in their
-  leases, so restarts cannot bypass backoff and later backups can proceed. Missing
-  processed-file errors include both source and destination paths. Inspect a job
-  with `python -m app.tools.pipeline_backup_recovery --database PATH --job-id ID`.
-  After restoring the original artifact files, add `--retry-backup` to validate
-  their decisions, save a consistent SQLite snapshot, and queue **only** its local
-  backup again. This requires `FAILED` and a recorded Primary return; it never
-  resets the job to inference or republishes machine CSVs. Keep result artifacts
-  until their local backup has completed.
-- **Original before Primary**: Publisher never uses the live machine share as its
-  input. The complete local raw copy must be available first, even if unusually
-  slow local archival causes a soft-deadline miss.
-- **Source immutability**: a timestamp `job_id` is the SQLite primary key. Do not
-  modify or reuse a timestamp folder after it has passed readiness validation.
-- **API probes**: `/health` and `/ready` belong to the compatibility API and do not
-  currently report worker heartbeats or SQLite queue state.
-- **Graceful shutdown**: stop between claims when practical. Publisher failure is
-  recovered after `publisher_lease_seconds`; other stages use
-  `worker_lease_seconds` or the deadline cutoff.
-- **Compatibility metrics log rotation**: `log/log.csv` rotates at
-  `logging.request_log_max_bytes` (default 50 MB) keeping
-  `logging.request_log_backup_count` backups (`log.csv.1..N`); set
-  `request_log_max_bytes: 0` to disable. No data is lost until the backup count is
-  exceeded.
-- **Config per environment**: keep deployment paths out of the shared repo by
-  pointing `AI_CONFIG_PATH` at a machine-local config (template:
-  `config/ai_server.example.json`).
-- **Legacy scanner retry / dead-letter**: `scan_jobs.py` no longer re-posts a failing job
-  on every tick. Client errors (4xx, e.g. a malformed CSV) are dead-lettered after
-  `scanner_client_error_max_attempts` (default 2); server/transport errors (5xx or
-  connection failures) get exponential backoff (`scanner_backoff_base_seconds` ..
-  `scanner_backoff_max_seconds`) up to `scanner_max_retries` (default 5), then
-  dead-letter. Dead-letter state is in-memory, so a scanner restart re-attempts.
-- **CI**: `.github/workflows/ci.yml` runs `ruff check`, `ruff format --check`, and
-  the `tests/unit` + `tests/integration` suites on every push/PR.
-
-## How to Test
-
-```bash
-uv run pytest
-```
-
-Unit tests (`tests/unit/`) cover ingest validation/atomic archive, SQLite claims and
-cutoff fencing, result manifests, inference fallback, Publisher ordering, domain
-services, and config. Integration tests drive both the compatibility `/process`
-route and all three durable worker stages with temporary local/share paths and fake
-model runners — no production paths or real endpoints are required.
-
-## How to Format and Lint
-
-The project uses **Ruff** for both linting and formatting (no Black — a single
-formatter avoids conflicts):
-
-```bash
-uv run ruff check .          # lint
-uv run ruff format .         # format
-uv run ruff format --check . # verify formatting in CI
-uv run mypy app              # optional type check
-```
-
-Legacy top-level scripts (`ai_server_fastapi.py`, the model servers, `scan_jobs.py`,
-etc.) are listed in `extend-exclude` in `pyproject.toml` and are intentionally not
-linted/formatted yet — see "Known Behavior".
-
-## Troubleshooting
-
-- **Worker exits immediately**: set `pipeline.enabled=true` and inspect its startup
-  preflight error. Ingest requires a readable `pipeline.watch_root`; every stage
-  probes its required local directories. Publisher starts even if the machine
-  output share is temporarily unavailable, and applies the per-job retry budget.
-- **No jobs reach `READY`**: inspect `system.ingest` for missing/empty/undecodable
-  expected images, duplicate image keys, CSV template errors, or a source snapshot
-  that keeps changing. The worker intentionally treats these as not-ready and
-  scans again until the persisted total deadline, then marks the job `EXPIRED`.
-- **SQLite is locked or unreliable**: confirm `pipeline.database_path` is a local
-  AIPC file, not a UNC/SMB path, and that all workers use the same database.
-- **Job remains `PUBLISHING` or `PRIMARY_RETURNED`**: inspect `system.publisher`.
-  `PUBLISHING` normally indicates Primary/SMB retry; `PRIMARY_RETURNED` means the
-  machine result is already visible and only local `ai_result` finalization remains.
-- **Unexpected all-23 result**: inspect the backed-up `ai_result/manifest.json`.
-  `reason=publish_reserve_reached` means no durable inference result was committed
-  before the cutoff; `required_model_failure`, `required_model_timeout`, and
-  `images_exceed_threshold` identify the other fail-safe paths.
-- **Required-model fallback**: inspect `errors` and `reason`; missing or invalid
-  keys for the SINIC image-name template intentionally return all rows as `23`.
-- **`400 CSV missing required columns`**: check the configured image-name
-  template fields, normally `component_name`, `Array_id`, and `Pad_id`.
-- **`high cover` never fires**: `cover%` needs `paste_pixels` (paste model) and
-  `pad_area` (needs `Width` + `Length`). Paste is disabled by default.
-- **Primary write fails**: check `external_output_root` and SMB availability. The
-  Publisher retries only until the saved total deadline and then marks the job
-  `EXPIRED`, allowing subsequent jobs to proceed. Check capacity/quota as well as
-  network errors. Expired jobs never auto-resend after recovery or restart.
-- **Compatibility `/process` returns `500`**: check `external_output_root` and
-  `backup_output_root`; synchronous output failures return an HTTP error.
-- **Config errors on startup**: `config/ai_server.json` must be present and valid
-  (or set `AI_CONFIG_PATH`).
-
-## Known Behavior and Compatibility Notes
-
-- **Paste model (8001) is disabled by default.** It is a heavier YOLO + MobileSAM
-  pipeline and the `cover%` / `high cover` rule depends on it. To enable: install
-  the `paste` extra, start the paste server on `8001`, set the `paste` client's
-  `"enabled": true`, and restart the merge server.
-- **`short distance` uses `min_pad_distance < short_distance_threshold`** (less
-  than), not greater than.
-- **Compatibility `primary_csv_mode`** has two modes: `is_pass_only` (default) and
-  `full_ai_columns` (see Output Files). The durable Publisher always uses the
-  machine-return contract.
-- **`*_processed.csv`** contains the full AI schema and exists for **debugging**.
-- **Image count over `folder_images_num_threshold` (default 60)**: folders with
-  60 or fewer images proceed to inference; folders with 61 or more skip all model
-  calls and return every CSV row as `is_pass=23`. The count covers the whole job
-  folder, including subfolders, using `processing.image_extensions`.
-  The durable path records
-  `reason=images_exceed_threshold` in its manifest; `/process` retains the legacy
-  `{"status": "finished scanning", "skipped": true, ...}` response.
-  To apply this limit on an existing AIPC, set
-  `processing.folder_images_num_threshold` to `60` in its active config
-  (`AI_CONFIG_PATH`, or `config/ai_server.json` when unset) and restart Stage 02
-  Inference. Restart the API instead when using the compatibility `/process`
-  flow. The durable path still validates and archives source data before returning
-  NG; the limit removes model inference time, not source-transfer or backup time.
-- **Required model failure policy**: an endpoint error, deadline timeout,
-  incomplete key set, or invalid scalar produces a fail-safe result with every row
-  set to `23`. Optional-model failures continue normally. On the durable path this
-  policy is recorded in the result manifest; on `/process` it is an HTTP-200 body.
-- **Durable and synchronous paths are separate**: `/process` does not enqueue into
-  SQLite, and the pipeline workers do not require the FastAPI server. Do not point
-  both `scan_jobs.py` and Ingest Worker at the same production share.
-- **Automatic Ingest scans only today's timestamp folders.** Historical and
-  cross-midnight recovery remains manual; use
-  `app.pipeline ingest --once --date YYYY-MM-DD`.
-- **No queue can guarantee normal AI output under overload.** Earliest-deadline
-  scheduling and cutoff takeover guarantee the configured all-23 decision path,
-  subject to AIPC and SMB availability.
-- **The SQLite database is job state, not an audit-event ledger.** Stage timestamps,
-  attempts, reasons, and leases are persisted; detailed evidence remains in the
-  stage-specific text logs and result manifest.
-- **`log/`, `backup/`, `data/`** and model weights are git-ignored.
-- **The compatibility API binds `127.0.0.1` by default** (`server.host`). Set it to
-  a wider interface only if a remote API client is intentionally allowed.
-- **Compatibility `/process` offloads CPU/IO-bound work** (CSV read/write and
-  classification) to a thread pool, so `/health` and `/ready` stay responsive while
-  a job runs.
-- **Output CSVs are written atomically** (temp file + `os.replace`), so a crash
-  mid-write never leaves a partial CSV at the target path.
-- **Legacy code**: `ai_server_fastapi.py` (and the model servers / scanner) remain
-  for the legacy entry point and are excluded from Ruff/mypy. The new `app/` entry
-  point has no runtime dependency on `ai_server_fastapi.py`.
-
-## SPI statistics
-
-`spi_statistics.bat` (or `python -m app.tools.spi_statistics`) reads the result,
-SQLite, backup/staging, and log locations from `--config` when `--input` is omitted.
-The default config is `AI_CONFIG_PATH` or `config/ai_server.json`; relative data
-paths resolve under the project root, matching the workers. Live SQLite is read
-through a consistent backup snapshot. Use `--input` to retain offline folder mode.
-It exports job details, daily/overall percentiles, image-count groups,
-model request timings, manifest candidates, and data-quality issues as UTF-8-BOM
-CSVs. It uses only the Python standard library and does not modify source DB data.
-Missing timestamps/counts stay blank; multiple inference attempts are not counted
-as multiple jobs. See [the Chinese usage guide](docs/spi_statistics.md) for required
-evidence, metric definitions, and the optional SPI/OP event CSV.
-
-```bat
-spi_statistics.bat --config "config\ai_server.json" --output "D:\SPI_Statistics\reports\SPI01" --machine-id SPI01
-```
-
-Add `--start "2026-10-29 08:00:00" --end "2026-10-29 20:00:00"` to limit the
-report to a time interval (inclusive start, exclusive end; UTC+8 when no timezone
-is supplied). `--time-field` selects the timestamp; `auto` prefers source-ready
-time, while `job_timestamp` explicitly selects the timestamp encoded in the job ID.
-Unknown filter times are excluded and counted; omitted bounds retain all jobs.
-
-## MiNiFi database CSV export in Stage 03 (no DAT)
-
-The shipped `pipeline.db_export_config_path="config/db_export.json"` integrates
-MiNiFi export into `03_pipeline_publisher.bat`. Start Stage 03 normally; a standalone
-exporter is unnecessary. Publisher uses a dedicated spawned IO process for
-export scans, separate from both Primary publication and local backup. A slow or
-failed export therefore leaves the main loop available for later machine returns.
-
-The integrated input root always comes from the active AI config's
-`paths.backup_output_root`, including when using `03_pipeline_publisher.bat
---config ...`. Site metadata, output path, settle delay, and polling interval
-come from the export settings file. Each scan reloads that file, so corrected
-settings are picked up on retry. Scans have a 30-second supervision limit; a
-stalled lane is terminated and restarted on a later scan. This budget is separate
-from the six-second machine-return deadline. Pending files are rediscovered after
-a Publisher restart. `DONE` still means Primary and local backup have completed;
-it does not imply MiNiFi delivery or database ingestion has finished.
-
-`03_pipeline_publisher.bat --once` drains its own backup attempt and makes a final
-bounded export scan. The normal settle delay still applies, so freshly written
-backups may remain pending until the next invocation or resident scan.
-
-Set `pipeline.db_export_config_path=null` to disable integrated export. The
-`db_export.bat` utility is available for manual export or
-standalone folders; it scans the `input_path` in its settings recursively for
-`*_processed.csv`. Exporters sharing the same input root use a nonblocking OS
-file lock, so a second Publisher or standalone exporter defers while a scan is
-active. The lock releases automatically when the process exits. No pipeline database,
-export database, or DAT file is required. `--pipeline-config` and `state_path`
-are no longer used. Example configuration:
-
-```json
-{
-  "site": "SX",
-  "factory": "SX",
-  "line": "SPI",
-  "station_id": "SPI",
-  "input_path": "D:/Dre/JQ_SPI_02_AI_API/backup",
-  "output_path": "D:/Project/AMR/Result/TEMP/spi",
-  "poll_seconds": 30,
-  "source_settle_seconds": 2
-}
-```
-
-For standalone use, set `input_path` to a folder containing processed CSVs, or to the root of a tree
-of date/job folders. It must already exist. Relative paths resolve under the
-project root. The default above is the existing pipeline backup root; change it
-for a different site layout. `output_path` is the folder MiNiFi watches.
-
-For standalone export of pipeline backups, use `paths.backup_output_root` as `input_path`.
-Stage 03 publishes its completed copies under
-`{backup_root}/{date}/{job_id}/ai_result/processed/`. Keep
-`pipeline.result_root` separate: its `{job_id}/{generation}/processed/` files
-are retained inference artifacts needed by Publisher and backup recovery.
-The exporter rejects that timestamp/UUID layout, including before a manifest is
-written, without exporting or moving its CSVs. Pointing an older exporter at
-the result root can move these files into the generation's `exported/` folder
-and cause Stage 03's `result_backup_missing_file` error.
-
-```bat
-db_export.bat
-db_export.bat --once
-db_export.bat --config config\db_export.json
-```
-
-For standalone files, a valid 14-digit timestamp (`YYYYMMDDHHmmss`) must appear
-in the filename or a folder name between the file and `input_path` (inclusive).
-No product or barcode is inferred from directory names. If a processed folder
-has a sibling `manifest.json`, the exporter uses its job ID, source filename,
-and result codes for validation. For our `ai_result/processed/` layout it waits
-for that manifest, which Stage 03 writes after finishing the processed copies.
-It no longer checks the pipeline's DONE state.
-
-Files modified within `source_settle_seconds` are deferred; a size/mtime change
-during reading also defers the file. Producers should write to a temporary
-non-CSV file and atomically rename it when complete. A settle delay alone cannot
-prove that an arbitrary external writer has finished. `--once` makes one scan,
-so recently written files may be deferred to a later run.
-
-The output preserves the other site's 72 `DB_COLUMNS` names and order, with
-UTF-8 encoding and a header. Each source yields NG and OK files (header-only
-when a group is empty). `is_pass=22` is OK; `is_pass=23` is NG. Blank defect names
-on 23 rows become `AI_SKIP` in the export only. Invalid codes and mismatches
-with an available manifest fail that file, which remains pending for retry.
-
-SPI/AI columns use the existing `CSV_RENAME_MAP`. Site metadata comes from
-configuration. Product and carrier_sn are preserved if present, otherwise
-blank. All `dat_*` fields, including `dat_filename`, are blank. The DB importer
-must handle empty fields appropriately. Identifiers are read as strings to
-retain leading zeros. UUIDs are stable for site/line/station, job, source path
-relative to `input_path`, and row ordinal. Changing the input root can change
-UUIDs and output filenames for the same file.
+## 本機恢復與 DB
 
 ```text
-{output_path}/{YYYY-MM-DD}/{job_id}_{source_token}_{site}_{factory}_{line}_SPI_NG.csv
-{output_path}/{YYYY-MM-DD}/{job_id}_{source_token}_{site}_{factory}_{line}_SPI_OK.csv
+state_root/
+  controller.lock
+  jobs/<job_id>/
+    events/00000001.json ...   # 不可變事件；含完整工作狀態
+    job_state.json            # 可讀快照，可由事件重建
+    csv/<generation>/...      # 不可變原始 CSV 快照
+  artifacts/<job_id>/<attempt>/
+    manifest.json
+    processed/...
+  audit.sqlite3               # 可重建的背景查詢副本
 ```
 
-The source token avoids collisions for multiple sources. Each CSV is written to
-a temporary `.tmp` file and atomically renamed. Configure MiNiFi to collect
-`*.csv` recursively and exclude temporary files. MiNiFi uploads and deletes
-those output files; the exporter only prepares them.
+只有一個主控能持有同一個 state_root 的 OS 鎖。每次狀態變更先寫入並同步本機事件，再更新快照。重啟由事件恢復，不讀 SQLite 來決定工作是否完成。不要手動刪除或編輯事件與發布紀錄。
 
-After both output CSVs are published, the source moves into an `exported`
-archive. For a folder named `processed`, `exported` is its sibling; otherwise
-it is a subfolder of the source's containing folder:
+每份 SPI CSV 發布前先保存 `PUBLISHING` 意圖，收到成功確認後保存 `RETURNED`。若當機留下未確認的發布意圖，重啟標記狀態不明，不根據機台目錄是否還有檔案判斷成功，也不盲目補發。已確認全部 CSV 回傳、但尚未保存整筆完成狀態的工作，能繼續結果備份，即使重啟時已超過六秒。
 
-```text
-job/ai_result/processed/board_processed.csv -> job/ai_result/exported/board_processed.csv
-incoming/20260922123000_processed.csv -> incoming/exported/20260922123000_processed.csv
+背景 DB 程序把事件以唯一 event_id 與 job_id/revision 冪等寫入 `events`、`jobs` 兩張表。DB 鎖定、離線或程序被終止時，事件留在本機，之後補登；關閉 `database.enabled` 不影響接收、推論、SPI 回傳或恢復。DB 不保存影像或 CSV 本體。
+
+主控本身故障時接收與回傳會停止；應由現場的服務管理機制重新啟動。重啟恢復不能保證當下那筆工作仍趕得上原始期限。
+
+## 備份、MiNiFi 與統計
+
+原始備份位置為 `backup_root/YYYY-MM-DD/job_id/`。結果保存在同一工作下的 `ai_result/returned`、`ai_result/processed` 與 `manifest.json`；匯出成功的 processed CSV 移到 `ai_result/exported`。`DONE` 表示 SPI 回傳與本機結果備份完成，MiNiFi 匯出可能仍在等待。
+
+MiNiFi 只收集輸出目錄中的 `*.csv`，忽略 `.tmp`。背景程序依明確選定的結果 manifest 匯出，不掃描未選定的推論嘗試。NG 中無缺陷名稱的全 23 保護列標記 `AI_SKIP`。輸出完成不代表 MiNiFi 已上傳；上傳與下游資料庫由 MiNiFi 負責。部分輸出失敗後重試可能重複已被收走的 CSV，下游須依穩定 UUID 去重／upsert。
+
+```bat
+spi_statistics.bat --output reports
+spi_statistics.bat --date 2026-11-09 --output reports
 ```
 
-Scans prune all `exported` folders, symlink directories, and the configured output
-folder if it is under the input root. The input must not be inside the MiNiFi
-output folder or an `exported` folder. Original SPI input and returned CSVs stay
-in place. A manifest retains its original processed path; locate an exported
-source by basename in the archive instead.
+統計直接讀本機不可變事件，不依賴 DB 補登進度，也不修改工作狀態。輸出 jobs.csv 與 summary.csv；日期以 AI 首次觀測的台灣日期篩選。
 
-Run one standalone exporter per input tree. Archive collisions are errors; existing
-backups are not intentionally overwritten. Output or move failures retain the
-source for retry, so partial publication or a crash before the move can replay
-a CSV already consumed by MiNiFi. Use stable UUIDs for DB deduplication/upsert;
-file movement is not an exactly-once delivery guarantee.
+## 模型格式與離線匯出
 
-All matching pending files, including historical files, are eligible. Old
-`db_export.sqlite3` files are ignored, not deleted. Files exported by that old
-version but still in the input tree will be exported again; move known,
-already-exported files into their corresponding `exported` folders before
-starting this version if replay is not desired.
+OBB 支援 `.pt`、`.onnx`、`.engine`。模型必須是七類 SPI OBB；不支援舊 PatchCore、distance 或 segmentation HTTP 串接。`.engine` 需要 NVIDIA CUDA；`engine_fixed_batch` 只對 `.engine` 生效，固定批次尾批會補圖並丟棄補圖結果。ONNX 固定批次從模型 shape 讀取。
 
-Failures are logged to the console and retried on the next scan; `--once` exits
-nonzero on failure. Use `spi_statistics.bat` for statistics CSV generation.
+可用同一套 Ultralytics 後端離線匯出 `.pt`：
+
+```bat
+convert_to_tensorrt.bat --model models/appearance/best.pt --output models/appearance/best.engine --device cuda:0 --batch 8 --half
+```
+
+輸出副檔名也可為 `.onnx`。預設固定批次 8；若使用 `--dynamic` 匯出 engine，推論設定的 `engine_fixed_batch` 要改為 false。TensorRT engine 應在實際 AIPC 的 GPU／CUDA 環境產生並驗證。匯出工具只接受 OBB 七類權重，先在暫存目錄完成匯出，再發布輸出檔。
+
+## 開發與驗證
+
+```sh
+uv sync --group dev
+uv run --no-sync pytest -q
+uv run --no-sync ruff check .
+uv run --no-sync ruff format --check .
+```
+
+不需要 GPU 就能執行設定、CSV、判定、期限、DB lock、恢復與子程序監督測試。真實程序整合測試使用假模型；不代表實際權重精度或 Windows／SMB 六秒達成率已驗證。要在 macOS 執行真實 CPU 模型可安裝 `--extra inference --extra mac`。
+
+本分支不保留舊 API／scanner／三 Worker 相容入口，也不遷移舊 pipeline.sqlite3。切換前停止舊程式、保留舊資料，並確認輸入目錄只包含要由新版處理的工作；不要同時啟動兩種架構。

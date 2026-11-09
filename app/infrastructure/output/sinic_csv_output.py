@@ -17,6 +17,7 @@ import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from app.infrastructure.local_store import fsync_directory
 
 from app.infrastructure.deadline_io import DeadlineExceeded
 
@@ -197,6 +198,8 @@ def _atomic_write_document(
             raise DeadlineExceeded("CSV publication deadline reached before rename")
         try:
             os.replace(temp_path, destination)
+            if deadline_at is None:
+                fsync_directory(destination.parent)
         except OSError as exc:
             if deadline_at is not None and exc.errno not in {
                 errno.ENOSPC,

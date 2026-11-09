@@ -8,6 +8,7 @@ from pathlib import Path
 import pandas as pd
 
 from app.domain.entities.pipeline_result import CsvPipelineResult
+from app.infrastructure.local_store import ensure_directory
 from app.infrastructure.repositories.csv_repository import CsvRepository
 
 
@@ -24,7 +25,9 @@ class ResultArtifactWriter:
             for character in job_id
         )
         path = self._result_root / safe_job_id / uuid.uuid4().hex
-        path.mkdir(parents=True, exist_ok=False)
+        if path.exists():
+            raise FileExistsError(path)
+        ensure_directory(path)
         return path
 
     def persist_csv_result(

@@ -19,5 +19,3 @@ class Job:
     job_folder: Path
     csv_files: list[Path] = field(default_factory=list)
     image_count: int = 0
-
-    # TODO(phase-3): Construct via FileSystemJobRepository during migration.

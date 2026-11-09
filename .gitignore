@@ -179,6 +179,13 @@ data/
 config.local.json
 .env.local
 
+# Controller journals and audit projections are runtime data.
+state/
+controller_state/
+reports/
+*.sqlite3
+*.sqlite3-*
+
 demo_html/
 results/
 doc/

@@ -11,9 +11,8 @@ import pytest
 from pydantic import ValidationError
 
 from app.application.inference.obb_service import ObbInspectionService
-from app.application.publisher.service import PipelinePublisherService
+from app.application.operations import backup_result, publish_csv
 from app.core.config import AppConfig
-from app.core.errors import ConfigError
 from app.core.inspection_config import ObbConfig
 from app.domain.entities.obb_result import OBB_CLASSES, ObbBatchResult, ObbDetection
 from app.domain.entities.pipeline_result import PipelineOutcome, PipelineResultManifest
@@ -315,12 +314,14 @@ def service_case(tmp_path, rows, runtime=None):
         writer.writerows(rows)
     settings = json.loads((ROOT / "config/ai_server.json").read_text())
     settings["paths"] = {
+        "watch_root": str(tmp_path / "input"),
+        "state_root": str(tmp_path / "state"),
         "external_output_root": str(tmp_path / "return"),
         "backup_output_root": str(tmp_path / "backup"),
     }
-    settings["processing"].update(
-        image_name_source_column="image", image_name_template=None
-    )
+    settings["processing"]["image_name_template"] = "{image}"
+    settings["database"]["path"] = str(tmp_path / "state/audit.sqlite3")
+    settings["minifi"]["output_path"] = str(tmp_path / "minifi")
     config = AppConfig.model_validate(settings)
     runtime = runtime or FakeRuntime()
     service = ObbInspectionService(
@@ -358,19 +359,15 @@ def test_native_result_preserves_machine_contract_and_metadata(tmp_path):
     assert (
         json.loads(processed.iloc[0]["obb_retained_detections"])[0]["confidence"] == 0.8
     )
-    publisher = PipelinePublisherService(config=config)
-    try:
-        publisher.publish_primary(
-            staged_folder=folder,
-            manifest_path=path,
-            ready_at=time.time(),
-            deadline_at=time.time() + 10,
+    for item in manifest.csv_results:
+        publish_csv(
+            config,
+            folder / item.source_csv,
+            item.result_codes,
+            time.time() + 10,
+            job_id=folder.name,
         )
-        publisher.write_local_result_backup(
-            staged_folder=folder, original_backup_folder=folder, manifest_path=path
-        )
-    finally:
-        publisher.close()
+    backup_result(folder, folder, path)
     returned = pd.read_csv(tmp_path / "return/board.csv")
     assert (
         returned.columns.tolist() == pd.read_csv(folder / "board.csv").columns.tolist()
@@ -466,14 +463,6 @@ def test_supplied_measurements_fail_volume_before_other_checks(tmp_path):
     processed = pd.read_csv(path.parent / manifest.csv_results[0].processed_csv)
     assert processed["ai_failed_rule"].tolist() == ["volume"] * 7
     assert processed["ai_defect_name"].tolist() == ["high volume"] + ["low volume"] * 6
-
-
-def test_native_settings_cannot_accidentally_use_legacy_process_route(tmp_path):
-    from app.application.use_cases.process_job import ProcessJobUseCase
-
-    config, _folder, _service, _runtime = service_case(tmp_path, [row()])
-    with pytest.raises(ConfigError, match="Stage 02"):
-        ProcessJobUseCase(config=config)
 
 
 def test_same_component_uses_each_rows_limits_and_preserves_csv(tmp_path):

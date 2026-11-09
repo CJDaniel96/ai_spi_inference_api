@@ -10,6 +10,8 @@ from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from app.infrastructure.local_store import fsync_directory
+
 _SCHEMA_VERSION = 1
 _VALID_RESULT_CODES = frozenset({22, 23})
 
@@ -137,6 +139,7 @@ class PipelineResultManifest:
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temp_path, path)
+            fsync_directory(path.parent)
         except Exception:
             temp_path.unlink(missing_ok=True)
             raise

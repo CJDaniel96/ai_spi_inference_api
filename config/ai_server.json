@@ -1,11 +1,15 @@
 {
-  "server": {
-    "host": "127.0.0.1",
-    "port": 5050
+  "identity": {
+    "site": "SX",
+    "factory": "SX",
+    "line": "SPI",
+    "station_id": "SPI"
   },
   "paths": {
+    "watch_root": "D:/spi_ai/output/01/sfcTemp",
     "external_output_root": "D:/Dre/JQ_SPI_02_AI_API/data",
-    "backup_output_root": "D:/Dre/JQ_SPI_02_AI_API/backup"
+    "backup_output_root": "D:/Dre/JQ_SPI_02_AI_API/backup",
+    "state_root": "D:/Dre/JQ_SPI_02_AI_API/controller_state"
   },
   "processing": {
     "folder_images_num_threshold": 60,
@@ -17,75 +21,22 @@
       ".tiff",
       ".tif"
     ],
-    "image_name_source_column": null,
-    "image_name_template": "{csv_stem}_{component_name}_{Array_id}_{Pad_id}.jpg"
-  },
-  "model_clients": [],
-  "defect_rules": {
-    "rule_order": [
-      "anomaly",
-      "high_vol",
-      "low_vol",
-      "high_cover",
-      "short_distance",
-      "high_paste"
-    ],
-    "anomaly_threshold": 0.9,
-    "high_cover_threshold": 180.0,
-    "short_distance_threshold": 6.8,
-    "low_vol_offset": -10.0,
-    "high_vol_offset": 20.0,
-    "high_paste_height_threshold": 200.0
-  },
-  "output": {
-    "primary_csv_mode": "is_pass_only",
-    "primary_path_layout": "machine_return",
-    "preserve_job_folder": false,
-    "require_existing_is_pass": true
+    "image_name_template": "{csv_stem}_{component_name}_{Array_id}_{Pad_id}.jpg",
+    "source_settle_seconds": 2.0
   },
   "reliability": {
-    "primary_return_deadline_seconds": 30.0,
-    "primary_publish_reserve_seconds": 1.0,
-    "scanner_http_timeout_grace_seconds": 5.0,
-    "required_model_failure_policy": "fail_all_23",
-    "end_to_end_timeout_seconds": 6.0
+    "end_to_end_timeout_seconds": 6.0,
+    "primary_publish_reserve_seconds": 1.0
   },
-  "pipeline": {
-    "enabled": true,
-    "watch_root": "D:/spi_ai/output/01/sfcTemp",
-    "database_path": "D:/Dre/JQ_SPI_02_AI_API/state/pipeline.sqlite3",
-    "staging_root": null,
-    "result_root": "D:/Dre/JQ_SPI_02_AI_API/pipeline_results",
-    "db_export_config_path": "config/db_export.json",
-    "source_settle_seconds": 2.0,
-    "ingest_poll_interval_seconds": 0.25,
-    "inference_poll_interval_seconds": 0.05,
-    "publisher_poll_interval_seconds": 0.05,
-    "publisher_lease_seconds": 0.5,
-    "publisher_heartbeat_interval_seconds": 0.1,
-    "worker_lease_seconds": 60.0
+  "runtime": {
+    "scan_interval_seconds": 0.25,
+    "poll_interval_seconds": 0.01,
+    "max_active_jobs": 4,
+    "discovery_timeout_seconds": 2.0,
+    "background_timeout_seconds": 30.0,
+    "background_retry_seconds": 5.0
   },
-  "logging": {
-    "log_dir": "log",
-    "system_log_file": "system",
-    "request_log_file": "log.csv",
-    "request_log_max_bytes": 52428800,
-    "request_log_backup_count": 5
-  },
-  "watch_root": "D:/spi_ai/output/01/sfcTemp",
-  "scanner_input_mode": "sinic_timestamp",
-  "scanner_settle_seconds": 2.0,
-  "scanner_allow_no_images": false,
-  "process_api_url": "http://127.0.0.1:5050/process",
-  "processed_registry_path": "log/processed.json",
-  "rescan_interval_ms": 500,
-  "scanner_max_retries": 5,
-  "scanner_client_error_max_attempts": 2,
-  "scanner_backoff_base_seconds": 5,
-  "scanner_backoff_max_seconds": 300,
   "inference": {
-    "mode": "yolo_obb",
-    "site_id": "SX",
     "obb": {
       "model_path": "models/appearance/best.pt",
       "device": "cuda:0",
@@ -106,5 +57,23 @@
         "Bridge": 0.25
       }
     }
+  },
+  "output": {
+    "preserve_job_folder": false
+  },
+  "database": {
+    "enabled": true,
+    "path": "D:/Dre/JQ_SPI_02_AI_API/controller_state/audit.sqlite3",
+    "poll_seconds": 5.0,
+    "busy_timeout_seconds": 0.1
+  },
+  "minifi": {
+    "enabled": true,
+    "output_path": "D:/Project/AMR/Result/TEMP/spi",
+    "poll_seconds": 30.0
+  },
+  "logging": {
+    "log_dir": "log",
+    "system_log_file": "system.log"
   }
 }

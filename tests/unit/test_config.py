@@ -1,452 +1,57 @@
-"""Unit tests for the application configuration schema and loader."""
-
-from __future__ import annotations
-
 import json
-from pathlib import Path
-from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
 from app.core.config import AppConfig, load_config
-from app.core.errors import ConfigError
-
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-_REAL_CONFIG_PATH = _REPO_ROOT / "config" / "ai_server.json"
-
-
-def _valid_config_dict() -> dict[str, Any]:
-    """Return a minimal, valid config dict for mutation in negative tests."""
-    return {
-        "server": {"host": "0.0.0.0", "port": 5050},
-        "paths": {
-            "external_output_root": "D:/out/data",
-            "backup_output_root": "D:/out/backup",
-        },
-        "processing": {
-            "folder_images_num_threshold": 500,
-            "image_extensions": [".jpg", ".png"],
-        },
-        "model_clients": [
-            {
-                "name": "anomaly",
-                "enabled": True,
-                "url": "http://127.0.0.1:8000/inference",
-                "target_column": "anomaly_score",
-                "timeout_seconds": 300,
-            },
-            {
-                "name": "paste",
-                "enabled": False,
-                "url": "http://127.0.0.1:8001/inference",
-                "target_column": "paste_pixels",
-                "timeout_seconds": 300,
-            },
-            {
-                "name": "distance",
-                "enabled": True,
-                "url": "http://127.0.0.1:8002/inference",
-                "target_column": "min_pad_distance",
-                "timeout_seconds": 300,
-            },
-        ],
-        "defect_rules": {
-            "anomaly_threshold": 0.9,
-            "high_cover_threshold": 180.0,
-            "short_distance_threshold": 6.8,
-            "low_vol_offset": -10.0,
-            "high_vol_offset": 20.0,
-            "high_paste_height_threshold": 200.0,
-        },
-        "output": {"primary_csv_mode": "is_pass_only"},
-        "logging": {
-            "log_dir": "log",
-            "system_log_file": "system",
-            "request_log_file": "log.csv",
-        },
-    }
-
-
-def _write_config(tmp_path: Path, data: dict[str, Any]) -> Path:
-    """Write ``data`` to a temp JSON file and return its path."""
-    config_path = tmp_path / "ai_server.json"
-    config_path.write_text(json.dumps(data), encoding="utf-8")
-    return config_path
-
-
-def test_loads_real_repo_config() -> None:
-    """The shipped ``config/ai_server.json`` loads and validates."""
-    config = load_config(_REAL_CONFIG_PATH)
-    configured = json.loads(_REAL_CONFIG_PATH.read_text(encoding="utf-8"))
-    configured_paths = configured["paths"]
-
-    assert isinstance(config, AppConfig)
-    assert config.paths.external_output_root == configured_paths["external_output_root"]
-    assert config.paths.backup_output_root == configured_paths["backup_output_root"]
-    assert config.defect_rules.anomaly_threshold == 0.9
-    assert config.defect_rules.short_distance_threshold == 6.8
-    assert config.defect_rules.rule_order == [
-        "anomaly",
-        "high_vol",
-        "low_vol",
-        "high_cover",
-        "short_distance",
-        "high_paste",
-    ]
-    assert config.processing.folder_images_num_threshold == 60
-    assert config.reliability.primary_return_deadline_seconds == 30.0
-    assert config.reliability.primary_publish_reserve_seconds == 1.0
-    assert config.reliability.end_to_end_timeout_seconds == 6.0
-    assert config.reliability.required_model_failure_policy == "fail_all_23"
-    assert config.pipeline.enabled is True
-    assert config.pipeline.database_path == configured["pipeline"]["database_path"]
-    assert config.pipeline.staging_root is None
-    assert config.pipeline.source_settle_seconds == 2.0
-    assert config.pipeline.publisher_poll_interval_seconds == 0.05
-    assert config.model_clients == []
-    assert config.inference.mode == "yolo_obb"
-    assert config.inference.site_id == "SX"
-    assert config.inference.obb.class_thresholds["Solder_Paste"] == 0.7
-    assert config.inference.obb.batch_size == 8
-
-
-def test_enabled_model_clients_excludes_disabled(tmp_path: Path) -> None:
-    """``enabled_model_clients`` returns only clients with ``enabled=True``."""
-    config = load_config(_write_config(tmp_path, _valid_config_dict()))
-
-    enabled = config.enabled_model_clients()
-    names = [client.name for client in enabled]
-
-    assert names == ["anomaly", "distance"]
-    assert all(client.enabled for client in enabled)
-    assert "paste" not in names
-
-
-def test_required_enabled_model_clients_excludes_optional_and_disabled(
-    tmp_path: Path,
-) -> None:
-    """Only enabled+required clients gate normal 22/23 output."""
-    data = _valid_config_dict()
-    data["model_clients"][1]["required"] = False
-    data["model_clients"][2]["required"] = False
-    config = load_config(_write_config(tmp_path, data))
-
-    assert [c.name for c in config.required_enabled_model_clients()] == ["anomaly"]
-
-
-def test_native_config_has_no_http_model_clients() -> None:
-    """The SX config delegates appearance to the resident OBB process."""
-    config = load_config(_REAL_CONFIG_PATH)
-
-    assert config.model_clients == []
-    assert config.inference.mode == "yolo_obb"
-
-
-@pytest.mark.parametrize("label", ["Foreign_object", "Foreign_Object"])
-def test_loads_native_config_with_foreign_object_threshold_spelling(
-    tmp_path: Path, label: str
-) -> None:
-    data = json.loads(_REAL_CONFIG_PATH.read_text(encoding="utf-8"))
-    thresholds = data["inference"]["obb"]["class_thresholds"]
-    del thresholds["Foreign_object"]
-    thresholds[label] = 0.65
-
-    config = load_config(_write_config(tmp_path, data))
-
-    assert config.inference.obb.class_thresholds["Foreign_object"] == 0.65
-    assert "Foreign_Object" not in config.inference.obb.class_thresholds
-    assert len(config.inference.obb.class_thresholds) == 7
-
-
-def test_missing_required_section_raises_clear_error(tmp_path: Path) -> None:
-    """Omitting a required section raises a ConfigError naming the field."""
-    data = _valid_config_dict()
-    del data["defect_rules"]
-
-    with pytest.raises(ConfigError) as exc_info:
-        load_config(_write_config(tmp_path, data))
-
-    assert "defect_rules" in str(exc_info.value)
-
-
-def test_legacy_config_gets_default_defect_rule_order(tmp_path: Path) -> None:
-    config = load_config(_write_config(tmp_path, _valid_config_dict()))
-
-    assert config.defect_rules.rule_order == [
-        "anomaly",
-        "high_vol",
-        "low_vol",
-        "high_cover",
-        "short_distance",
-        "high_paste",
-    ]
+from tests.helpers import make_config
 
 
 @pytest.mark.parametrize(
-    "rule_order, expected_error",
-    [
-        (["anomaly", "not_a_rule"], "rule_order"),
-        (["anomaly", "anomaly"], "duplicate"),
-    ],
+    "old_key", ["server", "pipeline", "defect_rules", "model_clients", "watch_root"]
 )
-def test_invalid_defect_rule_order_is_rejected(
-    tmp_path: Path, rule_order: list[str], expected_error: str
-) -> None:
-    data = _valid_config_dict()
-    data["defect_rules"]["rule_order"] = rule_order
-
-    with pytest.raises(ConfigError) as exc_info:
-        load_config(_write_config(tmp_path, data))
-
-    assert expected_error in str(exc_info.value)
-
-
-def test_missing_config_file_raises_config_error(tmp_path: Path) -> None:
-    """A non-existent config path raises a ConfigError."""
-    missing = tmp_path / "does_not_exist.json"
-
-    with pytest.raises(ConfigError) as exc_info:
-        load_config(missing)
-
-    assert "not found" in str(exc_info.value).lower()
-
-
-def test_invalid_primary_csv_mode_raises_validation_error(tmp_path: Path) -> None:
-    """An unsupported ``primary_csv_mode`` fails validation."""
-    data = _valid_config_dict()
-    data["output"]["primary_csv_mode"] = "bogus_mode"
-
-    with pytest.raises(ConfigError) as exc_info:
-        load_config(_write_config(tmp_path, data))
-
-    assert "primary_csv_mode" in str(exc_info.value)
-
-
-def test_reliability_defaults_apply_to_legacy_config(tmp_path: Path) -> None:
-    """Older config files get the production-safe deadline defaults."""
-    config = load_config(_write_config(tmp_path, _valid_config_dict()))
-
-    assert config.reliability.primary_return_deadline_seconds == 30.0
-    assert config.reliability.primary_publish_reserve_seconds == 5.0
-    assert config.reliability.scanner_http_timeout_grace_seconds == 5.0
-    assert config.reliability.required_model_failure_policy == "fail_all_23"
-
-
-def test_pipeline_defaults_keep_legacy_deployments_disabled(tmp_path: Path) -> None:
-    config = load_config(_write_config(tmp_path, _valid_config_dict()))
-
-    assert config.pipeline.enabled is False
-    assert config.pipeline.database_path == "data/pipeline/jobs.sqlite3"
-    assert config.pipeline.staging_root is None
+def test_removed_settings_are_rejected_instead_of_silently_ignored(tmp_path, old_key):
+    data = make_config(tmp_path).model_dump()
+    data[old_key] = {}
+    with pytest.raises(ValidationError, match="Extra inputs"):
+        AppConfig.model_validate(data)
 
 
 @pytest.mark.parametrize(
-    "field",
+    "field,value",
     [
-        "source_settle_seconds",
-        "ingest_poll_interval_seconds",
-        "inference_poll_interval_seconds",
-        "publisher_poll_interval_seconds",
-        "publisher_lease_seconds",
-        "publisher_heartbeat_interval_seconds",
-        "worker_lease_seconds",
+        ("end_to_end_timeout_seconds", 0),
+        ("end_to_end_timeout_seconds", float("nan")),
+        ("primary_publish_reserve_seconds", 6),
     ],
 )
-def test_pipeline_timing_values_are_validated(tmp_path: Path, field: str) -> None:
-    data = _valid_config_dict()
-    data["pipeline"] = {field: -1}
-
-    with pytest.raises(ConfigError) as exc_info:
-        load_config(_write_config(tmp_path, data))
-
-    assert field in str(exc_info.value)
+def test_deadlines_are_finite_and_reserve_fits(tmp_path, field, value):
+    data = make_config(tmp_path).model_dump()
+    data["reliability"][field] = value
+    with pytest.raises(ValidationError):
+        AppConfig.model_validate(data)
 
 
-def test_enabled_pipeline_requires_watch_root_and_long_enough_lease(
-    tmp_path: Path,
-) -> None:
-    data = _valid_config_dict()
-    data["pipeline"] = {"enabled": True, "worker_lease_seconds": 60}
-
-    with pytest.raises(ConfigError) as exc_info:
-        load_config(_write_config(tmp_path, data))
-
-    assert "watch_root" in str(exc_info.value)
-
-    data["pipeline"] = {
-        "enabled": True,
-        "watch_root": "D:/watch",
-        "worker_lease_seconds": 6,
-    }
-    with pytest.raises(ConfigError) as exc_info:
-        load_config(_write_config(tmp_path, data))
-
-    assert "worker_lease_seconds" in str(exc_info.value)
+def test_roots_cannot_overlap_and_inbox_is_never_output(tmp_path):
+    data = make_config(tmp_path).model_dump()
+    data["minifi"]["output_path"] = data["paths"]["watch_root"] + "/nested"
+    with pytest.raises(ValidationError, match="separate"):
+        AppConfig.model_validate(data)
 
 
-def test_enabled_pipeline_publisher_lease_must_fit_publish_reserve(
-    tmp_path: Path,
-) -> None:
-    data = _valid_config_dict()
-    data["pipeline"] = {
-        "enabled": True,
-        "watch_root": "D:/watch",
-        "worker_lease_seconds": 60,
-        "publisher_lease_seconds": 5,
-        "publisher_heartbeat_interval_seconds": 0.25,
-    }
-
-    with pytest.raises(ConfigError) as exc_info:
-        load_config(_write_config(tmp_path, data))
-
-    assert "publisher_lease_seconds" in str(exc_info.value)
+def test_single_file_loading_and_relative_paths(tmp_path, monkeypatch):
+    data = make_config(tmp_path).model_dump()
+    data["paths"]["state_root"] = "data/test-state"
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps(data))
+    monkeypatch.setenv("AI_CONFIG_PATH", str(path))
+    result = load_config()
+    assert result.paths.state_root.endswith("/data/test-state")
+    assert result.inference.obb.model_path.endswith("absent.pt")
 
 
-def test_enabled_pipeline_publisher_heartbeat_must_be_shorter_than_lease(
-    tmp_path: Path,
-) -> None:
-    data = _valid_config_dict()
-    data["pipeline"] = {
-        "enabled": True,
-        "watch_root": "D:/watch",
-        "worker_lease_seconds": 60,
-        "publisher_lease_seconds": 1,
-        "publisher_heartbeat_interval_seconds": 1,
-    }
+def test_repository_configs_use_only_the_new_schema():
+    from pathlib import Path
 
-    with pytest.raises(ConfigError) as exc_info:
-        load_config(_write_config(tmp_path, data))
-
-    assert "publisher_heartbeat_interval_seconds" in str(exc_info.value)
-
-
-@pytest.mark.parametrize("duplicate_field", ["name", "target_column"])
-def test_model_client_identity_fields_must_be_unique(
-    tmp_path: Path,
-    duplicate_field: str,
-) -> None:
-    data = _valid_config_dict()
-    data["model_clients"][1][duplicate_field] = data["model_clients"][0][
-        duplicate_field
-    ]
-
-    with pytest.raises(ConfigError) as exc_info:
-        load_config(_write_config(tmp_path, data))
-
-    assert duplicate_field in str(exc_info.value)
-
-
-@pytest.mark.parametrize("field", ["name", "url", "target_column"])
-def test_model_client_identity_fields_must_not_be_blank(
-    tmp_path: Path,
-    field: str,
-) -> None:
-    data = _valid_config_dict()
-    data["model_clients"][0][field] = "   "
-
-    with pytest.raises(ConfigError) as exc_info:
-        load_config(_write_config(tmp_path, data))
-
-    assert field in str(exc_info.value)
-
-
-def test_model_client_url_must_be_http(tmp_path: Path) -> None:
-    data = _valid_config_dict()
-    data["model_clients"][0]["url"] = "not-a-url"
-
-    with pytest.raises(ConfigError) as exc_info:
-        load_config(_write_config(tmp_path, data))
-
-    assert "url" in str(exc_info.value)
-
-
-def test_enabled_pipeline_requires_a_required_model(tmp_path: Path) -> None:
-    data = _valid_config_dict()
-    for client in data["model_clients"]:
-        client["required"] = False
-    data["output"]["primary_path_layout"] = "machine_return"
-    data["pipeline"] = {
-        "enabled": True,
-        "watch_root": "D:/watch",
-        "worker_lease_seconds": 60,
-    }
-
-    with pytest.raises(ConfigError) as exc_info:
-        load_config(_write_config(tmp_path, data))
-
-    assert "required model" in str(exc_info.value)
-
-
-def test_enabled_pipeline_requires_machine_return_output_contract(
-    tmp_path: Path,
-) -> None:
-    data = _valid_config_dict()
-    data["pipeline"] = {
-        "enabled": True,
-        "watch_root": "D:/watch",
-        "worker_lease_seconds": 60,
-    }
-
-    with pytest.raises(ConfigError) as exc_info:
-        load_config(_write_config(tmp_path, data))
-
-    assert "primary_path_layout" in str(exc_info.value)
-
-
-@pytest.mark.parametrize("deadline", [0, -1])
-def test_non_positive_primary_deadline_is_rejected(
-    tmp_path: Path, deadline: int
-) -> None:
-    data = _valid_config_dict()
-    data["reliability"] = {"primary_return_deadline_seconds": deadline}
-
-    with pytest.raises(ConfigError) as exc_info:
-        load_config(_write_config(tmp_path, data))
-
-    assert "primary_return_deadline_seconds" in str(exc_info.value)
-
-
-@pytest.mark.parametrize("deadline", [0, -1, float("inf"), float("nan")])
-def test_invalid_end_to_end_deadline_is_rejected(tmp_path, deadline):
-    data = _valid_config_dict()
-    data["reliability"] = {"end_to_end_timeout_seconds": deadline}
-    with pytest.raises(ConfigError, match="end_to_end_timeout_seconds"):
-        load_config(_write_config(tmp_path, data))
-
-
-def test_publish_reserve_must_be_less_than_deadline(tmp_path: Path) -> None:
-    data = _valid_config_dict()
-    data["reliability"] = {
-        "primary_return_deadline_seconds": 10,
-        "primary_publish_reserve_seconds": 10,
-    }
-
-    with pytest.raises(ConfigError) as exc_info:
-        load_config(_write_config(tmp_path, data))
-
-    assert "primary_publish_reserve_seconds" in str(exc_info.value)
-
-
-def test_non_positive_model_timeout_is_rejected(tmp_path: Path) -> None:
-    data = _valid_config_dict()
-    data["model_clients"][0]["timeout_seconds"] = 0
-
-    with pytest.raises(ConfigError) as exc_info:
-        load_config(_write_config(tmp_path, data))
-
-    assert "timeout_seconds" in str(exc_info.value)
-
-
-def test_to_legacy_rule_mapping_matches_config() -> None:
-    """The legacy adapter flattens the nested config into RuleConfig keys."""
-    from app.core.config import to_legacy_rule_mapping
-
-    config = load_config(_REAL_CONFIG_PATH)
-    mapping = to_legacy_rule_mapping(config)
-
-    assert mapping["anomaly_threshold"] == config.defect_rules.anomaly_threshold
-    assert mapping["external_output_root"] == config.paths.external_output_root
-    assert (
-        mapping["folder_images_num_threshold"]
-        == config.processing.folder_images_num_threshold
-    )
+    for path in Path("config").glob("*.json"):
+        load_config(path)

@@ -18,7 +18,6 @@ if defined PYTHON_EXE (
 
 if not defined PYTHON_EXE if exist "%~dp0.venv\Scripts\python.exe" set "PYTHON_EXE=%~dp0.venv\Scripts\python.exe"
 
-if not defined PYTHON_EXE if exist "%USERPROFILE%\.conda\envs\py312_cu128_j15\python.exe" set "PYTHON_EXE=%USERPROFILE%\.conda\envs\py312_cu128_j15\python.exe"
 
 if not defined PYTHON_EXE (
     for /f "delims=" %%I in ('where python 2^>nul') do if not defined PYTHON_EXE set "PYTHON_EXE=%%I"

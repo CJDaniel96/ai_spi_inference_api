@@ -1,1 +1,1 @@
-"""SPI AI inference API (modular monolith, layered architecture)."""
+"""SPI AI single-controller inspection runtime."""

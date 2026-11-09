@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import shutil
-from dataclasses import replace
 from pathlib import Path
 
 from app.application.ingest.service import IngestService, SourceChangedError
@@ -28,7 +27,6 @@ def inspect_source(extensions, folder, threshold):
 
 def _service(config):
     return IngestService(
-        image_name_source_column=config.processing.image_name_source_column,
         image_name_template=config.processing.image_name_template,
         primary_return_deadline_seconds=config.reliability.end_to_end_timeout_seconds,
     )
@@ -56,29 +54,6 @@ def archive_source(config, validated, backup_root, staging_root, csv_snapshot=No
         staging_root=staging_root,
         csv_snapshot=csv_snapshot,
     )
-
-
-def recover_legacy_archive(config, job, backup_root, staging_root):
-    """Recover the old raw-copy fence without blocking new job discovery."""
-    service = _service(config)
-    source = job.source_folder if job.source_folder.is_dir() else job.staged_folder
-    try:
-        validated = service.validate(source)
-        validated = replace(
-            validated,
-            source_folder=job.source_folder,
-            ready_at=job.ready_at,
-            deadline_at=job.deadline_at,
-        )
-        if job.source_folder.is_dir():
-            service.archive(
-                validated, backup_root=backup_root, staging_root=staging_root
-            )
-        elif not job.original_backup_folder.is_dir():
-            return "incomplete"
-        return "complete"
-    except Exception:
-        return "failed"
 
 
 def backup_images(source: Path, target: Path, csv_snapshot: Path) -> str:

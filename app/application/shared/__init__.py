@@ -1,1 +1,1 @@
-"""Result-building capabilities shared by the independent pipeline stages."""
+"""Shared result artifacts and all-23 fallback."""

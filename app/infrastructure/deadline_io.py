@@ -1,6 +1,6 @@
 """Supervise blocking share IO in a reusable, killable spawned process.
 
-Only plain data crosses the pipe. SQLite transactions/leases stay in the parent.
+Only plain data crosses the pipe. The controller alone owns job state.
 A timed out publication has an uncertain remote commit, never a safe retry.
 """
 

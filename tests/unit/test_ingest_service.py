@@ -153,17 +153,16 @@ def test_archive_is_idempotent_for_identical_existing_content(tmp_path) -> None:
     assert second.deadline_at == first.deadline_at
 
 
-def test_source_column_builds_expected_image_key(tmp_path) -> None:
+def test_template_can_use_explicit_image_filename(tmp_path) -> None:
     source = tmp_path / "share" / _JOB_ID
     source.mkdir(parents=True)
     image_name = "machine_image.jpg"
-    pd.DataFrame({"image_path": [rf"C:\SPI\{image_name}"]}).to_csv(
+    pd.DataFrame({"image_path": [image_name]}).to_csv(
         source / "source.csv", index=False
     )
     _write_jpeg(source / image_name)
     service = _service(
-        image_name_template=None,
-        image_name_source_column="image_path",
+        image_name_template="{image_path}",
     )
 
     validated = service.validate(source)

@@ -9,6 +9,7 @@ from pathlib import Path
 import pandas as pd
 
 from app.core.errors import OutputWriteError
+from app.infrastructure.local_store import fsync_directory
 from app.infrastructure.output.sinic_csv_output import _read_document
 
 
@@ -55,7 +56,10 @@ class CsvRepository:
             tmp_path = Path(tmp_name)
             try:
                 df.to_csv(tmp_path, index=False)
+                with tmp_path.open("rb") as handle:
+                    os.fsync(handle.fileno())
                 os.replace(tmp_path, path)
+                fsync_directory(path.parent)
             except Exception:
                 tmp_path.unlink(missing_ok=True)
                 raise

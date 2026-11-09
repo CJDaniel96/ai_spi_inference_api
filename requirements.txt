@@ -1,34 +1,10 @@
-# -----------------------------------------------------------------------------
-# LEGACY dependency list (conda / plain-pip workflow).
-# The CANONICAL dependency source is now pyproject.toml (managed with `uv`).
-# For the uv workflow see README.md > "Environment Management with uv" and the
-# split files: requirements-cuda.txt / requirements-mac.txt / requirements-dev.txt.
-# This file is kept for the existing conda-based deployment; do not let it and
-# pyproject.toml diverge long-term.
-# -----------------------------------------------------------------------------
-# To install PyTorch with CUDA 12.8, run the following command:
-# pip install torch==2.7.1 torchvision==0.22.1 --index-url https://download.pytorch.org/whl/cu128
-# Core web framework and server prd Python 3.12
-fastapi==0.115.12
-uvicorn==0.34.1
-httpx==0.28.1
+# Production Windows/Linux. Install torch/torchvision from the matching CUDA index first.
 pydantic==2.11.3
-
-# Data and numerics
 pandas==2.1.4
 numpy==1.26.4
-
-# Computer vision and ML
 opencv-python==4.11.0.86
-matplotlib==3.8.4
 ultralytics==8.3.187
-
-# Anomaly detection (used by PatchCore PyTorch scripts)
-anomalib==0.7.0
-
-# ONNX Runtime providers (Windows DirectML and generic CPU)
-onnxruntime-gpu==1.19.0 # For NVIDIA GPU support via CUDA 12.x
-
-pycuda==2024.1
-# Mobile SAM (segmentation helper)
-# mobile-sam @ git+https://github.com/ChaoningZhang/MobileSAM.git
+torch==2.7.1
+torchvision==0.22.1
+onnx>=1.17.0
+onnxruntime-gpu==1.19.0; sys_platform != 'darwin'

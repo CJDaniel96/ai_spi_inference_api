@@ -1,10 +1,9 @@
-"""Settings for native appearance inference; legacy HTTP remains explicit."""
+"""Settings for the native OBB model backend."""
 
 from __future__ import annotations
 
 import math
 from pathlib import Path
-from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -67,11 +66,3 @@ class ObbConfig(BaseModel):
         ):
             raise ValueError("Each class threshold must be finite and >= model conf")
         return self
-
-
-class InferenceConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    mode: Literal["legacy_http", "yolo_obb"] = "legacy_http"
-    site_id: str = "SX"
-    obb: ObbConfig = Field(default_factory=ObbConfig)

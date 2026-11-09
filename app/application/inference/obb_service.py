@@ -36,7 +36,7 @@ class ObbInspectionService:
         self._config = config
         self._runtime = runtime
         self._clock = clock
-        self._site_id = config.inference.site_id
+        self._site_id = config.identity.site
         self._thresholds = dict(config.inference.obb.class_thresholds)
         self._judge = ComponentJudge(self._thresholds)
         self._policy = self._judge.policy_definition()
@@ -78,7 +78,6 @@ class ObbInspectionService:
         for source in job.csv_files:
             frame = self._merger.add_image_name_column(
                 self._csv.read_for_output(source),
-                source_column=self._config.processing.image_name_source_column,
                 template=self._config.processing.image_name_template,
                 csv_stem=source.stem,
             )
