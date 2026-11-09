@@ -1,5 +1,6 @@
 @echo off
 setlocal enableextensions
+title %~nx0
 cd /d "%~dp0"
 
 REM Stage 02 - claim durable READY jobs and run AI inference only.  Result

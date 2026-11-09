@@ -1,5 +1,6 @@
 @echo off
 setlocal enableextensions
+title %~nx0
 cd /d "%~dp0"
 
 REM Stage 01 - validate the SPI timestamp folder, preserve the immutable raw

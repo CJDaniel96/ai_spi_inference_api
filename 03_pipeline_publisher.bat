@@ -1,5 +1,6 @@
 @echo off
 setlocal enableextensions
+title %~nx0
 cd /d "%~dp0"
 
 REM Stage 03 - publish Primary CSVs before the deadline, then persist the
