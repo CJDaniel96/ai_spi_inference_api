@@ -10,6 +10,7 @@ from app.tools.tensorrt_converter import convert
 
 
 @pytest.mark.parametrize("suffix,device", [(".onnx", "cpu"), (".engine", "cuda:0")])
+@pytest.mark.usefixtures("writable_file_fsync")
 def test_obb_export_is_staged_and_parameters_match_runtime(
     tmp_path, monkeypatch, suffix, device
 ):

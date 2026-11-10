@@ -75,7 +75,8 @@ def convert(
         os.close(fd)
         try:
             shutil.copy2(result, temporary)
-            with open(temporary, "rb") as handle:
+            # Windows requires a writable handle when synchronizing file data.
+            with open(temporary, "r+b") as handle:
                 os.fsync(handle.fileno())
             if destination.exists() and not overwrite:
                 raise FileExistsError(destination)

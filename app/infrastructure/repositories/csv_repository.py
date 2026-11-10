@@ -45,11 +45,13 @@ class CsvRepository:
             fd, tmp_name = tempfile.mkstemp(
                 dir=path.parent, prefix=f"{path.name}.", suffix=".tmp"
             )
-            os.close(fd)
             tmp_path = Path(tmp_name)
             try:
-                df.to_csv(tmp_path, index=False)
-                with tmp_path.open("rb") as handle:
+                # Windows fsync requires write access; sync the same handle
+                # used to write the CSV after flushing its Python buffers.
+                with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+                    df.to_csv(handle, index=False)
+                    handle.flush()
                     os.fsync(handle.fileno())
                 os.replace(tmp_path, path)
                 fsync_directory(path.parent)

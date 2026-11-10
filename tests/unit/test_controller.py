@@ -28,6 +28,7 @@ def codes(config):
     return values
 
 
+@pytest.mark.usefixtures("writable_file_fsync")
 def test_normal_job_preserves_raw_and_returns_then_exports(tmp_path):
     config = make_config(tmp_path)
     source = write_job(config, rows=2)
@@ -52,6 +53,7 @@ def test_normal_job_preserves_raw_and_returns_then_exports(tmp_path):
 
 
 @pytest.mark.parametrize("mode", ["slow", "failure", "oversize", "missing_images"])
+@pytest.mark.usefixtures("writable_file_fsync")
 def test_fallback_does_not_wait_for_model_or_images(tmp_path, mode):
     config = make_config(tmp_path)
     source = write_job(

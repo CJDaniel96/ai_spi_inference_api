@@ -60,7 +60,8 @@ def backup_result(csv_folder: Path, raw_folder: Path, manifest_path: Path) -> No
         destination.parent.mkdir(parents=True, exist_ok=True)
         temporary = destination.with_suffix(".tmp")
         shutil.copy2(source, temporary)
-        with temporary.open("rb") as handle:
+        # Windows requires a writable handle when synchronizing file data.
+        with temporary.open("r+b") as handle:
             os.fsync(handle.fileno())
         temporary.replace(destination)
         fsync_directory(destination.parent)
