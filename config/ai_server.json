@@ -9,7 +9,8 @@
     "watch_root": "D:/spi_ai/output/01/sfcTemp",
     "external_output_root": "D:/Dre/JQ_SPI_02_AI_API/data",
     "backup_output_root": "D:/Dre/JQ_SPI_02_AI_API/backup",
-    "state_root": "D:/Dre/JQ_SPI_02_AI_API/controller_state"
+    "state_root": "D:/Dre/JQ_SPI_02_AI_API/controller_state",
+    "history_root": "D:/Dre/JQ_SPI_02_AI_API/history"
   },
   "processing": {
     "folder_images_num_threshold": 60,

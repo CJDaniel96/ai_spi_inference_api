@@ -30,6 +30,7 @@ def make_config(root: Path, *, total=1.5, reserve=0.4, minifi=True, database=Tru
                 "external_output_root": str(root / "return"),
                 "backup_output_root": str(root / "backup"),
                 "state_root": str(root / "state"),
+                "history_root": str(root / "history"),
             },
             "processing": {"source_settle_seconds": 0.01},
             "reliability": {

@@ -45,7 +45,7 @@ python -m app.main --config config/ai_server.json --once --date 2026-11-09
 | 區塊 | 用途 |
 |---|---|
 | identity | site、factory、line、station_id，供判定紀錄及 MiNiFi 使用 |
-| paths | SPI 輸入、SPI 回傳、不可變原始備份、本機工作狀態根目錄 |
+| paths | SPI 輸入、SPI 回傳、不可變原始備份、本機工作狀態與獨立歷史紀錄根目錄 |
 | processing | 影像副檔名、影像名稱 template、實際影像數上限、穩定等待 |
 | reliability | 唯一整體期限及發布預留時間 |
 | runtime | 掃描與監督間隔、同時接收數量、背景嘗試期限與重試間隔 |
@@ -57,7 +57,9 @@ python -m app.main --config config/ai_server.json --once --date 2026-11-09
 
 設定啟動時載入及驗證一次，再傳給內部子程序；修改後重啟生效。每筆工作保存當時的設定快照與期限。尚未回傳的工作若在設定變更後重啟，會停止機台回傳並標記 `configuration_changed`，不會用新模型或新目的地偷偷續跑。已回傳工作的背景匯出沿用原始設定快照。
 
-舊的 `server`、`model_clients`、`defect_rules`、`pipeline`、scanner 設定及獨立 `db_export.json`／`yolo_area.json` 已移除；未知設定會直接被拒絕。輸入、回傳、備份、狀態與 MiNiFi 目錄必須分開，不可互相包含。`state_root` 與 SQLite 應放在 AIPC 本機磁碟；SQLite 必須位於這五個工作目錄之外，預設放在獨立的 `records` 目錄。
+舊的 `server`、`model_clients`、`defect_rules`、`pipeline`、scanner 設定及獨立 `db_export.json`／`yolo_area.json` 已移除；未知設定會直接被拒絕。輸入、回傳、備份、狀態、歷史與 MiNiFi 目錄必須分開，不可互相包含。`state_root` 與 SQLite 應放在 AIPC 本機磁碟；SQLite 必須位於這六個資料目錄之外，預設放在獨立的 `records` 目錄。
+
+`paths.history_root` 為必填的獨立歷史位置，例如 `data/history` 或 `D:/AI_SPI/history`，不可設在備份或工作區內。更換此路徑前先停止程式，將既有歷史目錄完整搬到新位置；由舊版升級時，將 `backup_output_root/_history` 的內容移至新的 history_root，保留 `YYYY-MM-DD/job_id` 層級。只改設定而不搬紀錄，可能讓仍在輸入目錄的舊工作被重新接收。歷史 JSON 不必手動修改，統計會從新位置讀取同行的 manifest。
 
 ## 每份工作如何處理
 
@@ -101,25 +103,28 @@ state_root/
     manifest.json
     processed/...
 
-backup_output_root/
-  _history/YYYY-MM-DD/<job_id>/
+history_root/
+  YYYY-MM-DD/<job_id>/
     receipt.json             # 完成紀錄，供重啟去重
     events/00000001.json ...  # 歷史事件與待補登 DB 的資料
     manifest.json            # 若有選定結果，保存供統計使用的 manifest
+backup_output_root/
   YYYY-MM-DD/<job_id>/...     # 原始資料及 ai_result 結果備份
 
 records/audit.sqlite3        # 可重建的背景查詢副本；位於 state_root 外
 ```
 
-只有一個主控能持有同一個 state_root 的 OS 鎖。每次狀態變更先寫入並同步本機事件，再更新快照。重啟由未完成工作的事件恢復，並依 `_history` 中的完成紀錄略過已結束的來源工作，不讀 SQLite 來決定工作是否完成。不要手動刪除或編輯事件、發布紀錄與 `_history`；更換備份根目錄時須一併保留該歷史目錄。
+歷史目錄只保存 JSON 紀錄：`receipt.json` 包含最終狀態、期限、各 CSV 回傳確認、備份／匯出結果及設定快照；`events` 保留完整狀態歷程，供 DB 補登與稽核；有選定結果時另保存 `manifest.json`，包含逐 CSV／逐列結果代碼、數量、原因與模型資訊。原始影像、原始 CSV、完整 processed CSV 與 returned CSV 本體保存在 backup_output_root。
 
-正常工作在全部 SPI CSV 確認回傳、結果備份完成、MiNiFi 匯出完成或停用，以及原始影像備份完成或重試後記錄不完整時，才可清理。主控另確認相關子程序與本機寫檔已結束，包含被取消推論留下的背景執行緒。先把完整事件、最終摘要與選定結果 manifest 原子保存到 `_history`，才刪除 `jobs/<job_id>` 及 `artifacts/<job_id>`，並釋放主控記憶體中的該筆工作。清理週期沿用 `runtime.background_retry_seconds`，不影響 SPI 回傳期限。
+只有一個主控能持有同一個 state_root 的 OS 鎖。每次狀態變更先寫入並同步本機事件，再更新快照。重啟由未完成工作的事件恢復，並依 `paths.history_root` 中的完成紀錄略過已結束的來源工作，不讀 SQLite 來決定工作是否完成。不要手動刪除或編輯事件、發布紀錄與 `paths.history_root`；歷史目錄由設定獨立指定，與備份位置分開。
+
+正常工作在全部 SPI CSV 確認回傳、結果備份完成、MiNiFi 匯出完成或停用，以及原始影像備份完成或重試後記錄不完整時，才可清理。主控另確認相關子程序與本機寫檔已結束，包含被取消推論留下的背景執行緒。先把完整事件、最終摘要與選定結果 manifest 原子保存到 `paths.history_root`，才刪除 `jobs/<job_id>` 及 `artifacts/<job_id>`，並釋放主控記憶體中的該筆工作。清理週期沿用 `runtime.background_retry_seconds`，不影響 SPI 回傳期限。
 
 FAILED、EXPIRED 工作也在保存最終摘要後清理；PUBLICATION_UNKNOWN 保留在工作區等待釐清，不自動補發或刪除。歷史寫入失敗時保留工作區並重試；清理中途當機時，已提交的完成紀錄仍阻止重送，重啟後繼續刪除殘留資料。`controller.lock` 及空的 jobs／artifacts 根目錄持續保留。
 
 每份 SPI CSV 發布前先保存 `PUBLISHING` 意圖，收到成功確認後保存 `RETURNED`。若當機留下未確認的發布意圖，重啟標記狀態不明，不根據機台目錄是否還有檔案判斷成功，也不盲目補發。已確認全部 CSV 回傳、但尚未保存整筆完成狀態的工作，能繼續結果備份，即使重啟時已超過六秒。
 
-背景 DB 程序讀取工作區與 `_history` 事件，以唯一 event_id 與 job_id/revision 冪等寫入 `events`、`jobs` 兩張表。DB 鎖定、離線或程序被終止時，事件保存在工作區或歷史目錄，之後補登；DB 補登成功不是清理的前提。關閉 `database.enabled` 不影響接收、推論、SPI 回傳、清理或恢復。DB 不保存影像或 CSV 本體。既有部署若把 SQLite 放在 state_root，更新時需停止舊程式、將 `database.path` 改到外部目錄；新 DB 可由保留的事件重建，舊 DB 檔案請一併移出工作區。
+背景 DB 程序讀取工作區與 `paths.history_root` 事件，以唯一 event_id 與 job_id/revision 冪等寫入 `events`、`jobs` 兩張表。DB 鎖定、離線或程序被終止時，事件保存在工作區或歷史目錄，之後補登；DB 補登成功不是清理的前提。關閉 `database.enabled` 不影響接收、推論、SPI 回傳、清理或恢復。DB 不保存影像或 CSV 本體。既有部署若把 SQLite 放在 state_root，更新時需停止舊程式、將 `database.path` 改到外部目錄；新 DB 可由保留的事件重建，舊 DB 檔案請一併移出工作區。
 
 主控本身故障時接收與回傳會停止；應由現場的服務管理機制重新啟動。重啟恢復不能保證當下那筆工作仍趕得上原始期限。
 
@@ -134,7 +139,7 @@ spi_statistics.bat --output reports
 spi_statistics.bat --date 2026-11-09 --output reports
 ```
 
-統計合併工作區與 `_history` 的不可變事件，同一 job/revision 只計算一次；結果 manifest 使用仍存在的工作檔或歷史副本。不依賴 DB 補登進度，也不修改工作狀態。輸出 jobs.csv 與 summary.csv；日期以 AI 首次觀測的台灣日期篩選。
+統計合併工作區與 `paths.history_root` 的不可變事件，同一 job/revision 只計算一次；結果 manifest 使用仍存在的工作檔或歷史副本。不依賴 DB 補登進度，也不修改工作狀態。輸出 jobs.csv 與 summary.csv；日期以 AI 首次觀測的台灣日期篩選。
 
 ## 模型格式與離線匯出
 

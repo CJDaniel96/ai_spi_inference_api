@@ -9,7 +9,8 @@
     "watch_root": "data/spi_input",
     "external_output_root": "data/spi_return",
     "backup_output_root": "data/backup",
-    "state_root": "data/controller_state"
+    "state_root": "data/controller_state",
+    "history_root": "data/history"
   },
   "processing": {
     "folder_images_num_threshold": 60,

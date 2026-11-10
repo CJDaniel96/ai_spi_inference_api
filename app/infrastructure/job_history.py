@@ -38,6 +38,10 @@ def read_receipt(folder: Path) -> dict:
         or state.status not in {"DONE", "FAILED", "EXPIRED"}
     ):
         raise ValueError(f"Invalid terminal receipt: {folder}")
+    if state.result_manifest_path:
+        # Keep receipts/events immutable when moving the history directory.
+        # The selected manifest always travels inside the same archive bundle.
+        receipt["snapshot"]["result_manifest_path"] = str(folder / "manifest.json")
     return receipt
 
 

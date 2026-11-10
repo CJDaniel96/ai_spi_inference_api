@@ -82,9 +82,9 @@ def test_cli_without_model_returns_protection_result_and_uses_one_config(tmp_pat
     assert result.returncode == 0, result.stderr
     state_path = Path(config.paths.state_root) / "jobs" / source.name
     assert not state_path.exists()
-    state = read_receipt(
-        history_folder(Path(config.paths.backup_output_root) / "_history", source.name)
-    )["snapshot"]
+    state = read_receipt(history_folder(Path(config.paths.history_root), source.name))[
+        "snapshot"
+    ]
     assert state["status"] == "DONE"
     manifest = json.loads(Path(state["result_manifest_path"]).read_text())
     assert manifest["outcome"] == "fallback"

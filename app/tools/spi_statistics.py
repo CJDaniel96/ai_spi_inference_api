@@ -48,6 +48,9 @@ def job_rows(state_root: Path, history_root: Path) -> list[dict]:
     for event in journal_events(state_root, history_root):
         snapshots[event["job_id"]] = event["snapshot"]
     for job in snapshots.values():
+        archived = history_folder(history_root, job["job_id"])
+        if archived.exists():
+            job = read_receipt(archived)["snapshot"]
         manifest = None
         if job["result_manifest_path"]:
             try:
@@ -168,7 +171,7 @@ def main(argv: list[str] | None = None) -> int:
     config = load_config(args.config)
     rows = job_rows(
         Path(config.paths.state_root),
-        Path(config.paths.backup_output_root) / "_history",
+        Path(config.paths.history_root),
     )
     if args.date:
         datetime.strptime(args.date, "%Y-%m-%d")

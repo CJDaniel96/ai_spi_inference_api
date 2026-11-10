@@ -158,7 +158,7 @@ def test_statistics_reads_journal_without_db_and_does_not_mutate_it(tmp_path):
     snapshots = {path: path.read_bytes() for path in tmp_path.rglob("*.json")}
     records = job_rows(
         Path(config.paths.state_root),
-        Path(config.paths.backup_output_root) / "_history",
+        Path(config.paths.history_root),
     )
     totals = summary(records)
     assert totals["returned_jobs"] == 1 and totals["returned_pass_count"] == 1

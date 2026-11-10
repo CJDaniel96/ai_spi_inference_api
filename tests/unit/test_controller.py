@@ -86,7 +86,7 @@ def test_locked_db_does_not_prevent_spi_return_and_replays_later(tmp_path):
     config = make_config(tmp_path)
     source = write_job(config)
     root = Path(config.paths.state_root)
-    history = Path(config.paths.backup_output_root) / "_history"
+    history = Path(config.paths.history_root)
     (root / "jobs").mkdir(parents=True)
     sync_events(root, history, Path(config.database.path), 0.01)
     with sqlite3.connect(config.database.path) as lock:
@@ -116,9 +116,7 @@ def test_restart_does_not_repeat_returned_csv_or_reset_deadline(tmp_path):
     restored = run(Controller(config, runtime, io_factory=AsyncTestIO))
     assert codes(config) == [] and runtime.calls == 0
     assert restored == {}
-    receipt = read_receipt(
-        history_folder(Path(config.paths.backup_output_root) / "_history", source.name)
-    )
+    receipt = read_receipt(history_folder(Path(config.paths.history_root), source.name))
     assert receipt["snapshot"]["deadline_at"] == job.deadline_at
 
 
@@ -142,9 +140,7 @@ def test_interrupted_publication_is_unknown_and_is_not_replayed(tmp_path, monkey
     assert job.status == "PUBLICATION_UNKNOWN" and codes(config) == []
     assert (Path(config.paths.state_root) / "jobs" / source.name).exists()
     assert (Path(config.paths.state_root) / "artifacts" / source.name).exists()
-    assert not history_folder(
-        Path(config.paths.backup_output_root) / "_history", source.name
-    ).exists()
+    assert not history_folder(Path(config.paths.history_root), source.name).exists()
 
 
 def test_expired_during_downtime_stays_expired(tmp_path):

@@ -34,6 +34,7 @@ class PathConfig(Settings):
     external_output_root: str = Field(min_length=1)
     backup_output_root: str = Field(min_length=1)
     state_root: str = Field(min_length=1)
+    history_root: str = Field(min_length=1)
 
 
 class ProcessingConfig(Settings):
@@ -117,6 +118,7 @@ class AppConfig(Settings):
                 self.paths.external_output_root,
                 self.paths.backup_output_root,
                 self.paths.state_root,
+                self.paths.history_root,
                 self.minifi.output_path,
             )
         ]
@@ -128,12 +130,14 @@ class AppConfig(Settings):
                     or right.is_relative_to(left)
                 ):
                     raise ValueError(
-                        "input, return, backup, state and MiNiFi roots must be separate"
+                        "input, return, backup, state, history and MiNiFi roots "
+                        "must be separate"
                     )
         database = resolve_under_project_root(self.database.path).resolve()
         if any(database.is_relative_to(root) for root in roots):
             raise ValueError(
-                "audit database must be outside input, output, backup and state trees"
+                "audit database must be outside input, output, backup, state "
+                "and history trees"
             )
         return self
 

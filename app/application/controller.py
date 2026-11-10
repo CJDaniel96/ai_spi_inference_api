@@ -45,7 +45,7 @@ class Controller:
         self.runtime = runtime
         self.io_factory = io_factory
         self.store = LocalJobStore(Path(self.config.paths.state_root))
-        self.history_root = Path(self.config.paths.backup_output_root) / "_history"
+        self.history_root = Path(self.config.paths.history_root)
         self.jobs: dict[str, JobState] = {}
         self._once_results: dict[str, JobState] | None = None
         self._local_tasks = LocalFileTasks()

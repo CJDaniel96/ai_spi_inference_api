@@ -39,21 +39,48 @@ def test_roots_cannot_overlap_and_inbox_is_never_output(tmp_path):
         AppConfig.model_validate(data)
 
 
-def test_database_is_outside_the_active_workspace(tmp_path):
+@pytest.mark.parametrize("root", ["state_root", "history_root"])
+def test_database_is_outside_working_and_history_directories(tmp_path, root):
     data = make_config(tmp_path).model_dump()
-    data["database"]["path"] = data["paths"]["state_root"] + "/audit.sqlite3"
+    data["database"]["path"] = data["paths"][root] + "/audit.sqlite3"
     with pytest.raises(ValidationError, match="outside"):
+        AppConfig.model_validate(data)
+
+
+def test_history_location_must_be_explicit(tmp_path):
+    data = make_config(tmp_path).model_dump()
+    del data["paths"]["history_root"]
+    with pytest.raises(ValidationError, match="history_root"):
+        AppConfig.model_validate(data)
+
+
+@pytest.mark.parametrize(
+    "group,key",
+    [
+        ("paths", "watch_root"),
+        ("paths", "external_output_root"),
+        ("paths", "backup_output_root"),
+        ("paths", "state_root"),
+        ("minifi", "output_path"),
+    ],
+)
+def test_history_is_separate_from_other_data_directories(tmp_path, group, key):
+    data = make_config(tmp_path).model_dump()
+    data["paths"]["history_root"] = data[group][key] + "/nested-history"
+    with pytest.raises(ValidationError, match="separate"):
         AppConfig.model_validate(data)
 
 
 def test_single_file_loading_and_relative_paths(tmp_path, monkeypatch):
     data = make_config(tmp_path).model_dump()
     data["paths"]["state_root"] = "data/test-state"
+    data["paths"]["history_root"] = "data/test-history"
     path = tmp_path / "settings.json"
     path.write_text(json.dumps(data))
     monkeypatch.setenv("AI_CONFIG_PATH", str(path))
     result = load_config()
     assert result.paths.state_root.endswith("/data/test-state")
+    assert result.paths.history_root.endswith("/data/test-history")
     assert result.inference.obb.model_path.endswith("absent.pt")
 
 

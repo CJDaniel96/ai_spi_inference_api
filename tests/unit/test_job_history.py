@@ -1,5 +1,6 @@
 import asyncio
 import json
+import shutil
 import sqlite3
 import threading
 import time
@@ -20,12 +21,14 @@ from app.infrastructure.job_history import (
     read_receipt,
 )
 from app.infrastructure.local_store import JobState, LocalJobStore
+from app.tools.spi_statistics import job_rows
+from app.tools.spi_statistics import main as statistics_main
 from tests.helpers import AsyncTestIO, FakeRuntime, make_config, write_job
 
 
 def terminal_job(tmp_path, status="EXPIRED"):
     state_root = tmp_path / "state"
-    history = tmp_path / "backup" / "_history"
+    history = tmp_path / "history"
     store = LocalJobStore(state_root)
     job = JobState("20261109120000", "/input", "/backup", 1, 7, 6, {})
     store.save(job, "job.discovered")
@@ -53,6 +56,55 @@ def test_terminal_archive_keeps_events_and_receipt_before_removing_work(
     assert events[:-1] == original
     assert events[-1]["event_type"] == "job.archived"
     assert is_archived(history, job.job_id)
+
+
+def test_moving_history_keeps_dedup_statistics_and_pending_db_events(tmp_path):
+    config = make_config(tmp_path, database=False)
+    source = write_job(config)
+    controller = Controller(config, FakeRuntime(), io_factory=AsyncTestIO)
+    job = asyncio.run(controller.run(once=True, target_date=date(2026, 11, 9)))[
+        source.name
+    ]
+    old_history = Path(config.paths.history_root)
+    before = {
+        path.relative_to(old_history): path.read_bytes()
+        for path in old_history.rglob("*.json")
+    }
+    new_history = tmp_path / "separate-records" / "history"
+    new_history.parent.mkdir()
+    shutil.move(old_history, new_history)
+    changed = config.model_copy(deep=True)
+    changed.paths.history_root = str(new_history)
+    changed.database.enabled = True
+    for returned in Path(config.paths.external_output_root).glob("*.csv"):
+        returned.unlink()
+    receipt = read_receipt(history_folder(new_history, source.name))
+    assert Path(receipt["snapshot"]["result_manifest_path"]).is_file()
+    assert not old_history.exists()
+    records = job_rows(Path(config.paths.state_root), new_history)
+    assert records[0]["pass_count"] == 1
+    selected = tmp_path / "changed.json"
+    selected.write_text(changed.model_dump_json())
+    reports = tmp_path / "reports"
+    assert statistics_main(["--config", str(selected), "--output", str(reports)]) == 0
+    assert (reports / "jobs.csv").is_file()
+    runtime = FakeRuntime()
+    result = asyncio.run(
+        Controller(changed, runtime, io_factory=AsyncTestIO).run(
+            once=True, target_date=date(2026, 11, 9)
+        )
+    )
+    assert result == {} and runtime.calls == 0
+    assert not list(Path(config.paths.external_output_root).glob("*.csv"))
+    with sqlite3.connect(config.database.path) as connection:
+        assert (
+            connection.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+            == job.revision
+        )
+    assert before == {
+        path.relative_to(new_history): path.read_bytes()
+        for path in new_history.rglob("*.json")
+    }
 
 
 def test_archive_commit_failure_preserves_all_working_files(tmp_path, monkeypatch):
@@ -261,9 +313,7 @@ def test_done_job_keeps_working_files_until_background_work_finishes(
     )
     assert jobs[source.name].status == "DONE"
     assert (Path(config.paths.state_root) / "jobs" / source.name).exists()
-    assert not is_archived(
-        Path(config.paths.backup_output_root) / "_history", source.name
-    )
+    assert not is_archived(Path(config.paths.history_root), source.name)
 
 
 def test_cleanup_waits_for_cancelled_inference_thread_to_stop_writing(tmp_path):
