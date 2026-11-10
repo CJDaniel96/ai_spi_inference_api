@@ -320,7 +320,7 @@ def service_case(tmp_path, rows, runtime=None):
         "backup_output_root": str(tmp_path / "backup"),
     }
     settings["processing"]["image_name_template"] = "{image}"
-    settings["database"]["path"] = str(tmp_path / "state/audit.sqlite3")
+    settings["database"]["path"] = str(tmp_path / "records/audit.sqlite3")
     settings["minifi"]["output_path"] = str(tmp_path / "minifi")
     config = AppConfig.model_validate(settings)
     runtime = runtime or FakeRuntime()

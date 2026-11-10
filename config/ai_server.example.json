@@ -63,7 +63,7 @@
   },
   "database": {
     "enabled": true,
-    "path": "data/controller_state/audit.sqlite3",
+    "path": "data/records/audit.sqlite3",
     "poll_seconds": 5.0,
     "busy_timeout_seconds": 0.1
   },

@@ -17,10 +17,17 @@ def run(controller):
     return asyncio.run(controller.run(once=True, target_date=date(2026, 11, 9)))
 
 
-def test_all_file_receipts_recover_as_returned_even_after_deadline(tmp_path):
+def test_all_file_receipts_recover_as_returned_even_after_deadline(
+    tmp_path, monkeypatch
+):
     config = make_config(tmp_path, total=0.6, reserve=0.2)
     source = write_job(config, csv_count=2)
     controller = Controller(config, FakeRuntime(), io_factory=AsyncTestIO)
+
+    async def skip_cleanup():
+        pass
+
+    monkeypatch.setattr(controller, "_cleanup_once", skip_cleanup)
     job = run(controller)[source.name]
     job.status = "PUBLISHING"
     job.primary_returned_at = None

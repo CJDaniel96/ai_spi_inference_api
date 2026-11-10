@@ -69,9 +69,9 @@ def backup_result(csv_folder: Path, raw_folder: Path, manifest_path: Path) -> No
     manifest.write_atomic(manifest_backup)
 
 
-def export_result(config: AppConfig, raw_folder: Path) -> int:
+def export_result(settings: dict, raw_folder: Path) -> int:
     return export_manifest(
         raw_folder / "ai_result" / "manifest.json",
-        Path(config.minifi.output_path),
-        config.identity.model_dump(),
+        Path(settings["minifi"]["output_path"]),
+        settings["identity"],
     )

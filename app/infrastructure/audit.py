@@ -6,8 +6,12 @@ import json
 import sqlite3
 from pathlib import Path
 
+from app.infrastructure.job_history import journal_events
 
-def sync_events(state_root: Path, database: Path, busy_timeout: float) -> int:
+
+def sync_events(
+    state_root: Path, history_root: Path, database: Path, busy_timeout: float
+) -> int:
     database.parent.mkdir(parents=True, exist_ok=True)
     count = 0
     with sqlite3.connect(database, timeout=busy_timeout) as connection:
@@ -29,10 +33,7 @@ def sync_events(state_root: Path, database: Path, busy_timeout: float) -> int:
             """
         )
         revisions = dict(connection.execute("SELECT job_id, revision FROM jobs"))
-        for path in sorted((state_root / "jobs").glob("*/events/*.json")):
-            if int(path.stem) <= revisions.get(path.parent.parent.name, 0):
-                continue
-            event = json.loads(path.read_text(encoding="utf-8"))
+        for event in journal_events(state_root, history_root, after=revisions):
             snapshot = event["snapshot"]
             encoded = json.dumps(snapshot, ensure_ascii=False, allow_nan=False)
             with connection:

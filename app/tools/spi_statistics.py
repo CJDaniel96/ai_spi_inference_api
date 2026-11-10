@@ -12,6 +12,7 @@ from pathlib import Path
 
 from app.core.config import load_config
 from app.domain.entities.pipeline_result import PipelineResultManifest
+from app.infrastructure.job_history import history_folder, journal_events, read_receipt
 
 TZ8 = timezone(timedelta(hours=8))
 JOB_FIELDS = [
@@ -41,19 +42,27 @@ JOB_FIELDS = [
 ]
 
 
-def job_rows(state_root: Path) -> list[dict]:
+def job_rows(state_root: Path, history_root: Path) -> list[dict]:
     rows = []
-    for folder in sorted((state_root / "jobs").glob("*")):
-        events = sorted((folder / "events").glob("*.json"))
-        if not events:
-            continue
-        job = json.loads(events[-1].read_text(encoding="utf-8"))["snapshot"]
+    snapshots = {}
+    for event in journal_events(state_root, history_root):
+        snapshots[event["job_id"]] = event["snapshot"]
+    for job in snapshots.values():
+        manifest = None
+        if job["result_manifest_path"]:
+            try:
+                manifest = PipelineResultManifest.read(
+                    Path(job["result_manifest_path"])
+                )
+            except FileNotFoundError:
+                # Cleanup may have committed after the event catalog was read.
+                job = read_receipt(history_folder(history_root, job["job_id"]))[
+                    "snapshot"
+                ]
+                manifest = PipelineResultManifest.read(
+                    Path(job["result_manifest_path"])
+                )
         returned = job["primary_returned_at"]
-        manifest = (
-            PipelineResultManifest.read(Path(job["result_manifest_path"]))
-            if job["result_manifest_path"]
-            else None
-        )
         rows.append(
             {
                 "job_id": job["job_id"],
@@ -157,7 +166,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     config = load_config(args.config)
-    rows = job_rows(Path(config.paths.state_root))
+    rows = job_rows(
+        Path(config.paths.state_root),
+        Path(config.paths.backup_output_root) / "_history",
+    )
     if args.date:
         datetime.strptime(args.date, "%Y-%m-%d")
         rows = [row for row in rows if row["first_seen_at"].startswith(args.date)]

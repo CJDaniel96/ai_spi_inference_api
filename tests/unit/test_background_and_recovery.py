@@ -70,7 +70,9 @@ def test_completed_selection_recovers_without_running_model_again(tmp_path):
         )
     )[source.name]
     assert recovered.status == "DONE" and runtime.calls == 0
-    assert recovered.result_manifest_path == str(path)
+    assert recovered.result_manifest_path != str(path)
+    assert not path.exists()
+    assert Path(recovered.result_manifest_path).exists()
 
 
 def test_local_state_failure_never_publishes_unrecorded_result(tmp_path, monkeypatch):
@@ -153,11 +155,11 @@ def test_statistics_reads_journal_without_db_and_does_not_mutate_it(tmp_path):
             once=True, target_date=date(2026, 11, 9)
         )
     )
-    snapshots = {
-        path: path.read_bytes()
-        for path in Path(config.paths.state_root).rglob("*.json")
-    }
-    records = job_rows(Path(config.paths.state_root))
+    snapshots = {path: path.read_bytes() for path in tmp_path.rglob("*.json")}
+    records = job_rows(
+        Path(config.paths.state_root),
+        Path(config.paths.backup_output_root) / "_history",
+    )
     totals = summary(records)
     assert totals["returned_jobs"] == 1 and totals["returned_pass_count"] == 1
     assert snapshots == {path: path.read_bytes() for path in snapshots}

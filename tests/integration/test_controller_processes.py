@@ -14,6 +14,7 @@ from app.application.controller import Controller
 from app.infrastructure.async_io import call_io
 from app.infrastructure.deadline_io import DeadlineExceeded, DeadlineIO
 from app.infrastructure.inference.resident_process import ResidentObbRuntime
+from app.infrastructure.job_history import history_folder, read_receipt
 from tests.helpers import FakeResidentModel, make_config, write_job
 
 
@@ -79,11 +80,22 @@ def test_cli_without_model_returns_protection_result_and_uses_one_config(tmp_pat
         timeout=30,
     )
     assert result.returncode == 0, result.stderr
-    state_path = Path(config.paths.state_root) / "jobs" / source.name / "job_state.json"
-    state = json.loads(state_path.read_text())
+    state_path = Path(config.paths.state_root) / "jobs" / source.name
+    assert not state_path.exists()
+    state = read_receipt(
+        history_folder(Path(config.paths.backup_output_root) / "_history", source.name)
+    )["snapshot"]
     assert state["status"] == "DONE"
     manifest = json.loads(Path(state["result_manifest_path"]).read_text())
     assert manifest["outcome"] == "fallback"
+    for root in (config.paths.external_output_root, config.minifi.output_path):
+        for output in Path(root).rglob("*.csv"):
+            output.unlink()
+    repeated = subprocess.run(result.args, capture_output=True, text=True, timeout=30)
+    assert repeated.returncode == 0, repeated.stderr
+    assert not list(Path(config.paths.external_output_root).rglob("*.csv"))
+    assert not list(Path(config.minifi.output_path).rglob("*.csv"))
+    assert not state_path.exists()
 
 
 def test_cli_config_check_does_not_load_model_libraries(tmp_path):

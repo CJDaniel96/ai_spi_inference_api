@@ -10,10 +10,15 @@ from app.infrastructure.input.sinic_folder_input import (
     MachineJobFiles,
     SinicFolderInput,
 )
+from app.infrastructure.job_history import is_archived
 
 
-def candidates(extensions, root, target_date):
-    return SinicFolderInput(extensions).list_candidates(root, target_date)
+def candidates(extensions, root, target_date, history_root):
+    return tuple(
+        folder
+        for folder in SinicFolderInput(extensions).list_candidates(root, target_date)
+        if not is_archived(history_root, folder.name)
+    )
 
 
 def inspect_source(extensions, folder, threshold):

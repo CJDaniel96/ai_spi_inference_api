@@ -77,7 +77,7 @@ class InferenceConfig(Settings):
 
 class DatabaseConfig(Settings):
     enabled: bool = True
-    path: str = Field(default="state/audit.sqlite3", min_length=1)
+    path: str = Field(default="records/audit.sqlite3", min_length=1)
     poll_seconds: float = Field(default=5.0, gt=0)
     busy_timeout_seconds: float = Field(default=0.1, gt=0)
 
@@ -131,13 +131,9 @@ class AppConfig(Settings):
                         "input, return, backup, state and MiNiFi roots must be separate"
                     )
         database = resolve_under_project_root(self.database.path).resolve()
-        if any(
-            database.is_relative_to(root)
-            for index, root in enumerate(roots)
-            if index != 3
-        ):
+        if any(database.is_relative_to(root) for root in roots):
             raise ValueError(
-                "audit database must not be inside an input or output tree"
+                "audit database must be outside input, output, backup and state trees"
             )
         return self
 

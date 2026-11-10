@@ -39,6 +39,13 @@ def test_roots_cannot_overlap_and_inbox_is_never_output(tmp_path):
         AppConfig.model_validate(data)
 
 
+def test_database_is_outside_the_active_workspace(tmp_path):
+    data = make_config(tmp_path).model_dump()
+    data["database"]["path"] = data["paths"]["state_root"] + "/audit.sqlite3"
+    with pytest.raises(ValidationError, match="outside"):
+        AppConfig.model_validate(data)
+
+
 def test_single_file_loading_and_relative_paths(tmp_path, monkeypatch):
     data = make_config(tmp_path).model_dump()
     data["paths"]["state_root"] = "data/test-state"

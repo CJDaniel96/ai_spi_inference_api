@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import math
@@ -18,6 +17,7 @@ from app.domain.entities.obb_result import ObbBatchResult, ObbDetection
 from app.domain.entities.pipeline_result import PipelineOutcome, PipelineResultManifest
 from app.domain.services.component_judge import RULE_ORDER, ComponentJudge
 from app.domain.services.csv_merger import CsvMerger
+from app.infrastructure.local_file_tasks import LocalFileTasks
 from app.infrastructure.repositories.csv_repository import CsvRepository
 from app.infrastructure.repositories.file_system_job_repository import (
     FileSystemJobRepository,
@@ -32,10 +32,12 @@ class ObbInspectionService:
         result_root: Path,
         runtime,
         clock=time.time,
+        local_tasks: LocalFileTasks | None = None,
     ) -> None:
         self._config = config
         self._runtime = runtime
         self._clock = clock
+        self._local_tasks = local_tasks or LocalFileTasks()
         self._site_id = config.identity.site
         self._thresholds = dict(config.inference.obb.class_thresholds)
         self._judge = ComponentJudge(self._thresholds)
@@ -119,7 +121,9 @@ class ObbInspectionService:
     ) -> tuple[PipelineResultManifest, Path]:
         cutoff = deadline_at - self._config.reliability.primary_publish_reserve_seconds
         try:
-            job, frames, images = await asyncio.to_thread(self._inputs, staged_folder)
+            job, frames, images = await self._local_tasks.run(
+                job_id, self._inputs, staged_folder
+            )
         except (ValueError, CsvSchemaError) as exc:
             return await self._fail(job_id, staged_folder, "invalid_input", str(exc))
         if job.image_count > self._config.processing.folder_images_num_threshold:
@@ -155,14 +159,17 @@ class ObbInspectionService:
                 "OBB completed after cutoff",
             )
         try:
-            return await asyncio.to_thread(self._evaluate, job_id, frames, result)
+            return await self._local_tasks.run(
+                job_id, self._evaluate, job_id, frames, result
+            )
         except ValueError as exc:
             return await self._fail(
                 job_id, staged_folder, "invalid_measurement", str(exc)
             )
 
     async def _fail(self, job_id, folder, reason, error):
-        manifest, path = await asyncio.to_thread(
+        manifest, path = await self._local_tasks.run(
+            job_id,
             self._fallback.build_csv_fallback,
             job_id=job_id,
             csv_folder=folder,
@@ -170,7 +177,7 @@ class ObbInspectionService:
             errors=(error,),
         )
         manifest = replace(manifest, inspection_metadata=self._metadata())
-        await asyncio.to_thread(manifest.write_atomic, path)
+        await self._local_tasks.run(job_id, manifest.write_atomic, path)
         return manifest, path
 
     def _evaluate(self, job_id, frames, result):

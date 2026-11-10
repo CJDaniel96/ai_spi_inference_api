@@ -128,6 +128,20 @@ class JobState:
             "PUBLICATION_UNKNOWN",
         }
 
+    @property
+    def cleanup_ready(self) -> bool:
+        if self.status in {"FAILED", "EXPIRED"}:
+            return True
+        return (
+            self.status == "DONE"
+            and self.primary_returned_at is not None
+            and bool(self.publications)
+            and all(item["status"] == "RETURNED" for item in self.publications.values())
+            and self.backup_status == "complete"
+            and self.export_status in {"complete", "disabled"}
+            and self.image_backup_status in {"complete", "incomplete"}
+        )
+
 
 class LocalJobStore:
     """Append events before snapshots; replay repairs a crash between the writes.
@@ -161,9 +175,11 @@ class LocalJobStore:
         job.revision = revision
         atomic_json(folder / "job_state.json", snapshot)
 
-    def load(self) -> dict[str, JobState]:
+    def load(self, *, exclude=()) -> dict[str, JobState]:
         jobs = {}
         for folder in sorted((self.root / "jobs").iterdir()):
+            if folder.name in exclude:
+                continue
             if not folder.is_dir() or not (folder / "events").is_dir():
                 continue
             events = sorted((folder / "events").glob("*.json"))

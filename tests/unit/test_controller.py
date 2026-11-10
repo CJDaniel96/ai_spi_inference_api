@@ -12,6 +12,7 @@ import pytest
 
 from app.application.controller import Controller
 from app.infrastructure.audit import sync_events
+from app.infrastructure.job_history import history_folder, read_receipt
 from app.infrastructure.local_store import JobState, LocalJobStore
 from tests.helpers import AsyncTestIO, FakeRuntime, make_config, write_job
 
@@ -85,17 +86,24 @@ def test_locked_db_does_not_prevent_spi_return_and_replays_later(tmp_path):
     config = make_config(tmp_path)
     source = write_job(config)
     root = Path(config.paths.state_root)
+    history = Path(config.paths.backup_output_root) / "_history"
     (root / "jobs").mkdir(parents=True)
-    sync_events(root, Path(config.database.path), 0.01)
+    sync_events(root, history, Path(config.database.path), 0.01)
     with sqlite3.connect(config.database.path) as lock:
         lock.execute("BEGIN IMMEDIATE")
         job = run(Controller(config, FakeRuntime(), io_factory=AsyncTestIO))[
             source.name
         ]
         assert codes(config) == [22] and job.primary_returned_at < job.deadline_at
-        assert list(root.glob("jobs/*/events/*.json"))
-    assert sync_events(root, Path(config.database.path), 0.01) == job.revision
-    assert sync_events(root, Path(config.database.path), 0.01) == 0
+        assert not list(root.glob("jobs/*"))
+        assert list(history.glob("*/*/events/*.json"))
+        for returned in Path(config.paths.external_output_root).glob("*.csv"):
+            returned.unlink()
+        restarted_runtime = FakeRuntime()
+        assert run(Controller(config, restarted_runtime, io_factory=AsyncTestIO)) == {}
+        assert restarted_runtime.calls == 0 and codes(config) == []
+    assert sync_events(root, history, Path(config.database.path), 0.01) == job.revision
+    assert sync_events(root, history, Path(config.database.path), 0.01) == 0
 
 
 def test_restart_does_not_repeat_returned_csv_or_reset_deadline(tmp_path):
@@ -105,15 +113,24 @@ def test_restart_does_not_repeat_returned_csv_or_reset_deadline(tmp_path):
     for path in Path(config.paths.external_output_root).glob("*.csv"):
         path.unlink()  # SPI consumed its return; absence is not permission to resend.
     runtime = FakeRuntime()
-    restored = run(Controller(config, runtime, io_factory=AsyncTestIO))[source.name]
+    restored = run(Controller(config, runtime, io_factory=AsyncTestIO))
     assert codes(config) == [] and runtime.calls == 0
-    assert restored.deadline_at == job.deadline_at
+    assert restored == {}
+    receipt = read_receipt(
+        history_folder(Path(config.paths.backup_output_root) / "_history", source.name)
+    )
+    assert receipt["snapshot"]["deadline_at"] == job.deadline_at
 
 
-def test_interrupted_publication_is_unknown_and_is_not_replayed(tmp_path):
+def test_interrupted_publication_is_unknown_and_is_not_replayed(tmp_path, monkeypatch):
     config = make_config(tmp_path)
     source = write_job(config)
     controller = Controller(config, FakeRuntime(), io_factory=AsyncTestIO)
+
+    async def skip_cleanup():
+        pass
+
+    monkeypatch.setattr(controller, "_cleanup_once", skip_cleanup)
     job = run(controller)[source.name]
     job.status = "PUBLISHING"
     job.primary_returned_at = None
@@ -123,6 +140,11 @@ def test_interrupted_publication_is_unknown_and_is_not_replayed(tmp_path):
         path.unlink()
     job = run(Controller(config, FakeRuntime(), io_factory=AsyncTestIO))[source.name]
     assert job.status == "PUBLICATION_UNKNOWN" and codes(config) == []
+    assert (Path(config.paths.state_root) / "jobs" / source.name).exists()
+    assert (Path(config.paths.state_root) / "artifacts" / source.name).exists()
+    assert not history_folder(
+        Path(config.paths.backup_output_root) / "_history", source.name
+    ).exists()
 
 
 def test_expired_during_downtime_stays_expired(tmp_path):

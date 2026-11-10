@@ -25,6 +25,12 @@ from app.infrastructure.async_io import DeadlineGate, call_io
 from app.infrastructure.audit import sync_events
 from app.infrastructure.deadline_io import DeadlineExceeded, DeadlineIO
 from app.infrastructure.input.sinic_folder_input import FileSettleTracker
+from app.infrastructure.job_history import (
+    archive_job,
+    cleanup_committed,
+    is_archived,
+)
+from app.infrastructure.local_file_tasks import LocalFileTasks
 from app.infrastructure.local_store import ControllerLock, JobState, LocalJobStore
 from app.infrastructure.output.sinic_csv_output import PublishCompletionUnknown
 
@@ -39,18 +45,26 @@ class Controller:
         self.runtime = runtime
         self.io_factory = io_factory
         self.store = LocalJobStore(Path(self.config.paths.state_root))
+        self.history_root = Path(self.config.paths.backup_output_root) / "_history"
         self.jobs: dict[str, JobState] = {}
+        self._once_results: dict[str, JobState] | None = None
+        self._local_tasks = LocalFileTasks()
         self.artifacts = self.store.root / "artifacts"
         self.fallback = FallbackResultBuilder(
             config=self.config, result_root=self.artifacts
         )
         self.inference = ObbInspectionService(
-            config=self.config, result_root=self.artifacts, runtime=runtime
+            config=self.config,
+            result_root=self.artifacts,
+            runtime=runtime,
+            local_tasks=self._local_tasks,
         )
         self.log = get_logger("controller")
         self._tasks: set[asyncio.Task] = set()
         self._process_tasks: dict[str, asyncio.Task] = {}
         self._publish_tasks: dict[str, asyncio.Task] = {}
+        self._monitor_tasks: dict[str, asyncio.Task] = {}
+        self._retiring: set[str] = set()
         self._stops: dict[str, tuple[float, float]] = {}
         self._decision_locks: dict[str, asyncio.Lock] = {}
         self._input_slots = asyncio.Semaphore(self.config.runtime.max_active_jobs)
@@ -120,6 +134,8 @@ class Controller:
         )
         self._save(job, "job.discovered")
         self.jobs[job.job_id] = job
+        if self._once_results is not None:
+            self._once_results[job.job_id] = job
         self._schedule(job)
         return job
 
@@ -132,7 +148,7 @@ class Controller:
             monotonic + max(0, job.inference_cutoff_at - now),
         )
         self._decision_locks[job.job_id] = asyncio.Lock()
-        self._spawn(self._monitor(job))
+        self._monitor_tasks[job.job_id] = self._spawn(self._monitor(job))
         if job.result_manifest_path:
             self._publish_tasks[job.job_id] = self._spawn(self._publish(job))
         else:
@@ -147,7 +163,14 @@ class Controller:
         return time.time() + max(0, self._remaining(job, inference=inference))
 
     def recover(self):
-        self.jobs = self.store.load()
+        archived = {
+            folder.name
+            for folder in (self.store.root / "jobs").iterdir()
+            if folder.is_dir() and is_archived(self.history_root, folder.name)
+        }
+        self.jobs = self.store.load(exclude=archived)
+        if self._once_results is not None:
+            self._once_results.update(self.jobs)
         for job in self.jobs.values():
             if job.primary_terminal:
                 continue
@@ -213,6 +236,7 @@ class Controller:
                 self.config.processing.image_extensions,
                 Path(self.config.paths.watch_root),
                 target_date,
+                self.history_root,
                 deadline_at=time.time() + self.config.runtime.discovery_timeout_seconds,
             )
             for folder in folders:
@@ -425,7 +449,8 @@ class Controller:
             if self._remaining(job) <= 0:
                 self._expire(job, "deadline_exhausted")
                 return
-            manifest, path = await asyncio.to_thread(
+            manifest, path = await self._local_tasks.run(
+                job.job_id,
                 self.fallback.build_csv_fallback,
                 job_id=job.job_id,
                 csv_folder=Path(job.csv_snapshot_folder),
@@ -582,6 +607,7 @@ class Controller:
         for job in list(self.jobs.values()):
             if (
                 job.status not in {"PRIMARY_RETURNED", "DONE"}
+                or job.job_id in self._retiring
                 or time.time() < job.next_background_at
             ):
                 continue
@@ -604,6 +630,7 @@ class Controller:
         for job in list(self.jobs.values()):
             if (
                 job.status not in {"PRIMARY_RETURNED", "DONE"}
+                or job.job_id in self._retiring
                 or job.image_backup_status != "pending"
                 or time.time() < job.next_background_at
             ):
@@ -630,11 +657,10 @@ class Controller:
                 self._save(job, "backup.raw_completed")
 
     async def _exports_once(self):
-        if not self.config.minifi.enabled:
-            return
         for job in list(self.jobs.values()):
             if (
                 job.backup_status != "complete"
+                or job.job_id in self._retiring
                 or job.export_status in {"complete", "disabled"}
                 or time.time() < job.next_background_at
             ):
@@ -643,7 +669,7 @@ class Controller:
                 job,
                 "export",
                 export_result,
-                AppConfig.model_validate(job.config_snapshot),
+                job.config_snapshot,
                 Path(job.original_backup_folder),
             )
             if success:
@@ -659,6 +685,7 @@ class Controller:
                 lane,
                 sync_events,
                 self.store.root,
+                self.history_root,
                 Path(self.config.database.path),
                 self.config.database.busy_timeout_seconds,
                 deadline_at=time.time()
@@ -670,6 +697,71 @@ class Controller:
             )
         finally:
             lane.close()
+
+    async def _cleanup_once(self):
+        # Complete an interrupted deletion even if no active journal remains.
+        lane = self.io_factory()
+        try:
+            await call_io(
+                lane,
+                cleanup_committed,
+                self.store.root,
+                self.history_root,
+                deadline_at=time.time()
+                + self.config.runtime.background_timeout_seconds,
+            )
+        except Exception as exc:
+            self.log.warning("Committed workspace cleanup deferred: %s", exc)
+        finally:
+            lane.close()
+        for job in list(self.jobs.values()):
+            tasks = (
+                self._process_tasks.get(job.job_id),
+                self._publish_tasks.get(job.job_id),
+                self._monitor_tasks.get(job.job_id),
+            )
+            if (
+                not job.cleanup_ready
+                or job.job_id in self._retiring
+                or time.time() < job.next_background_at
+                or any(task is not None and not task.done() for task in tasks)
+                or self._local_tasks.busy(job.job_id)
+                or any(key[0] == job.job_id for key in self._background_busy)
+            ):
+                continue
+            self._retiring.add(job.job_id)
+            lane = self.io_factory()
+            try:
+                archived = await call_io(
+                    lane,
+                    archive_job,
+                    self.store.root,
+                    self.history_root,
+                    job,
+                    deadline_at=time.time()
+                    + self.config.runtime.background_timeout_seconds,
+                )
+                if self._once_results is not None:
+                    self._once_results[job.job_id] = archived
+                self.jobs.pop(job.job_id)
+                self._process_tasks.pop(job.job_id, None)
+                self._publish_tasks.pop(job.job_id, None)
+                self._monitor_tasks.pop(job.job_id, None)
+                self._decision_locks.pop(job.job_id, None)
+                self._stops.pop(job.job_id, None)
+                self.log.info("event=job.workspace_removed job_id=%s", job.job_id)
+            except Exception as exc:
+                # The archive might already be committed. Do not append a new
+                # active event after that receipt, or retry could conflict.
+                job.next_background_at = (
+                    time.time() + self.config.runtime.background_retry_seconds
+                )
+                self.log.warning(
+                    "Workspace cleanup deferred for %s: %s", job.job_id, exc
+                )
+            finally:
+                lane.close()
+                self._retiring.discard(job.job_id)
 
     async def _repeat(self, operation, interval):
         while not self._closing:
@@ -685,11 +777,13 @@ class Controller:
 
     async def run(self, *, once=False, target_date: date | None = None):
         self._fatal_error = None
+        self._once_results = {} if once else None
         with ControllerLock(self.store.root):
             self._warm_task = asyncio.create_task(self.runtime.start())
             # Warm-up failure is observed by inference; it must not stop fallback.
             self._warm_task.add_done_callback(self._warm_finished)
             try:
+                await self._cleanup_once()
                 self.recover()
                 if not once:
                     for operation, interval in (
@@ -703,6 +797,10 @@ class Controller:
                         ),
                         (self._exports_once, self.config.minifi.poll_seconds),
                         (self._audit_once, self.config.database.poll_seconds),
+                        (
+                            self._cleanup_once,
+                            self.config.runtime.background_retry_seconds,
+                        ),
                     ):
                         self._spawn(self._repeat(operation, interval))
                 while True:
@@ -722,10 +820,18 @@ class Controller:
                         await self._backups_once()
                         await self._exports_once()
                         await self._raw_backups_once()
+                        await asyncio.gather(
+                            *list(self._process_tasks.values()),
+                            *list(self._publish_tasks.values()),
+                            *list(self._monitor_tasks.values()),
+                            return_exceptions=True,
+                        )
+                        await self._local_tasks.drain()
+                        await self._cleanup_once()
                         await self._audit_once()
                         if self._fatal_error:
                             raise self._fatal_error
-                        return self.jobs
+                        return self._once_results
                     if self._fatal_error:
                         raise self._fatal_error
                     await asyncio.sleep(self.config.runtime.scan_interval_seconds)
@@ -743,4 +849,5 @@ class Controller:
             *([self._warm_task] if self._warm_task else []),
             return_exceptions=True,
         )
+        await self._local_tasks.drain()
         self.runtime.close()

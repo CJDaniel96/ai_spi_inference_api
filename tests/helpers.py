@@ -47,7 +47,7 @@ def make_config(root: Path, *, total=1.5, reserve=0.4, minifi=True, database=Tru
             },
             "database": {
                 "enabled": database,
-                "path": str(root / "state" / "audit.sqlite3"),
+                "path": str(root / "records" / "audit.sqlite3"),
                 "busy_timeout_seconds": 0.01,
                 "poll_seconds": 0.02,
             },

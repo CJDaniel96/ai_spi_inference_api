@@ -63,7 +63,7 @@
   },
   "database": {
     "enabled": true,
-    "path": "D:/Dre/JQ_SPI_02_AI_API/controller_state/audit.sqlite3",
+    "path": "D:/Dre/JQ_SPI_02_AI_API/records/audit.sqlite3",
     "poll_seconds": 5.0,
     "busy_timeout_seconds": 0.1
   },
