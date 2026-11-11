@@ -16,7 +16,9 @@ TEST_DATE = "2026-11-09"
 POLYGON = ((0.0, 0.0), (2.0, 0.0), (2.0, 2.0), (0.0, 2.0))
 
 
-def make_config(root: Path, *, total=1.5, reserve=0.4, minifi=True, database=True):
+def make_config(
+    root: Path, *, input_timeout=0.3, inference_timeout=1.5, minifi=True, database=True
+):
     return AppConfig.model_validate(
         {
             "identity": {
@@ -32,10 +34,14 @@ def make_config(root: Path, *, total=1.5, reserve=0.4, minifi=True, database=Tru
                 "state_root": str(root / "state"),
                 "history_root": str(root / "history"),
             },
-            "processing": {"source_settle_seconds": 0.01},
-            "reliability": {
-                "end_to_end_timeout_seconds": total,
-                "primary_publish_reserve_seconds": reserve,
+            "processing": {
+                "source_settle_seconds": 0.01,
+                "input_ready_timeout_seconds": input_timeout,
+            },
+            "delivery": {
+                "max_attempts": 3,
+                "retry_interval_seconds": 0.01,
+                "attempt_timeout_seconds": 1,
             },
             "runtime": {
                 "poll_interval_seconds": 0.005,
@@ -44,7 +50,11 @@ def make_config(root: Path, *, total=1.5, reserve=0.4, minifi=True, database=Tru
                 "background_retry_seconds": 0.02,
             },
             "inference": {
-                "obb": {"device": "cpu", "model_path": str(root / "absent.pt")}
+                "obb": {
+                    "device": "cpu",
+                    "model_path": str(root / "absent.pt"),
+                    "inference_timeout_seconds": inference_timeout,
+                }
             },
             "database": {
                 "enabled": database,

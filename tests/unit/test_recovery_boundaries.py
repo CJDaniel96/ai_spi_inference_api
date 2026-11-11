@@ -4,11 +4,9 @@ import shutil
 import time
 from datetime import date
 from pathlib import Path
-from types import SimpleNamespace
 
 from app.application.controller import Controller
 from app.application.ingest.io import archive_source, snapshot_csv, validate_source
-from app.infrastructure.async_io import DeadlineGate
 from app.infrastructure.local_store import JobState
 from tests.helpers import AsyncTestIO, FakeRuntime, make_config, write_job
 
@@ -20,7 +18,7 @@ def run(controller):
 def test_all_file_receipts_recover_as_returned_even_after_deadline(
     tmp_path, monkeypatch
 ):
-    config = make_config(tmp_path, total=0.6, reserve=0.2)
+    config = make_config(tmp_path, inference_timeout=0.6)
     source = write_job(config, csv_count=2)
     controller = Controller(config, FakeRuntime(), io_factory=AsyncTestIO)
 
@@ -40,7 +38,7 @@ def test_all_file_receipts_recover_as_returned_even_after_deadline(
     ):
         for path in root.rglob("*.csv"):
             path.unlink()
-    time.sleep(max(0, job.deadline_at - time.time()) + 0.02)
+    time.sleep(0.02)
     recovered = run(Controller(config, FakeRuntime(), io_factory=AsyncTestIO))[
         source.name
     ]
@@ -50,7 +48,7 @@ def test_all_file_receipts_recover_as_returned_even_after_deadline(
 
 
 def test_verified_raw_backup_recovers_when_spi_source_is_gone(tmp_path):
-    config = make_config(tmp_path, total=3, reserve=0.5)
+    config = make_config(tmp_path, inference_timeout=3)
     source = write_job(config)
     controller = Controller(config, FakeRuntime(), io_factory=AsyncTestIO)
     csv_root = controller.store.folder(source.name) / "csv" / "snapshot"
@@ -67,8 +65,6 @@ def test_verified_raw_backup_recovers_when_spi_source_is_gone(tmp_path):
         str(source),
         str(archived.original_backup_folder),
         now,
-        now + 3,
-        now + 2.5,
         config.model_dump(),
         status="INFERENCING",
         csv_snapshot_folder=str(csv_root),
@@ -105,37 +101,5 @@ def test_backup_collision_fails_one_job_without_stopping_others(tmp_path):
     collision.mkdir(parents=True)
     (collision / "old.txt").write_text("keep")
     jobs = run(Controller(config, FakeRuntime(), io_factory=AsyncTestIO))
-    assert jobs[bad.name].status == "FAILED" and jobs[good.name].status == "DONE"
+    assert jobs[bad.name].status == "INPUT_FAILED" and jobs[good.name].status == "DONE"
     assert (collision / "old.txt").read_text() == "keep"
-
-
-def test_monotonic_budget_prevents_clock_rollback_extending_work(tmp_path, monkeypatch):
-    import app.application.controller as module
-
-    config = make_config(tmp_path)
-    controller = Controller(config, FakeRuntime(), io_factory=AsyncTestIO)
-    job = JobState("20261109120000", "/input", "/backup", 100, 106, 105, {})
-    controller._stops[job.job_id] = (16, 15)
-    monkeypatch.setattr(
-        module, "time", SimpleNamespace(time=lambda: 90, monotonic=lambda: 16.1)
-    )
-    assert controller._remaining(job) < 0
-
-
-def test_earlier_publication_deadline_precedes_other_waiting_jobs():
-    async def run():
-        gate = DeadlineGate()
-        order = []
-
-        async def publish(name, deadline):
-            async with gate.claim(name, deadline):
-                order.append(name)
-
-        async with gate.claim("active", 0):
-            later = asyncio.create_task(publish("later", 20))
-            earlier = asyncio.create_task(publish("earlier", 10))
-            await asyncio.sleep(0)
-        await asyncio.gather(later, earlier)
-        assert order == ["earlier", "later"]
-
-    asyncio.run(run())

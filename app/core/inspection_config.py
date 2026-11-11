@@ -22,6 +22,7 @@ class ObbConfig(BaseModel):
     iou: float = Field(default=0.7, gt=0, le=1, allow_inf_nan=False)
     max_det: int = Field(default=100, gt=0)
     startup_timeout_seconds: float = Field(default=120, gt=0, allow_inf_nan=False)
+    inference_timeout_seconds: float = Field(default=120, gt=0, allow_inf_nan=False)
     class_thresholds: dict[str, float] = Field(
         default_factory=lambda: {
             name: 0.7 if name == "Solder_Paste" else 0.25 for name in OBB_CLASSES

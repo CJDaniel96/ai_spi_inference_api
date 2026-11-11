@@ -14,7 +14,7 @@ from typing import Any
 
 
 class DeadlineExceeded(TimeoutError):
-    """The absolute job budget was exhausted."""
+    """The operation budget was exhausted."""
 
     def __init__(self, message: str, *, uncertain: bool = False):
         super().__init__(message)
@@ -86,7 +86,7 @@ class DeadlineIO:
                 return False, None
             if time.monotonic() >= self._stop_at or time.time() >= self._deadline_at:
                 raise DeadlineExceeded(
-                    "blocking IO reached the job deadline", uncertain=True
+                    "blocking IO exceeded the operation timeout", uncertain=True
                 )
             if self._connection.poll(0):
                 success, result = self._connection.recv()
@@ -110,7 +110,11 @@ class DeadlineIO:
             self._process.join(timeout=0.05)
             if self._process.is_alive():
                 self._process.kill()
-                self._process.join(timeout=0.05)
+                self._process.join(timeout=0.5)
+            if self._process.is_alive():
+                # Never release ownership of a possible late file writer.
+                # Retain the handle and stop its owner before workspace cleanup.
+                raise RuntimeError("IO worker could not be stopped; workspace retained")
         self._process = None
         self._connection = None
         self._stop_at = self._deadline_at = None

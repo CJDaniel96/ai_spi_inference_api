@@ -7,7 +7,7 @@ from app.infrastructure.local_store import ControllerLock, JobState, LocalJobSto
 
 
 def job():
-    return JobState("20261109120000", "/input", "/backup", 1.0, 7.0, 6.0, {})
+    return JobState("20261109120000", "/input", "/backup", 1.0, {})
 
 
 def test_replay_repairs_snapshot_after_crash_between_event_and_snapshot(

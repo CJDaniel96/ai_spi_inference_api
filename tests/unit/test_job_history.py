@@ -2,8 +2,6 @@ import asyncio
 import json
 import shutil
 import sqlite3
-import threading
-import time
 from datetime import date
 from pathlib import Path
 
@@ -30,9 +28,12 @@ def terminal_job(tmp_path, status="EXPIRED"):
     state_root = tmp_path / "state"
     history = tmp_path / "history"
     store = LocalJobStore(state_root)
-    job = JobState("20261109120000", "/input", "/backup", 1, 7, 6, {})
+    job = JobState("20261109120000", "/input", "/backup", 1.0, {})
     store.save(job, "job.discovered")
     job.status = status
+    job.backup_status = "complete"
+    job.export_status = "disabled"
+    job.image_backup_status = "incomplete"
     store.save(job, "job.expired")
     artifacts = state_root / "artifacts" / job.job_id / "attempt"
     artifacts.mkdir(parents=True)
@@ -167,6 +168,7 @@ def test_cleanup_retries_partial_deletion_after_restart(tmp_path, monkeypatch):
 @pytest.mark.parametrize("status", ["PUBLICATION_UNKNOWN", "PRIMARY_RETURNED", "READY"])
 def test_unresolved_work_is_never_archived(tmp_path, status):
     state, history, job = terminal_job(tmp_path, status)
+    job.backup_status = "pending"
     with pytest.raises(ValueError, match="attention"):
         archive_job(state, history, job)
     assert (state / "jobs" / job.job_id).exists()
@@ -211,10 +213,11 @@ def test_conflicting_recreated_work_is_not_deleted(tmp_path):
     state, history, job = terminal_job(tmp_path)
     archive_job(state, history, job)
     store = LocalJobStore(state)
-    recreated = JobState(job.job_id, "/input", "/backup", 1, 7, 6, {})
+    recreated = JobState(job.job_id, "/input", "/backup", 1.0, {})
     store.save(recreated, "different_work")
-    with pytest.raises(ValueError, match="conflicts"):
-        cleanup_committed(state, history)
+    conflicts = cleanup_committed(state, history)
+    assert job.job_id in conflicts
+    assert "conflicts" in conflicts[job.job_id]
     assert (state / "jobs" / job.job_id / "job_state.json").exists()
 
 
@@ -298,7 +301,7 @@ def test_done_job_keeps_working_files_until_background_work_finishes(
     import app.application.controller as module
 
     config = make_config(tmp_path)
-    source = write_job(config, images=61 if pending == "raw_backup" else None)
+    source = write_job(config, images=0 if pending == "raw_backup" else None)
     operation = "export_result" if pending == "export" else "ingest_io"
     if pending == "export":
         monkeypatch.setattr(
@@ -314,50 +317,3 @@ def test_done_job_keeps_working_files_until_background_work_finishes(
     assert jobs[source.name].status == "DONE"
     assert (Path(config.paths.state_root) / "jobs" / source.name).exists()
     assert not is_archived(Path(config.paths.history_root), source.name)
-
-
-def test_cleanup_waits_for_cancelled_inference_thread_to_stop_writing(tmp_path):
-    config = make_config(tmp_path, total=1.5, reserve=0.5, database=False)
-    source = write_job(config)
-    started = threading.Event()
-    release = threading.Event()
-    controller = Controller(config, FakeRuntime(), io_factory=AsyncTestIO)
-    evaluate = controller.inference._evaluate
-
-    def slow_evaluate(*args):
-        started.set()
-        assert release.wait(5)
-        return evaluate(*args)
-
-    controller.inference._evaluate = slow_evaluate
-
-    async def run():
-        task = asyncio.create_task(controller.run(target_date=date(2026, 11, 9)))
-        limit = time.monotonic() + 5
-        work = Path(config.paths.state_root) / "jobs" / source.name
-        try:
-            while not (
-                source.name in controller.jobs
-                and controller.jobs[source.name].export_status == "complete"
-            ):
-                assert time.monotonic() < limit
-                await asyncio.sleep(0.01)
-            assert started.is_set()
-            assert controller._local_tasks.busy(source.name)
-            assert work.exists()
-            release.set()
-            while work.exists() or source.name in controller.jobs:
-                assert time.monotonic() < limit
-                await asyncio.sleep(0.01)
-            assert not (
-                Path(config.paths.state_root) / "artifacts" / source.name
-            ).exists()
-            receipt = read_receipt(history_folder(controller.history_root, source.name))
-            assert receipt["snapshot"]["status"] == "DONE"
-            assert source.name not in controller.jobs
-        finally:
-            release.set()
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-
-    asyncio.run(run())

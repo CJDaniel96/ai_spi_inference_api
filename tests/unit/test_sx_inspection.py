@@ -11,13 +11,14 @@ import pytest
 from pydantic import ValidationError
 
 from app.application.inference.obb_service import ObbInspectionService
-from app.application.operations import backup_result, publish_csv
+from app.application.operations import backup_result, prepare_publications, publish_csv
 from app.core.config import AppConfig
 from app.core.inspection_config import ObbConfig
 from app.domain.entities.obb_result import OBB_CLASSES, ObbBatchResult, ObbDetection
 from app.domain.entities.pipeline_result import PipelineOutcome, PipelineResultManifest
 from app.domain.services.appearance_classifier import AppearanceClassifier
 from app.domain.services.component_judge import MEASUREMENTS, ComponentJudge
+from tests.helpers import AsyncTestIO
 
 ROOT = Path(__file__).resolve().parents[2]
 POLYGON = ((0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0))
@@ -291,6 +292,9 @@ class FakeRuntime:
         self.missing = missing
         self.calls = 0
 
+    def close(self):
+        pass
+
     async def infer(self, images, *, deadline_at):
         self.calls += 1
         if self.error:
@@ -329,6 +333,7 @@ def service_case(tmp_path, rows, runtime=None):
         config=config,
         result_root=tmp_path / "results",
         runtime=runtime,
+        io_factory=AsyncTestIO,
     )
     return config, folder, service, runtime
 
@@ -339,9 +344,7 @@ def test_native_result_preserves_machine_contract_and_metadata(tmp_path):
     )
     original = (folder / "board.csv").read_bytes()
     manifest, path = asyncio.run(
-        service.prepare(
-            job_id=folder.name, staged_folder=folder, deadline_at=time.time() + 10
-        )
+        service.prepare(job_id=folder.name, staged_folder=folder)
     )
     assert manifest.outcome is PipelineOutcome.NORMAL
     assert manifest.csv_results[0].result_codes == (22, 23)
@@ -360,11 +363,12 @@ def test_native_result_preserves_machine_contract_and_metadata(tmp_path):
     assert (
         json.loads(processed.iloc[0]["obb_retained_detections"])[0]["confidence"] == 0.8
     )
-    for item in manifest.csv_results:
+    records = prepare_publications(folder, path)
+    for record in records.values():
         publish_csv(
             config,
-            folder / item.source_csv,
-            item.result_codes,
+            Path(record["result_path"]),
+            record["result_sha256"],
             time.time() + 10,
             job_id=folder.name,
         )
@@ -390,9 +394,7 @@ def test_native_result_preserves_machine_contract_and_metadata(tmp_path):
 def test_model_failure_or_missing_results_returns_all_23(tmp_path, runtime):
     _config, folder, service, _runtime = service_case(tmp_path, [row(), row()], runtime)
     manifest, _path = asyncio.run(
-        service.prepare(
-            job_id=folder.name, staged_folder=folder, deadline_at=time.time() + 10
-        )
+        service.prepare(job_id=folder.name, staged_folder=folder)
     )
     assert manifest.outcome is PipelineOutcome.FALLBACK
     assert manifest.csv_results[0].result_codes == (23, 23)
@@ -404,9 +406,7 @@ def test_empty_successful_detections_are_normal_ng(tmp_path):
         tmp_path, [row()], FakeRuntime(detections=())
     )
     manifest, _path = asyncio.run(
-        service.prepare(
-            job_id=folder.name, staged_folder=folder, deadline_at=time.time() + 10
-        )
+        service.prepare(job_id=folder.name, staged_folder=folder)
     )
     assert manifest.outcome is PipelineOutcome.NORMAL
     assert manifest.csv_results[0].result_codes == (23,)
@@ -417,9 +417,7 @@ def test_missing_measurement_uses_whole_job_fail_safe(tmp_path):
         tmp_path, [row(), row(insp_area="")]
     )
     manifest, _path = asyncio.run(
-        service.prepare(
-            job_id=folder.name, staged_folder=folder, deadline_at=time.time() + 10
-        )
+        service.prepare(job_id=folder.name, staged_folder=folder)
     )
     assert manifest.outcome is PipelineOutcome.FALLBACK
     assert manifest.reason == "invalid_measurement"
@@ -456,9 +454,7 @@ def test_supplied_measurements_fail_volume_before_other_checks(tmp_path):
     ]
     _config, folder, service, _runtime = service_case(tmp_path, rows)
     manifest, path = asyncio.run(
-        service.prepare(
-            job_id=folder.name, staged_folder=folder, deadline_at=time.time() + 10
-        )
+        service.prepare(job_id=folder.name, staged_folder=folder)
     )
     assert manifest.csv_results[0].result_codes == (23,) * 7
     processed = pd.read_csv(path.parent / manifest.csv_results[0].processed_csv)
@@ -474,9 +470,7 @@ def test_same_component_uses_each_rows_limits_and_preserves_csv(tmp_path):
     _config, folder, service, _runtime = service_case(tmp_path, rows)
     original = (folder / "board.csv").read_bytes()
     manifest, path = asyncio.run(
-        service.prepare(
-            job_id=folder.name, staged_folder=folder, deadline_at=time.time() + 10
-        )
+        service.prepare(job_id=folder.name, staged_folder=folder)
     )
     assert manifest.csv_results[0].result_codes == (23, 22)
     processed = pd.read_csv(path.parent / manifest.csv_results[0].processed_csv)
@@ -494,9 +488,7 @@ def test_missing_csv_limit_uses_whole_job_fail_safe_without_excel_fallback(tmp_p
         tmp_path, [row(), row(vol_h_ng="")]
     )
     manifest, _path = asyncio.run(
-        service.prepare(
-            job_id=folder.name, staged_folder=folder, deadline_at=time.time() + 10
-        )
+        service.prepare(job_id=folder.name, staged_folder=folder)
     )
     assert manifest.outcome is PipelineOutcome.FALLBACK
     assert manifest.csv_results[0].result_codes == (23, 23)

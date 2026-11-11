@@ -13,7 +13,6 @@ import pytest
 from app.application.controller import Controller
 from app.infrastructure.audit import sync_events
 from app.infrastructure.job_history import history_folder, read_receipt
-from app.infrastructure.local_store import JobState, LocalJobStore
 from tests.helpers import AsyncTestIO, FakeRuntime, make_config, write_job
 
 
@@ -53,32 +52,30 @@ def test_normal_job_preserves_raw_and_returns_then_exports(tmp_path):
         )
 
 
-@pytest.mark.parametrize("mode", ["slow", "failure", "oversize", "missing_images"])
+@pytest.mark.parametrize("mode", ["slow", "failure", "missing_images"])
 @pytest.mark.usefixtures("writable_file_fsync")
 def test_fallback_does_not_wait_for_model_or_images(tmp_path, mode):
-    config = make_config(tmp_path)
+    config = make_config(tmp_path, inference_timeout=0.08)
     source = write_job(
         config,
-        images=61 if mode == "oversize" else 0 if mode == "missing_images" else None,
+        images=0 if mode == "missing_images" else None,
     )
     runtime = FakeRuntime(delay=10 if mode == "slow" else 0, fail=mode == "failure")
     job = run(Controller(config, runtime, io_factory=AsyncTestIO))[source.name]
     assert codes(config) == [23] and job.status == "DONE"
-    assert job.primary_returned_at < job.deadline_at
+    assert job.primary_returned_at >= job.processing_started_at
     manifest = json.loads(Path(job.result_manifest_path).read_text())
     assert manifest["outcome"] == "fallback"
-    if mode in {"oversize", "missing_images"}:
+    if mode == "missing_images":
         assert runtime.calls == 0
-    if mode == "oversize":
-        assert job.primary_returned_at < job.inference_cutoff_at
 
 
 def test_csv_not_complete_never_produces_a_guessed_result(tmp_path):
-    config = make_config(tmp_path, total=0.3, reserve=0.1)
+    config = make_config(tmp_path, inference_timeout=0.3)
     source = write_job(config)
     next(source.glob("*.csv")).write_text("broken\n1\n")
     job = run(Controller(config, FakeRuntime(), io_factory=AsyncTestIO))[source.name]
-    assert job.status == "EXPIRED" and codes(config) == []
+    assert job.status == "INPUT_FAILED" and codes(config) == []
     assert job.csv_snapshot_folder is None
 
 
@@ -94,7 +91,10 @@ def test_locked_db_does_not_prevent_spi_return_and_replays_later(tmp_path):
         job = run(Controller(config, FakeRuntime(), io_factory=AsyncTestIO))[
             source.name
         ]
-        assert codes(config) == [22] and job.primary_returned_at < job.deadline_at
+        assert (
+            codes(config) == [22]
+            and job.primary_returned_at >= job.processing_started_at
+        )
         assert not list(root.glob("jobs/*"))
         assert list(history.glob("*/*/events/*.json"))
         for returned in Path(config.paths.external_output_root).glob("*.csv"):
@@ -117,7 +117,7 @@ def test_restart_does_not_repeat_returned_csv_or_reset_deadline(tmp_path):
     assert codes(config) == [] and runtime.calls == 0
     assert restored == {}
     receipt = read_receipt(history_folder(Path(config.paths.history_root), source.name))
-    assert receipt["snapshot"]["deadline_at"] == job.deadline_at
+    assert receipt["snapshot"]["processing_started_at"] == job.processing_started_at
 
 
 def test_interrupted_publication_is_unknown_and_is_not_replayed(tmp_path, monkeypatch):
@@ -143,25 +143,15 @@ def test_interrupted_publication_is_unknown_and_is_not_replayed(tmp_path, monkey
     assert not history_folder(Path(config.paths.history_root), source.name).exists()
 
 
-def test_expired_during_downtime_stays_expired(tmp_path):
+def test_queued_job_does_not_expire_during_downtime(tmp_path):
     config = make_config(tmp_path)
     source = write_job(config)
-    store = LocalJobStore(Path(config.paths.state_root))
-    job = JobState(
-        source.name,
-        str(source),
-        str(tmp_path / "backup" / source.name),
-        time.time() - 10,
-        time.time() - 4,
-        time.time() - 5,
-        config.model_dump(),
-    )
-    store.save(job, "test.discovered")
-    original_deadline = job.deadline_at
+    controller = Controller(config, FakeRuntime(), io_factory=AsyncTestIO)
+    controller.register(source, time.time() - 3600)
     runtime = FakeRuntime()
     job = run(Controller(config, runtime, io_factory=AsyncTestIO))[source.name]
-    assert job.status == "EXPIRED" and job.deadline_at == original_deadline
-    assert runtime.calls == 0 and codes(config) == []
+    assert job.status == "DONE" and runtime.calls == 1 and codes(config) == [22]
+    assert job.queue_ms >= 3_600_000
 
 
 def test_multiple_csv_receipts_are_recorded_separately(tmp_path):

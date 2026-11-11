@@ -7,6 +7,7 @@ import pytest
 
 from app.application.controller import Controller, StatePersistenceError
 from app.application.ingest.io import snapshot_csv
+from app.application.shared.fallback_result import FallbackResultBuilder
 from app.infrastructure.local_store import JobState, LocalJobStore
 from tests.helpers import AsyncTestIO, FakeRuntime, make_config, write_job
 
@@ -39,7 +40,7 @@ def test_result_backup_failure_retries_without_resending_spi(tmp_path, monkeypat
 
 
 def test_completed_selection_recovers_without_running_model_again(tmp_path):
-    config = make_config(tmp_path, total=3, reserve=0.5)
+    config = make_config(tmp_path, inference_timeout=3)
     source = write_job(config)
     store = LocalJobStore(Path(config.paths.state_root))
     csv_root = store.folder(source.name) / "csv" / "test"
@@ -50,14 +51,14 @@ def test_completed_selection_recovers_without_running_model_again(tmp_path):
         str(source),
         str(tmp_path / "backup" / "2026-11-09" / source.name),
         now,
-        now + 3,
-        now + 2.5,
         config.model_dump(),
         csv_snapshot_folder=str(csv_root),
         csv_ready_at=now,
     )
     controller = Controller(config, FakeRuntime(), io_factory=AsyncTestIO)
-    manifest, path = controller.fallback.build_csv_fallback(
+    manifest, path = FallbackResultBuilder(
+        config=config, result_root=controller.artifacts
+    ).build_csv_fallback(
         job_id=job.job_id, csv_folder=csv_root, reason="already_selected"
     )
     job.result_manifest_path = str(path)
@@ -93,7 +94,7 @@ def test_local_state_failure_never_publishes_unrecorded_result(tmp_path, monkeyp
 
 
 def test_slow_background_backup_does_not_block_next_primary_return(tmp_path):
-    config = make_config(tmp_path, total=2, reserve=0.5, database=False)
+    config = make_config(tmp_path, inference_timeout=2, database=False)
     first = write_job(config)
 
     class SlowBackupIO(AsyncTestIO):
@@ -136,7 +137,7 @@ def test_slow_background_backup_does_not_block_next_primary_return(tmp_path):
             assert controller.jobs[first.name].backup_status == "pending"
             assert (
                 controller.jobs[second.name].primary_returned_at
-                < controller.jobs[second.name].deadline_at
+                >= controller.jobs[second.name].processing_started_at
             )
         finally:
             task.cancel()

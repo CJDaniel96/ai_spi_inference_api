@@ -19,19 +19,24 @@ from tests.helpers import FakeResidentModel, make_config, write_job
 
 
 def test_real_processes_complete_native_pipeline_without_http_or_gpu(tmp_path):
-    config = make_config(tmp_path, total=6, reserve=1)
+    config = make_config(tmp_path, inference_timeout=6)
     source = write_job(config, rows=2)
     runtime = ResidentObbRuntime(config.inference.obb, model_factory=FakeResidentModel)
     controller = Controller(config, runtime)
     jobs = asyncio.run(controller.run(once=True, target_date=date(2026, 11, 9)))
     job = jobs[source.name]
     assert job.status == "DONE" and job.export_status == "complete"
-    assert job.primary_returned_at < job.deadline_at
+    assert job.primary_returned_at >= job.processing_started_at
     assert json.loads(Path(job.result_manifest_path).read_text())["outcome"] == "normal"
     assert runtime.pid is None
 
 
-def test_blocked_io_is_terminated_while_controller_loop_keeps_running():
+def delayed_write(path):
+    time.sleep(0.4)
+    path.write_text("late write")
+
+
+def test_blocked_io_is_terminated_while_controller_loop_keeps_running(tmp_path):
     async def run():
         lane = DeadlineIO()
         try:
@@ -48,11 +53,19 @@ def test_blocked_io_is_terminated_while_controller_loop_keeps_running():
             timer = asyncio.create_task(clock())
             start = time.monotonic()
             with pytest.raises(DeadlineExceeded):
-                await call_io(lane, time.sleep, 10, deadline_at=time.time() + 0.12)
+                await call_io(
+                    lane,
+                    delayed_write,
+                    tmp_path / "late.txt",
+                    deadline_at=time.time() + 0.12,
+                )
             assert time.monotonic() - start < 0.8
             assert not process.is_alive()
             await timer
             assert ticks == 10
+            assert await call_io(lane, abs, -3, deadline_at=time.time() + 5) == 3
+            await asyncio.sleep(0.45)
+            assert not (tmp_path / "late.txt").exists()
         finally:
             lane.close()
 
@@ -60,7 +73,7 @@ def test_blocked_io_is_terminated_while_controller_loop_keeps_running():
 
 
 def test_cli_without_model_returns_protection_result_and_uses_one_config(tmp_path):
-    config = make_config(tmp_path, total=6, reserve=1)
+    config = make_config(tmp_path, inference_timeout=6)
     source = write_job(config)
     path = tmp_path / "config.json"
     path.write_text(config.model_dump_json())

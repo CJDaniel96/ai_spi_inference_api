@@ -13,7 +13,6 @@
     "history_root": "data/history"
   },
   "processing": {
-    "folder_images_num_threshold": 60,
     "image_extensions": [
       ".jpg",
       ".jpeg",
@@ -23,19 +22,17 @@
       ".tif"
     ],
     "image_name_template": "{csv_stem}_{component_name}_{Array_id}_{Pad_id}.jpg",
-    "source_settle_seconds": 2.0
-  },
-  "reliability": {
-    "end_to_end_timeout_seconds": 6.0,
-    "primary_publish_reserve_seconds": 1.0
+    "source_settle_seconds": 2.0,
+    "input_ready_timeout_seconds": 30
   },
   "runtime": {
     "scan_interval_seconds": 0.25,
     "poll_interval_seconds": 0.01,
-    "max_active_jobs": 4,
-    "discovery_timeout_seconds": 2.0,
+    "discovery_timeout_seconds": 5,
     "background_timeout_seconds": 30.0,
-    "background_retry_seconds": 5.0
+    "background_retry_seconds": 5.0,
+    "io_timeout_seconds": 30,
+    "io_startup_timeout_seconds": 30
   },
   "inference": {
     "obb": {
@@ -56,7 +53,8 @@
         "Slump": 0.25,
         "Foreign_object": 0.25,
         "Bridge": 0.25
-      }
+      },
+      "inference_timeout_seconds": 120
     }
   },
   "output": {
@@ -76,5 +74,10 @@
   "logging": {
     "log_dir": "log",
     "system_log_file": "system.log"
+  },
+  "delivery": {
+    "max_attempts": 3,
+    "retry_interval_seconds": 1,
+    "attempt_timeout_seconds": 10
   }
 }

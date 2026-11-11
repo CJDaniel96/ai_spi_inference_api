@@ -92,24 +92,28 @@ class JobState:
     source_folder: str
     original_backup_folder: str
     first_seen_at: float
-    deadline_at: float
-    inference_cutoff_at: float
     config_snapshot: dict
-    status: str = "DISCOVERED"
+    status: str = "QUEUED"
     revision: int = 0
     reason: str | None = None
     last_error: str | None = None
     first_seen_source: str = "csv_observation"
+    processing_started_at: float | None = None
+    processing_finished_at: float | None = None
+    processing_elapsed_ms: float = 0.0
+    queue_ms: float | None = None
     csv_snapshot_folder: str | None = None
     csv_ready_at: float | None = None
     ready_at: float | None = None
     inference_started_at: float | None = None
+    inference_finished_at: float | None = None
     image_count: int | None = None
     image_backup_status: str = "pending"
     result_manifest_path: str | None = None
     result_ready_at: float | None = None
     publications: dict[str, dict] = field(default_factory=dict)
     primary_returned_at: float | None = None
+    delivery_status: str = "pending"
     backup_status: str = "pending"
     export_status: str = "pending"
     background_attempts: int = 0
@@ -126,21 +130,36 @@ class JobState:
             "DONE",
             "EXPIRED",
             "PUBLICATION_UNKNOWN",
+            "HISTORY_CONFLICT",
+            "RETURN_FAILED",
+            "PARTIAL_RETURN",
+            "INPUT_FAILED",
         }
 
     @property
     def cleanup_ready(self) -> bool:
-        if self.status in {"FAILED", "EXPIRED"}:
-            return True
         return (
-            self.status == "DONE"
-            and self.primary_returned_at is not None
-            and bool(self.publications)
-            and all(item["status"] == "RETURNED" for item in self.publications.values())
+            self.primary_terminal
+            and self.status not in {"PUBLICATION_UNKNOWN", "HISTORY_CONFLICT"}
             and self.backup_status == "complete"
             and self.export_status in {"complete", "disabled"}
             and self.image_backup_status in {"complete", "incomplete"}
         )
+
+    @classmethod
+    def from_snapshot(cls, snapshot):
+        # Old deadline fields are historical evidence, not active runtime policy.
+        # Keep immutable events intact while reading their common state fields.
+        data = {
+            key: value
+            for key, value in snapshot.items()
+            if key in cls.__dataclass_fields__
+        }
+        if "delivery_status" not in data:
+            data["delivery_status"] = (
+                "returned" if data.get("primary_returned_at") else "pending"
+            )
+        return cls(**data)
 
 
 class LocalJobStore:
@@ -187,7 +206,7 @@ class LocalJobStore:
                 continue
             # Fail closed on corruption rather than losing the SPI receipt.
             event = json.loads(events[-1].read_text(encoding="utf-8"))
-            job = JobState(**event["snapshot"])
+            job = JobState.from_snapshot(event["snapshot"])
             if job.job_id != folder.name or event["revision"] != job.revision:
                 raise ValueError(f"Invalid job journal: {folder}")
             atomic_json(folder / "job_state.json", event["snapshot"])

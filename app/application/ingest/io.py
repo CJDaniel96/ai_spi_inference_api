@@ -5,7 +5,7 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-from app.application.ingest.service import IngestService, SourceChangedError
+from app.application.ingest.service import IngestService
 from app.infrastructure.input.sinic_folder_input import (
     MachineJobFiles,
     SinicFolderInput,
@@ -21,12 +21,17 @@ def candidates(extensions, root, target_date, history_root):
     )
 
 
-def inspect_source(extensions, folder, threshold):
+def ping():
+    """Finish loading this worker's IO dependencies without touching SPI data."""
+    return True
+
+
+def inspect_source(extensions, folder):
     adapter = SinicFolderInput(extensions)
     job = adapter.load(folder)
     csv_job = MachineJobFiles(folder, job.csv_files, ())
     csv_snapshot = adapter.snapshot(csv_job)
-    full_snapshot = adapter.snapshot(job) if job.image_count <= threshold else ()
+    full_snapshot = adapter.snapshot(job)
     return job, csv_snapshot, full_snapshot
 
 
@@ -41,11 +46,6 @@ def snapshot_csv(config, source, destination):
 
 
 def validate_source(config, source, csv_snapshot=None):
-    if (
-        SinicFolderInput(config.processing.image_extensions).load(source).image_count
-        > config.processing.folder_images_num_threshold
-    ):
-        raise SourceChangedError("Image count crossed threshold before decoding")
     return _service(config).validate(
         source, decode_images=False, csv_snapshot=csv_snapshot
     )
@@ -59,7 +59,7 @@ def archive_source(config, validated, backup_root, csv_snapshot=None):
     )
 
 
-def backup_images(source: Path, target: Path, csv_snapshot: Path) -> str:
+def backup_images(source: Path, target: Path, csv_snapshot: Path | None) -> str:
     """Archive raw bytes in a separate subtree, without image decoding."""
     if not source.is_dir():
         return "incomplete"
@@ -69,10 +69,13 @@ def backup_images(source: Path, target: Path, csv_snapshot: Path) -> str:
         initial = service._snapshot_tree(source)
         prepared, manifest = service._prepare_streamed_copy(source, target, initial)
         copied = prepared.temporary or prepared.target
-        expected = {p.name: p.read_bytes() for p in service._csv_files(csv_snapshot)}
-        actual = {p.name: p.read_bytes() for p in service._csv_files(copied)}
-        if not expected or expected != actual:
-            return "incomplete"
+        if csv_snapshot is not None:
+            expected = {
+                p.name: p.read_bytes() for p in service._csv_files(csv_snapshot)
+            }
+            actual = {p.name: p.read_bytes() for p in service._csv_files(copied)}
+            if not expected or expected != actual:
+                return "incomplete"
         service._assert_snapshot_unchanged(source, initial, "background backup")
         prepared = service._commit_copy(prepared, manifest)
         return "complete"

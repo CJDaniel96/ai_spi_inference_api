@@ -1,4 +1,4 @@
-"""Build all-23 results for ingest bypass, inference failure and deadline takeover."""
+"""Build all-23 protection results from validated CSV snapshots."""
 
 from __future__ import annotations
 

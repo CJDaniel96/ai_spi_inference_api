@@ -21,6 +21,10 @@ from app.infrastructure.local_store import (
 )
 
 
+class HistoryConflictError(ValueError):
+    """Different executions reused one job ID; preserve both journals."""
+
+
 def history_folder(history_root: Path, job_id: str) -> Path:
     if not job_id.isascii() or len(job_id) != 14 or not job_id.isdecimal():
         raise ValueError("Invalid history job ID")
@@ -30,12 +34,20 @@ def history_folder(history_root: Path, job_id: str) -> Path:
 
 def read_receipt(folder: Path) -> dict:
     receipt = json.loads((folder / "receipt.json").read_text(encoding="utf-8"))
-    state = JobState(**receipt["snapshot"])
+    state = JobState.from_snapshot(receipt["snapshot"])
     if (
         receipt["schema_version"] != 1
         or state.job_id != folder.name
         or state.revision != receipt["source_revision"] + 1
-        or state.status not in {"DONE", "FAILED", "EXPIRED"}
+        or state.status
+        not in {
+            "DONE",
+            "FAILED",
+            "EXPIRED",
+            "INPUT_FAILED",
+            "RETURN_FAILED",
+            "PARTIAL_RETURN",
+        }
     ):
         raise ValueError(f"Invalid terminal receipt: {folder}")
     if state.result_manifest_path:
@@ -54,21 +66,50 @@ def is_archived(history_root: Path, job_id: str) -> bool:
     return True
 
 
-def _remove_working_files(state_root: Path, history_root: Path, job_id: str):
+def working_history_conflict(state_root: Path, history_root: Path, job_id: str):
+    """Return a conflict reason, allowing a partially removed matching journal."""
     destination = history_folder(history_root, job_id)
     receipt = read_receipt(destination)
-    fsync_directory(destination.parent)
     working = state_root / "jobs" / job_id
     events = sorted((working / "events").glob("*.json"))
     if events:
-        latest = json.loads(events[-1].read_text(encoding="utf-8"))
+        try:
+            latest = json.loads(events[-1].read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            # A matching archive may be deleting this file concurrently.
+            return None
         expected = destination / "events" / events[-1].name
         if (
             latest["revision"] > receipt["source_revision"]
+            or not expected.is_file()
             or latest["event_id"]
             != json.loads(expected.read_text(encoding="utf-8"))["event_id"]
         ):
-            raise ValueError(f"Working journal conflicts with history: {job_id}")
+            return (
+                f"Working journal conflicts with history: {job_id}; "
+                f"working_revision={latest['revision']}, "
+                f"archived_source_revision={receipt['source_revision']}"
+            )
+    return None
+
+
+def history_conflicts(state_root: Path, history_root: Path) -> dict[str, str]:
+    conflicts = {}
+    for working in sorted((state_root / "jobs").glob("*")):
+        if working.is_dir() and is_archived(history_root, working.name):
+            reason = working_history_conflict(state_root, history_root, working.name)
+            if reason:
+                conflicts[working.name] = reason
+    return conflicts
+
+
+def _remove_working_files(state_root: Path, history_root: Path, job_id: str):
+    destination = history_folder(history_root, job_id)
+    fsync_directory(destination.parent)
+    reason = working_history_conflict(state_root, history_root, job_id)
+    if reason:
+        raise HistoryConflictError(reason)
+    working = state_root / "jobs" / job_id
     for path in (state_root / "artifacts" / job_id, working):
         if path.exists():
             shutil.rmtree(path)
@@ -83,15 +124,20 @@ def cleanup_committed(state_root: Path, history_root: Path):
         for child in (state_root / category).glob("*")
         if child.is_dir()
     }
+    conflicts = {}
     for job_id in sorted(names):
         if is_archived(history_root, job_id):
-            _remove_working_files(state_root, history_root, job_id)
+            try:
+                _remove_working_files(state_root, history_root, job_id)
+            except HistoryConflictError as exc:
+                conflicts[job_id] = str(exc)
+    return conflicts
 
 
 def archive_job(state_root: Path, history_root: Path, job: JobState) -> JobState:
     """Atomically archive all events plus a final receipt, then delete scratch data.
 
-    The caller must prevent new writers and wait for cancelled local threads.
+    The caller must prevent new writers and stop supervised IO children.
     A committed archive always wins over its leftover working directory.
     """
     if not job.cleanup_ready:
@@ -100,7 +146,7 @@ def archive_job(state_root: Path, history_root: Path, job: JobState) -> JobState
     if destination.exists():
         receipt = read_receipt(destination)
         if receipt["source_revision"] != job.revision:
-            raise ValueError(f"History revision conflicts: {job.job_id}")
+            raise HistoryConflictError(f"History revision conflicts: {job.job_id}")
     else:
         working = state_root / "jobs" / job.job_id
         events = sorted((working / "events").glob("*.json"))
@@ -154,13 +200,17 @@ def archive_job(state_root: Path, history_root: Path, job: JobState) -> JobState
             if temporary.exists():
                 shutil.rmtree(temporary)
     _remove_working_files(state_root, history_root, job.job_id)
-    return JobState(**receipt["snapshot"])
+    return JobState.from_snapshot(receipt["snapshot"])
 
 
-def journal_events(state_root: Path, history_root: Path, *, after=None):
+def journal_events(state_root: Path, history_root: Path, *, after=None, conflicts=None):
     """Read active then archived catalogs, tolerating concurrent job cleanup."""
+    if conflicts is None:
+        conflicts = history_conflicts(state_root, history_root)
     paths: dict[tuple[str, int], Path] = {}
     for path in sorted((state_root / "jobs").glob("*/events/*.json")):
+        if path.parent.parent.name in conflicts:
+            continue
         paths[(path.parent.parent.name, int(path.stem))] = path
     for receipt in sorted(history_root.glob("*/*/receipt.json")):
         if receipt.parent.name.startswith("."):

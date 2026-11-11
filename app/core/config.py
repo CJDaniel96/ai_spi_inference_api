@@ -38,7 +38,6 @@ class PathConfig(Settings):
 
 
 class ProcessingConfig(Settings):
-    folder_images_num_threshold: int = Field(default=60, gt=0)
     image_extensions: list[str] = Field(
         default_factory=lambda: [".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif"]
     )
@@ -46,24 +45,21 @@ class ProcessingConfig(Settings):
         default="{csv_stem}_{component_name}_{Array_id}_{Pad_id}.jpg", min_length=1
     )
     source_settle_seconds: float = Field(default=2.0, ge=0)
+    input_ready_timeout_seconds: float = Field(default=30.0, gt=0)
 
 
-class ReliabilityConfig(Settings):
-    end_to_end_timeout_seconds: float = Field(default=6.0, gt=0)
-    primary_publish_reserve_seconds: float = Field(default=1.0, gt=0)
-
-    @model_validator(mode="after")
-    def reserve_fits(self):
-        if self.primary_publish_reserve_seconds >= self.end_to_end_timeout_seconds:
-            raise ValueError("publish reserve must be less than the total deadline")
-        return self
+class DeliveryConfig(Settings):
+    max_attempts: int = Field(default=3, gt=0)
+    retry_interval_seconds: float = Field(default=1.0, ge=0)
+    attempt_timeout_seconds: float = Field(default=10.0, gt=0)
 
 
 class RuntimeConfig(Settings):
     scan_interval_seconds: float = Field(default=0.25, gt=0)
     poll_interval_seconds: float = Field(default=0.01, gt=0)
-    max_active_jobs: int = Field(default=4, gt=0)
-    discovery_timeout_seconds: float = Field(default=2.0, gt=0)
+    discovery_timeout_seconds: float = Field(default=5.0, gt=0)
+    io_timeout_seconds: float = Field(default=30.0, gt=0)
+    io_startup_timeout_seconds: float = Field(default=30.0, gt=0)
     background_timeout_seconds: float = Field(default=30.0, gt=0)
     background_retry_seconds: float = Field(default=5.0, gt=0)
 
@@ -98,7 +94,7 @@ class AppConfig(Settings):
     identity: IdentityConfig
     paths: PathConfig
     processing: ProcessingConfig = Field(default_factory=ProcessingConfig)
-    reliability: ReliabilityConfig = Field(default_factory=ReliabilityConfig)
+    delivery: DeliveryConfig = Field(default_factory=DeliveryConfig)
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     inference: InferenceConfig = Field(default_factory=InferenceConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)

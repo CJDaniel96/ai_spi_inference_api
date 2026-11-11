@@ -42,7 +42,16 @@ def main(argv: list[str] | None = None) -> int:
             Controller(config, runtime).run(once=args.once, target_date=args.date)
         )
         if args.once and any(
-            job.status in {"EXPIRED", "FAILED", "PUBLICATION_UNKNOWN"}
+            job.status
+            in {
+                "EXPIRED",
+                "FAILED",
+                "PUBLICATION_UNKNOWN",
+                "HISTORY_CONFLICT",
+                "RETURN_FAILED",
+                "PARTIAL_RETURN",
+                "INPUT_FAILED",
+            }
             for job in jobs.values()
         ):
             return 2

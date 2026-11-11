@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import math
@@ -9,6 +10,7 @@ import time
 from dataclasses import replace
 from pathlib import Path
 
+from app.application.ingest.io import ping
 from app.application.shared.fallback_result import FallbackResultBuilder
 from app.application.shared.result_artifacts import ResultArtifactWriter
 from app.core.config import AppConfig
@@ -17,7 +19,8 @@ from app.domain.entities.obb_result import ObbBatchResult, ObbDetection
 from app.domain.entities.pipeline_result import PipelineOutcome, PipelineResultManifest
 from app.domain.services.component_judge import RULE_ORDER, ComponentJudge
 from app.domain.services.csv_merger import CsvMerger
-from app.infrastructure.local_file_tasks import LocalFileTasks
+from app.infrastructure.async_io import call_io
+from app.infrastructure.deadline_io import DeadlineIO
 from app.infrastructure.repositories.csv_repository import CsvRepository
 from app.infrastructure.repositories.file_system_job_repository import (
     FileSystemJobRepository,
@@ -32,12 +35,13 @@ class ObbInspectionService:
         result_root: Path,
         runtime,
         clock=time.time,
-        local_tasks: LocalFileTasks | None = None,
+        io_factory=DeadlineIO,
     ) -> None:
         self._config = config
         self._runtime = runtime
         self._clock = clock
-        self._local_tasks = local_tasks or LocalFileTasks()
+        self._io_factory = io_factory
+        self._result_root = result_root
         self._site_id = config.identity.site
         self._thresholds = dict(config.inference.obb.class_thresholds)
         self._judge = ComponentJudge(self._thresholds)
@@ -116,69 +120,68 @@ class ObbInspectionService:
             ):
                 raise ValueError("Invalid OBB detection result")
 
-    async def prepare(
-        self, *, job_id: str, staged_folder: Path, deadline_at: float
-    ) -> tuple[PipelineResultManifest, Path]:
-        cutoff = deadline_at - self._config.reliability.primary_publish_reserve_seconds
-        try:
-            job, frames, images = await self._local_tasks.run(
-                job_id, self._inputs, staged_folder
-            )
-        except (ValueError, CsvSchemaError) as exc:
-            return await self._fail(job_id, staged_folder, "invalid_input", str(exc))
-        if job.image_count > self._config.processing.folder_images_num_threshold:
-            return await self._fail(
-                job_id,
-                staged_folder,
-                "images_exceed_threshold",
-                "Image threshold exceeded",
-            )
-        if self._clock() >= cutoff:
-            return await self._fail(
-                job_id,
-                staged_folder,
-                "required_model_timeout",
-                "OBB cutoff reached before inference",
-            )
-        try:
-            result = await self._runtime.infer(images, deadline_at=cutoff)
-            self._validate_result(result, images)
-        except TimeoutError as exc:
-            return await self._fail(
-                job_id, staged_folder, "required_model_timeout", str(exc)
-            )
-        except Exception as exc:
-            return await self._fail(
-                job_id, staged_folder, "required_model_failure", str(exc)
-            )
-        if self._clock() >= cutoff:
-            return await self._fail(
-                job_id,
-                staged_folder,
-                "required_model_timeout",
-                "OBB completed after cutoff",
-            )
-        try:
-            return await self._local_tasks.run(
-                job_id, self._evaluate, job_id, frames, result
-            )
-        except ValueError as exc:
-            return await self._fail(
-                job_id, staged_folder, "invalid_measurement", str(exc)
+    async def prepare(self, *, job_id: str, staged_folder: Path):
+        lane = self._io_factory()
+
+        async def operation(function, *args):
+            return await call_io(
+                lane,
+                function,
+                self._config,
+                self._result_root,
+                *args,
+                deadline_at=time.time() + self._config.runtime.io_timeout_seconds,
             )
 
-    async def _fail(self, job_id, folder, reason, error):
-        manifest, path = await self._local_tasks.run(
-            job_id,
-            self._fallback.build_csv_fallback,
-            job_id=job_id,
-            csv_folder=folder,
-            reason=reason,
-            errors=(error,),
-        )
-        manifest = replace(manifest, inspection_metadata=self._metadata())
-        await self._local_tasks.run(job_id, manifest.write_atomic, path)
-        return manifest, path
+        try:
+            await call_io(
+                lane,
+                ping,
+                deadline_at=time.time()
+                + self._config.runtime.io_startup_timeout_seconds,
+            )
+            try:
+                _, frames, images = await operation(load_inputs, staged_folder)
+            except (ValueError, CsvSchemaError) as exc:
+                return await operation(
+                    build_fallback, job_id, staged_folder, "invalid_input", str(exc)
+                )
+            try:
+                timeout = self._config.inference.obb.inference_timeout_seconds
+                result = await asyncio.wait_for(
+                    self._runtime.infer(images, deadline_at=time.time() + timeout),
+                    timeout,
+                )
+                self._validate_result(result, images)
+            except TimeoutError as exc:
+                self._runtime.close()
+                return await operation(
+                    build_fallback,
+                    job_id,
+                    staged_folder,
+                    "required_model_timeout",
+                    str(exc),
+                )
+            except Exception as exc:
+                return await operation(
+                    build_fallback,
+                    job_id,
+                    staged_folder,
+                    "required_model_failure",
+                    str(exc),
+                )
+            try:
+                return await operation(evaluate_result, job_id, frames, result)
+            except ValueError as exc:
+                return await operation(
+                    build_fallback,
+                    job_id,
+                    staged_folder,
+                    "invalid_measurement",
+                    str(exc),
+                )
+        finally:
+            lane.close()
 
     def _evaluate(self, job_id, frames, result):
         artifact_dir = self._artifacts.new_artifact_dir(job_id)
@@ -212,3 +215,28 @@ class ObbInspectionService:
             inspection_metadata=self._metadata(result),
         )
         return manifest, manifest.write_atomic(artifact_dir / "manifest.json")
+
+
+def load_inputs(config, result_root, folder):
+    return ObbInspectionService(
+        config=config, result_root=result_root, runtime=None
+    )._inputs(folder)
+
+
+def evaluate_result(config, result_root, job_id, frames, result):
+    return ObbInspectionService(
+        config=config, result_root=result_root, runtime=None
+    )._evaluate(job_id, frames, result)
+
+
+def build_fallback(config, result_root, job_id, folder, reason, error):
+    service = ObbInspectionService(config=config, result_root=result_root, runtime=None)
+    manifest, path = service._fallback.build_csv_fallback(
+        job_id=job_id,
+        csv_folder=folder,
+        reason=reason,
+        errors=(error,) if error else (),
+    )
+    manifest = replace(manifest, inspection_metadata=service._metadata())
+    manifest.write_atomic(path)
+    return manifest, path

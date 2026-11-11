@@ -8,7 +8,15 @@ from tests.helpers import make_config
 
 
 @pytest.mark.parametrize(
-    "old_key", ["server", "pipeline", "defect_rules", "model_clients", "watch_root"]
+    "old_key",
+    [
+        "server",
+        "pipeline",
+        "defect_rules",
+        "model_clients",
+        "watch_root",
+        "reliability",
+    ],
 )
 def test_removed_settings_are_rejected_instead_of_silently_ignored(tmp_path, old_key):
     data = make_config(tmp_path).model_dump()
@@ -20,14 +28,17 @@ def test_removed_settings_are_rejected_instead_of_silently_ignored(tmp_path, old
 @pytest.mark.parametrize(
     "field,value",
     [
-        ("end_to_end_timeout_seconds", 0),
-        ("end_to_end_timeout_seconds", float("nan")),
-        ("primary_publish_reserve_seconds", 6),
+        ("max_attempts", 0),
+        ("max_attempts", 1.5),
+        ("attempt_timeout_seconds", 0),
+        ("attempt_timeout_seconds", float("nan")),
+        ("retry_interval_seconds", -1),
+        ("retry_interval_seconds", float("inf")),
     ],
 )
-def test_deadlines_are_finite_and_reserve_fits(tmp_path, field, value):
+def test_delivery_settings_are_finite_and_bounded(tmp_path, field, value):
     data = make_config(tmp_path).model_dump()
-    data["reliability"][field] = value
+    data["delivery"][field] = value
     with pytest.raises(ValidationError):
         AppConfig.model_validate(data)
 
