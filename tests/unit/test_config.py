@@ -43,6 +43,24 @@ def test_delivery_settings_are_finite_and_bounded(tmp_path, field, value):
         AppConfig.model_validate(data)
 
 
+@pytest.mark.parametrize("value", [0, -1, 1.5, float("nan"), float("inf")])
+def test_image_limit_requires_a_positive_integer(tmp_path, value):
+    data = make_config(tmp_path).model_dump()
+    data["processing"]["folder_images_num_threshold"] = value
+    with pytest.raises(ValidationError):
+        AppConfig.model_validate(data)
+
+
+def test_default_image_limit_is_sixty_and_custom_limit_is_loaded(tmp_path):
+    data = make_config(tmp_path).model_dump()
+    del data["processing"]["folder_images_num_threshold"]
+    assert AppConfig.model_validate(data).processing.folder_images_num_threshold == 60
+    data["processing"]["folder_images_num_threshold"] = 80
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(data))
+    assert load_config(path).processing.folder_images_num_threshold == 80
+
+
 def test_roots_cannot_overlap_and_inbox_is_never_output(tmp_path):
     data = make_config(tmp_path).model_dump()
     data["minifi"]["output_path"] = data["paths"]["watch_root"] + "/nested"

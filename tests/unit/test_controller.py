@@ -70,9 +70,10 @@ def test_fallback_does_not_wait_for_model_or_images(tmp_path, mode):
         assert runtime.calls == 0
 
 
-def test_csv_not_complete_never_produces_a_guessed_result(tmp_path):
+@pytest.mark.parametrize("images", [1, 61])
+def test_csv_not_complete_never_produces_a_guessed_result(tmp_path, images):
     config = make_config(tmp_path, inference_timeout=0.3)
-    source = write_job(config)
+    source = write_job(config, images=images)
     next(source.glob("*.csv")).write_text("broken\n1\n")
     job = run(Controller(config, FakeRuntime(), io_factory=AsyncTestIO))[source.name]
     assert job.status == "INPUT_FAILED" and codes(config) == []

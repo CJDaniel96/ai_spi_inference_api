@@ -374,6 +374,17 @@ class Controller:
                     job.csv_ready_at = time.time()
                     job.status = "CSV_READY"
                     self._save(job, "input.csv_ready")
+                if (
+                    job.csv_snapshot_folder
+                    and files.image_count
+                    > self.config.processing.folder_images_num_threshold
+                ):
+                    job.last_error = (
+                        f"Image count {files.image_count} exceeds configured limit "
+                        f"{self.config.processing.folder_images_num_threshold}"
+                    )
+                    await self._choose_fallback(job, "images_exceed_threshold")
+                    return False
                 if job.csv_snapshot_folder and images_stable:
                     validated = await call_io(
                         lane,

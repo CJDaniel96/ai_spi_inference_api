@@ -46,7 +46,7 @@ python -m app.main --config config/ai_server.json --once --date 2026-11-09
 |---|---|
 | identity | site、factory、line、station_id，供判定紀錄及 MiNiFi 使用 |
 | paths | SPI 輸入、SPI 回傳、不可變原始備份、本機工作狀態與獨立歷史紀錄根目錄 |
-| processing | 影像副檔名、名稱 template、穩定等待及輸入就緒等待上限 |
+| processing | 影像數上限、影像副檔名、名稱 template、穩定等待及輸入就緒等待上限 |
 | delivery | 每份 CSV 最多嘗試次數、重試間隔、單次回傳操作上限 |
 | runtime | 掃描、IO 子程序啟動、單次 IO、背景操作的監督時間與間隔 |
 | inference.obb | 權重、GPU、批次大小、暖機與單筆推論上限、各類別判定門檻 |
@@ -57,7 +57,7 @@ python -m app.main --config config/ai_server.json --once --date 2026-11-09
 
 設定啟動時載入及驗證一次，再傳給內部子程序；修改後重啟生效。每筆工作保存當時的設定快照。尚未回傳的工作若在設定變更後重啟，會停止機台回傳並標記 `configuration_changed`，不會用新模型或新目的地偷偷續跑。已回傳工作的背景匯出沿用原始設定快照。
 
-舊的 `reliability`、`processing.folder_images_num_threshold`、`runtime.max_active_jobs`、`server`、`model_clients`、`defect_rules`、`pipeline`、scanner 設定及獨立 `db_export.json`／`yolo_area.json` 已移除；未知設定會直接被拒絕。輸入、回傳、備份、狀態、歷史與 MiNiFi 目錄必須分開，不可互相包含。`state_root` 與 SQLite 應放在 AIPC 本機磁碟；SQLite 必須位於這六個資料目錄之外，預設放在獨立的 `records` 目錄。
+舊的 `reliability`、`runtime.max_active_jobs`、`server`、`model_clients`、`defect_rules`、`pipeline`、scanner 設定及獨立 `db_export.json`／`yolo_area.json` 已移除；未知設定會直接被拒絕。輸入、回傳、備份、狀態、歷史與 MiNiFi 目錄必須分開，不可互相包含。`state_root` 與 SQLite 應放在 AIPC 本機磁碟；SQLite 必須位於這六個資料目錄之外，預設放在獨立的 `records` 目錄。
 
 `paths.history_root` 為必填的獨立歷史位置，例如 `data/history` 或 `D:/AI_SPI/history`，不可設在備份或工作區內。更換此路徑前先停止程式，將既有歷史目錄完整搬到新位置；由舊版升級時，將 `backup_output_root/_history` 的內容移至新的 history_root，保留 `YYYY-MM-DD/job_id` 層級。只改設定而不搬紀錄，可能讓仍在輸入目錄的舊工作被重新接收。歷史 JSON 不必手動修改，統計會從新位置讀取同行的 manifest。
 
@@ -67,10 +67,18 @@ python -m app.main --config config/ai_server.json --once --date 2026-11-09
 
 1. 首次確認有 CSV 即登記為 `QUEUED`，保存本機事件；以首次觀測順序排隊，同時只處理一筆。模型先暖機，排隊與暖機等待不計入該筆處理耗時。
 2. 取出工作後記錄 `processing_started_at`；等 CSV／影像穩定，保存不可變 CSV 快照。影像名稱依 template 與原始字串組成，保留 `001` 等前導零；預設 `{csv_stem}_{component_name}_{Array_id}_{Pad_id}.jpg`。
-3. 驗證對應影像，串流複製並核對雜湊，在備份位置驗證可解碼，再允許推論。輸入就緒等待達上限且已有完整 CSV 時，以全 23 保護回傳；CSV 無法完整解析時標記 `INPUT_FAILED`，不捏造結果。
-4. 常駐 OBB 子程序依 `batch_size` 批次推論，超過 60 張仍正常推論。先判斷外觀，再依 CSV 每列的 volume、area、height、shift 門檻判定，見 `docs/sx_obb_inference.md`。模型失敗或單次推論逾時時以全 23 保護。
+3. 超過影像數上限時，保存完整 CSV 後直接全 23 回傳，原始影像改為背景備份。不超過上限時，驗證對應影像，串流複製並核對雜湊，在備份位置驗證可解碼，再允許推論。輸入就緒等待達上限且已有完整 CSV 時，以全 23 保護回傳；CSV 無法完整解析時標記 `INPUT_FAILED`，不捏造結果。
+4. 未超過上限的工作，由常駐 OBB 子程序依 `batch_size` 批次推論。先判斷外觀，再依 CSV 每列的 volume、area、height、shift 門檻判定，見 `docs/sx_obb_inference.md`。模型失敗或單次推論逾時時以全 23 保護。
 5. 選定並保存唯一結果，先產生完整 SPI 回傳 CSV 與 SHA-256，再逐份回傳。保留原檔名、欄位、編碼、列序及非 is_pass 值。重試只複製同一份已保存的結果，不重新推論。
 6. 全部 CSV 均達到成功、失敗或待確認狀態後，主流程立即處理下一筆。背景另外保存原始資料、回傳版、processed CSV、manifest 與 delivery.json。只有全部 CSV 確認回傳成功的工作才進入 MiNiFi 匯出。
+
+影像數上限由 `processing.folder_images_num_threshold` 設定，預設 **60**，須為正整數。以每筆工作資料夾中符合 `processing.image_extensions` 的實際影像總數判斷，同工作多份 CSV 合計；不以單一 CSV 列數計算。**嚴格大於**才跳過推論：60 張照常推論、61 張直接全 23。可在原有 processing 區塊調整：
+
+```json
+"folder_images_num_threshold": 60
+```
+
+超量工作的原因記錄為 `images_exceed_threshold`，保留實際數量及設定上限；回傳重試仍使用同一份全 23 結果。CSV 不完整時仍不捏造回傳。原始影像備份不阻擋這筆回傳，來源若已被 SPI 刪除，背景備份可能不完整，會在狀態中記錄。
 
 候選清單只是某一時間點的快照。主控在接收前透過受監督的 I/O 再次確認完成紀錄；登記時另同步確認記憶體中的工作、清理中工作與已結束 ID。清理在釋放工作前先保留當日已結束 ID，因此即使舊清單仍含該資料夾、或檔案檢查在清理完成後才回覆／逾時，也不會重新登記同一筆工作。完成紀錄檢查逾時時延後探索，不據此建立新工作。
 

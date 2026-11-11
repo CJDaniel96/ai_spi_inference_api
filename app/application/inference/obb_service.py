@@ -10,7 +10,7 @@ import time
 from dataclasses import replace
 from pathlib import Path
 
-from app.application.ingest.io import ping
+from app.application.ingest.io import inspect_source, ping
 from app.application.shared.fallback_result import FallbackResultBuilder
 from app.application.shared.result_artifacts import ResultArtifactWriter
 from app.core.config import AppConfig
@@ -140,6 +140,24 @@ class ObbInspectionService:
                 deadline_at=time.time()
                 + self._config.runtime.io_startup_timeout_seconds,
             )
+            # Also enforce the policy on an already verified backup restored
+            # after a restart, before loading inputs or invoking the model.
+            files, _, _ = await call_io(
+                lane,
+                inspect_source,
+                self._config.processing.image_extensions,
+                staged_folder,
+                deadline_at=time.time() + self._config.runtime.io_timeout_seconds,
+            )
+            limit = self._config.processing.folder_images_num_threshold
+            if files.image_count > limit:
+                return await operation(
+                    build_fallback,
+                    job_id,
+                    staged_folder,
+                    "images_exceed_threshold",
+                    f"Image count {files.image_count} exceeds configured limit {limit}",
+                )
             try:
                 _, frames, images = await operation(load_inputs, staged_folder)
             except (ValueError, CsvSchemaError) as exc:

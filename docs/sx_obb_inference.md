@@ -18,4 +18,4 @@
 
 processed CSV 保留逐列判定原因、門檻、原始與保留框資訊，以及模型／規則版本。SPI 回傳 CSV 只更新原始 is_pass（22 通過，23 不通過），保留欄位、編碼、列序與原始值。
 
-所有結果須經主控選定才可發布；晚到模型結果不覆蓋已選定的保護結果。超過 60 張仍依 batch_size 分批推論；只保留 inference.obb.inference_timeout_seconds 的單次操作上限。權重精度與批次效能需在 AIPC 驗證。
+所有結果須經主控選定才可發布；晚到模型結果不覆蓋已選定的保護結果。每筆工作資料夾的實際影像總數大於 processing.folder_images_num_threshold（預設 60）時，跳過推論並全 23 回傳，原因為 images_exceed_threshold；等於上限仍依 batch_size 分批推論。推論操作上限由 inference.obb.inference_timeout_seconds 設定。權重精度與批次效能需在 AIPC 驗證。

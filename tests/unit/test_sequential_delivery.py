@@ -1,6 +1,7 @@
 """Business flow: FIFO, fixed results, bounded attempts and durable recovery."""
 
 import asyncio
+import csv
 import errno
 import json
 import sqlite3
@@ -45,20 +46,77 @@ def test_fifo_queue_and_warmup_are_separate_from_processing_duration(tmp_path):
     assert not hasattr(a, "deadline_at")
 
 
-def test_more_than_sixty_images_are_inferred_without_bypass(tmp_path):
+@pytest.mark.parametrize(
+    "rows,limit,outcome",
+    [
+        (60, 60, "normal"),
+        (61, 60, "fallback"),
+        (2, 1, "fallback"),
+        (2, 2, "normal"),
+        (61, 70, "normal"),
+    ],
+)
+def test_image_limit_skips_inference_only_above_configured_value(
+    tmp_path, rows, limit, outcome
+):
     config = make_config(tmp_path)
-    source = write_job(config, rows=61)
-
-    class CountingRuntime(FakeRuntime):
-        async def infer(self, images, **kwargs):
-            self.image_count = len(images)
-            return await super().infer(images, **kwargs)
-
-    runtime = CountingRuntime()
+    config.processing.folder_images_num_threshold = limit
+    source = write_job(config, rows=rows)
+    runtime = FakeRuntime()
     job = run(Controller(config, runtime, io_factory=AsyncTestIO))[source.name]
     manifest = json.loads(Path(job.result_manifest_path).read_text())
-    assert job.status == "DONE" and runtime.image_count == 61
-    assert manifest["outcome"] == "normal" and manifest["counts"]["pass_count"] == 61
+    assert job.status == "DONE" and job.image_count == rows
+    assert manifest["outcome"] == outcome
+    assert runtime.calls == (1 if outcome == "normal" else 0)
+    assert manifest["counts"]["pass_count"] == (rows if outcome == "normal" else 0)
+    assert manifest["counts"]["fail_count"] == (0 if outcome == "normal" else rows)
+    if outcome == "fallback":
+        assert job.reason == "images_exceed_threshold"
+        assert str(limit) in job.last_error
+        assert job.inference_started_at is None
+    with next(Path(config.paths.external_output_root).glob("*.csv")).open(
+        encoding="utf-8-sig", newline=""
+    ) as handle:
+        assert [int(row["is_pass"]) for row in csv.DictReader(handle)] == [
+            22 if outcome == "normal" else 23
+        ] * rows
+
+
+def test_image_limit_bypasses_image_validation_and_archival_before_return(
+    tmp_path, monkeypatch
+):
+    import app.application.controller as module
+
+    config = make_config(tmp_path)
+    source = write_job(config, rows=61)
+    original_csv = next(source.glob("*.csv")).read_bytes()
+    for image in source.glob("*.jpg"):
+        image.write_bytes(b"undecodable image")
+
+    def unexpected(*args):
+        pytest.fail("Oversized jobs must not validate or archive images before return")
+
+    monkeypatch.setattr(module.ingest_io, "validate_source", unexpected)
+    monkeypatch.setattr(module.ingest_io, "archive_source", unexpected)
+    runtime = FakeRuntime()
+    job = run(Controller(config, runtime, io_factory=AsyncTestIO))[source.name]
+    assert job.status == "DONE" and job.reason == "images_exceed_threshold"
+    assert runtime.calls == 0 and job.image_backup_status == "complete"
+    backup = Path(job.original_backup_folder)
+    assert (backup / "raw" / f"{source.name}_board0.csv").read_bytes() == original_csv
+    assert len(list((backup / "raw").glob("*.jpg"))) == 61
+    assert (backup / "ai_result" / "returned" / f"{source.name}_board0.csv").is_file()
+
+
+def test_image_limit_applies_to_all_csvs_in_one_job(tmp_path):
+    config = make_config(tmp_path)
+    source = write_job(config, rows=31, csv_count=2)
+    runtime = FakeRuntime()
+    job = run(Controller(config, runtime, io_factory=AsyncTestIO))[source.name]
+    assert job.status == "DONE" and job.image_count == 62 and runtime.calls == 0
+    assert job.reason == "images_exceed_threshold" and len(job.publications) == 2
+    manifest = json.loads(Path(job.result_manifest_path).read_text())
+    assert all(item["result_codes"] == [23] * 31 for item in manifest["csv_results"])
 
 
 def test_retries_use_identical_frozen_bytes_and_record_each_attempt(

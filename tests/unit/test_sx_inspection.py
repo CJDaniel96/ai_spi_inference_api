@@ -493,3 +493,24 @@ def test_missing_csv_limit_uses_whole_job_fail_safe_without_excel_fallback(tmp_p
     assert manifest.outcome is PipelineOutcome.FALLBACK
     assert manifest.csv_results[0].result_codes == (23, 23)
     assert "limit" in manifest.errors[0]
+
+
+def test_saved_backup_above_image_limit_returns_all_23_without_loading_model_inputs(
+    tmp_path, monkeypatch
+):
+    import app.application.inference.obb_service as module
+
+    config, folder, service, runtime = service_case(tmp_path, [row(), row()])
+    config.processing.folder_images_num_threshold = 1
+
+    def unexpected(*args):
+        pytest.fail("An oversized saved backup must bypass inference input loading")
+
+    monkeypatch.setattr(module, "load_inputs", unexpected)
+    manifest, path = asyncio.run(
+        service.prepare(job_id=folder.name, staged_folder=folder)
+    )
+    assert manifest.outcome is PipelineOutcome.FALLBACK
+    assert manifest.reason == "images_exceed_threshold" and runtime.calls == 0
+    assert manifest.csv_results[0].result_codes == (23, 23)
+    assert PipelineResultManifest.read(path) == manifest

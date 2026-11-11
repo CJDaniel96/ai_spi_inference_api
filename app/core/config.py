@@ -38,6 +38,7 @@ class PathConfig(Settings):
 
 
 class ProcessingConfig(Settings):
+    folder_images_num_threshold: int = Field(default=60, gt=0)
     image_extensions: list[str] = Field(
         default_factory=lambda: [".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif"]
     )
