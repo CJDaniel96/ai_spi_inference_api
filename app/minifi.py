@@ -30,8 +30,7 @@ def convert_rows(
     job_id: str,
     source_name: str,
     settings: dict,
-    expected_codes: list[int] | None = None,
-    identity_key: str | None = None,
+    expected_codes: list[int],
 ) -> dict[str, list[dict]]:
     groups: dict[str, list[dict]] = {"NG": [], "OK": []}
     with source.open(encoding="utf-8-sig", newline="") as handle:
@@ -41,7 +40,7 @@ def convert_rows(
         if len(reader.fieldnames) != len(set(reader.fieldnames)):
             raise ValueError(f"Duplicate CSV columns: {source}")
         rows = list(reader)
-    if expected_codes is not None and len(rows) != len(expected_codes):
+    if len(rows) != len(expected_codes):
         raise ValueError(f"Manifest row count differs: {source}")
     for index, original in enumerate(rows):
         if None in original or any(value is None for value in original.values()):
@@ -52,7 +51,7 @@ def convert_rows(
         except InvalidOperation as exc:
             raise ValueError(f"Invalid is_pass at row {index}: {source}") from exc
         if code not in (Decimal(PASS_CODE), Decimal(FAIL_CODE)) or (
-            expected_codes is not None and code != expected_codes[index]
+            code != expected_codes[index]
         ):
             raise ValueError(
                 f"Invalid or inconsistent is_pass at row {index}: {source}"
@@ -68,7 +67,7 @@ def convert_rows(
                 settings["line"],
                 settings["station_id"],
                 job_id,
-                identity_key or source_name,
+                source_name,
                 index,
             ]
         )

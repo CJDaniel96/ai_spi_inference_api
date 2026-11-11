@@ -9,16 +9,13 @@ atomic rename so the machine cannot read a half-written result.
 from __future__ import annotations
 
 import csv
-import errno
 import io
 import os
 import tempfile
-import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from app.infrastructure.deadline_io import DeadlineExceeded
 from app.infrastructure.local_store import fsync_directory
 
 _ENCODING_CANDIDATES = ("utf-8", "cp950", "big5")
@@ -74,8 +71,6 @@ class SinicCsvOutput:
         self,
         source_csv: Path,
         result_codes: Sequence[int | str],
-        *,
-        deadline_at: float | None = None,
     ) -> MachineCsvWriteResult:
         """Return a source CSV with row-aligned result codes applied."""
         document = _read_document(source_csv)
@@ -107,7 +102,6 @@ class SinicCsvOutput:
             fieldnames=fieldnames,
             rows=rows,
             document=document,
-            deadline_at=deadline_at,
         )
         return MachineCsvWriteResult(
             source_csv=source_csv,
@@ -167,10 +161,7 @@ def _atomic_write_document(
     fieldnames: list[str],
     rows: list[dict[str, str]],
     document: _CsvDocument,
-    deadline_at: float | None = None,
 ) -> None:
-    if deadline_at is not None and time.time() >= deadline_at:
-        raise DeadlineExceeded("CSV publication deadline reached")
     destination.parent.mkdir(parents=True, exist_ok=True)
     fd, temp_name = tempfile.mkstemp(
         dir=destination.parent,
@@ -194,22 +185,8 @@ def _atomic_write_document(
             writer.writerows(rows)
             destination_file.flush()
             os.fsync(destination_file.fileno())
-        if deadline_at is not None and time.time() >= deadline_at:
-            raise DeadlineExceeded("CSV publication deadline reached before rename")
-        try:
-            os.replace(temp_path, destination)
-            if deadline_at is None:
-                fsync_directory(destination.parent)
-        except OSError as exc:
-            if deadline_at is not None and exc.errno not in {
-                errno.ENOSPC,
-                errno.EACCES,
-                errno.EPERM,
-                errno.EBUSY,
-                errno.EEXIST,
-            }:
-                raise PublishCompletionUnknown(str(exc)) from exc
-            raise
+        os.replace(temp_path, destination)
+        fsync_directory(destination.parent)
     except Exception:
         temp_path.unlink(missing_ok=True)
         raise

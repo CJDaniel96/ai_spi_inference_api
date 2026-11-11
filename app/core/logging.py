@@ -20,20 +20,10 @@ _MAX_BYTES = 5 * 1024 * 1024
 _BACKUP_COUNT = 3
 
 
-def _project_root() -> Path:
-    """Return the repository root (the directory containing ``app/``)."""
-    return Path(__file__).resolve().parents[2]
-
-
-def default_log_dir() -> Path:
-    """Return the default log directory (``<project_root>/log``)."""
-    return _project_root() / "log"
-
-
 def setup_logging(
-    log_dir: Path | None = None,
+    log_dir: Path,
     *,
-    system_log_file: str = "system",
+    system_log_file: str,
     level: int = logging.INFO,
 ) -> logging.Logger:
     """Configure and return the application system logger.
@@ -43,8 +33,8 @@ def setup_logging(
     the logger already has handlers it is returned unchanged.
 
     Args:
-        log_dir: Directory for log files. Defaults to ``<project_root>/log``.
-        system_log_file: Filename for the system log within ``log_dir``.
+        log_dir: Resolved directory from the application configuration.
+        system_log_file: Configured filename within ``log_dir``.
         level: Logging level for the logger and its handlers.
 
     Returns:
@@ -55,9 +45,8 @@ def setup_logging(
         return logger
     logger.setLevel(level)
 
-    target_dir = log_dir or default_log_dir()
-    target_dir.mkdir(parents=True, exist_ok=True)
-    log_path = target_dir / system_log_file
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / system_log_file
 
     formatter = logging.Formatter(fmt=_LOG_FORMAT, datefmt=_DATE_FORMAT)
 

@@ -9,14 +9,6 @@ class ConfigError(AppError):
     pass
 
 
-class JobFolderNotFoundError(AppError):
-    pass
-
-
-class CsvFileNotFoundError(AppError):
-    pass
-
-
 class CsvSchemaError(AppError, ValueError):
     pass
 

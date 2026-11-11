@@ -1,6 +1,6 @@
 """Shared model-format and accelerator selection helpers.
 
-The HTTP services accept model artifacts from several runtimes.  Keeping the
+The native OBB backend accepts model artifacts from several runtimes. Keeping the
 format/device validation here makes startup fail clearly instead of allowing a
 backend to silently fall back from CUDA to CPU.
 """

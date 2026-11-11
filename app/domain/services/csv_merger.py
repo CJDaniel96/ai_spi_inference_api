@@ -25,12 +25,8 @@ def _image_key_part(value: Any) -> str:
 
 
 class CsvMerger:
-    def add_image_name_column(self, df, *, template: str, csv_stem: str):
-        return self._add_from_template(df, template=template, csv_stem=csv_stem)
-
-    @staticmethod
-    def _add_from_template(
-        df: pd.DataFrame, *, template: str, csv_stem: str | None
+    def add_image_name_column(
+        self, df: pd.DataFrame, *, template: str, csv_stem: str
     ) -> pd.DataFrame:
         """Build ``img_name`` from ``csv_stem`` and configured CSV columns."""
         formatter = string.Formatter()

@@ -1,1 +1,1 @@
-"""Infrastructure layer: adapters for HTTP, filesystem, and output I/O."""
+"""Local state, filesystem IO and supervised model-process adapters."""

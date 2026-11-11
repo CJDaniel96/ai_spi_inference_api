@@ -21,10 +21,8 @@ from app.domain.services.component_judge import RULE_ORDER, ComponentJudge
 from app.domain.services.csv_merger import CsvMerger
 from app.infrastructure.async_io import call_io
 from app.infrastructure.deadline_io import DeadlineIO
+from app.infrastructure.input.sinic_folder_input import SinicFolderInput
 from app.infrastructure.repositories.csv_repository import CsvRepository
-from app.infrastructure.repositories.file_system_job_repository import (
-    FileSystemJobRepository,
-)
 
 
 class ObbInspectionService:
@@ -56,7 +54,7 @@ class ObbInspectionService:
         self._version = hashlib.sha256(
             json.dumps(definition, sort_keys=True).encode("utf-8")
         ).hexdigest()
-        self._jobs = FileSystemJobRepository(config.processing.image_extensions)
+        self._input = SinicFolderInput(config.processing.image_extensions)
         self._csv = CsvRepository()
         self._merger = CsvMerger()
         self._artifacts = ResultArtifactWriter(result_root)
@@ -78,10 +76,12 @@ class ObbInspectionService:
         }
 
     def _inputs(self, folder: Path):
-        job = self._jobs.load(str(folder))
+        files = self._input.load(folder)
+        if not files.csv_files:
+            raise CsvSchemaError(f"No CSV files found in folder: {folder}")
         frames = []
         images = {}
-        for source in job.csv_files:
+        for source in files.csv_files:
             frame = self._merger.add_image_name_column(
                 self._csv.read_for_output(source),
                 template=self._config.processing.image_name_template,
@@ -104,7 +104,7 @@ class ObbInspectionService:
                     )
                 images[key] = str(image)
             frames.append((source, frame))
-        return job, frames, images
+        return frames, images
 
     @staticmethod
     def _validate_result(result: ObbBatchResult, images: dict) -> None:
@@ -159,7 +159,7 @@ class ObbInspectionService:
                     f"Image count {files.image_count} exceeds configured limit {limit}",
                 )
             try:
-                _, frames, images = await operation(load_inputs, staged_folder)
+                frames, images = await operation(load_inputs, staged_folder)
             except (ValueError, CsvSchemaError) as exc:
                 return await operation(
                     build_fallback, job_id, staged_folder, "invalid_input", str(exc)
