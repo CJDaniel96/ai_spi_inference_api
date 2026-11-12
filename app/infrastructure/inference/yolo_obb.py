@@ -108,11 +108,22 @@ class YoloObbModel:
                 raise TimeoutError("OBB deadline reached before a batch")
             batch_items = items[offset : offset + self._batch_size]
             decoded = []
+            crop_offsets = []
             for _key, path in batch_items:
                 image = cv2.imread(path)
                 if image is None:
                     raise ValueError(f"OBB cannot decode image: {path}")
-                decoded.append(image)
+                height, width = image.shape[:2]
+                crop_width = max(1, int(width * self._settings.center_crop_ratio))
+                crop_height = max(1, int(height * self._settings.center_crop_ratio))
+                left = (width - crop_width) // 2
+                top = (height - crop_height) // 2
+                decoded.append(
+                    np.ascontiguousarray(
+                        image[top : top + crop_height, left : left + crop_width]
+                    )
+                )
+                crop_offsets.append((left, top))
             count = len(decoded)
             if self._fixed_batch and count < self._batch_size:
                 black = np.zeros_like(decoded[0])
@@ -122,8 +133,8 @@ class YoloObbModel:
                 raise TimeoutError("OBB batch completed after the deadline")
             if len(predictions) != len(decoded):
                 raise ValueError("OBB returned an incomplete batch")
-            for (key, _path), result in zip(
-                batch_items, predictions[:count], strict=True
+            for (key, _path), result, (left, top) in zip(
+                batch_items, predictions[:count], crop_offsets, strict=True
             ):
                 boxes = result.obb
                 if boxes is None:
@@ -135,11 +146,12 @@ class YoloObbModel:
                     )
                 scores = boxes.conf.cpu().numpy().tolist()
                 polygons = boxes.xyxyxyxy.cpu().numpy().tolist()
+                # Restore crop-relative detections to the full-image origin.
                 output[key] = tuple(
                     ObbDetection(
                         canonical_obb_class_name(result.names[int(class_id)]),
                         float(score),
-                        tuple(tuple(float(v) for v in point) for point in polygon),
+                        tuple((float(x) + left, float(y) + top) for x, y in polygon),
                     )
                     for class_id, score, polygon in zip(
                         classes, scores, polygons, strict=True

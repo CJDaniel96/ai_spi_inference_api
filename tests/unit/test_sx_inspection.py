@@ -511,3 +511,49 @@ def test_saved_backup_above_image_limit_returns_all_23_without_loading_model_inp
     assert manifest.reason == "images_exceed_threshold" and runtime.calls == 0
     assert manifest.csv_results[0].result_codes == (23, 23)
     assert PipelineResultManifest.read(path) == manifest
+
+
+@pytest.mark.parametrize("error", [None, RuntimeError("model unavailable")])
+def test_result_metadata_records_crop_ratio_for_normal_and_protection_results(
+    tmp_path, error
+):
+    config, folder, service, _runtime = service_case(
+        tmp_path, [row()], FakeRuntime(error=error)
+    )
+    manifest, path = asyncio.run(
+        service.prepare(job_id=folder.name, staged_folder=folder)
+    )
+    assert manifest.inspection_metadata["preprocessing"] == {
+        "center_crop_ratio": config.inference.obb.center_crop_ratio,
+        "crop_size_rounding": "floor_min_1",
+        "crop_alignment": "center_floor",
+        "obb_coordinate_space": "original_image",
+    }
+    assert (
+        PipelineResultManifest.read(path).inspection_metadata
+        == manifest.inspection_metadata
+    )
+
+
+def test_different_crop_ratios_produce_distinct_rule_versions(tmp_path):
+    config, folder, cropped, _runtime = service_case(tmp_path, [row()])
+    config = config.model_copy(deep=True)
+    config.inference.obb.center_crop_ratio = 1.0
+    full = ObbInspectionService(
+        config=config,
+        result_root=tmp_path / "full-results",
+        runtime=FakeRuntime(),
+        io_factory=AsyncTestIO,
+    )
+    cropped_result, _ = asyncio.run(
+        cropped.prepare(job_id=folder.name, staged_folder=folder)
+    )
+    full_result, _ = asyncio.run(full.prepare(job_id=folder.name, staged_folder=folder))
+    assert (
+        cropped_result.inspection_metadata["preprocessing"]["center_crop_ratio"] == 0.6
+    )
+    assert full_result.inspection_metadata["preprocessing"]["center_crop_ratio"] == 1.0
+    assert (
+        cropped_result.inspection_metadata["rule_version"]
+        != full_result.inspection_metadata["rule_version"]
+    )

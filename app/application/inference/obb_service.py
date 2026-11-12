@@ -44,12 +44,19 @@ class ObbInspectionService:
         self._thresholds = dict(config.inference.obb.class_thresholds)
         self._judge = ComponentJudge(self._thresholds)
         self._policy = self._judge.policy_definition()
+        self._preprocessing = {
+            "center_crop_ratio": config.inference.obb.center_crop_ratio,
+            "crop_size_rounding": "floor_min_1",
+            "crop_alignment": "center_floor",
+            "obb_coordinate_space": "original_image",
+        }
         definition = {
             "site_id": self._site_id,
             "policy": self._policy,
             "rule_order": list(RULE_ORDER),
             "class_thresholds": self._thresholds,
             "model_conf": config.inference.obb.conf,
+            "preprocessing": self._preprocessing,
         }
         self._version = hashlib.sha256(
             json.dumps(definition, sort_keys=True).encode("utf-8")
@@ -71,6 +78,7 @@ class ObbInspectionService:
             "rule_order": list(RULE_ORDER),
             "class_thresholds": self._thresholds,
             "model_conf": self._config.inference.obb.conf,
+            "preprocessing": self._preprocessing,
             "model_version": result.model_version if result else None,
             "device": result.device if result else self._config.inference.obb.device,
         }

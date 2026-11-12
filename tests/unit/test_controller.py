@@ -50,9 +50,7 @@ def test_existing_old_date_csv_is_processed_backed_up_marked_and_exported(tmp_pa
     assert not original_path.exists()
     marker = source / f"{original_path.stem}_DONE.csv"
     assert marker.read_bytes() == original
-    assert (
-        Path(job.original_backup_folder) / original_path.name
-    ).read_bytes() == original
+    assert (Path(job.backup_folder) / original_path.name).read_bytes() == original
     assert job.export_status == "complete"
     assert len(list(Path(config.minifi.output_path).rglob("*.csv"))) == 2
     report = json.loads(
@@ -727,3 +725,21 @@ def test_same_folder_waits_for_pending_export_while_other_folders_continue(
                 await task
 
     asyncio.run(exercise())
+
+
+def test_crop_setting_is_recorded_while_backup_keeps_full_original_image(tmp_path):
+    import cv2
+
+    config = make_config(tmp_path)
+    config.inference.obb.center_crop_ratio = 0.6
+    source = write_job(config)
+    image = next(source.glob("*.jpg"))
+    original = image.read_bytes()
+    job = run_once(config)[0][0]
+    backup_image = Path(job.backup_folder) / image.name
+    assert backup_image.read_bytes() == image.read_bytes() == original
+    assert cv2.imread(str(backup_image)).shape[:2] == (4, 5)
+    report = json.loads((Path(job.backup_folder) / "ai_result/run.json").read_text())
+    assert report["config_snapshot"]["inference"]["obb"]["center_crop_ratio"] == 0.6
+    manifest = json.loads(Path(job.result_manifest_path).read_text())
+    assert manifest["inspection_metadata"]["preprocessing"]["center_crop_ratio"] == 0.6

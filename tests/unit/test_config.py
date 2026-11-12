@@ -93,3 +93,23 @@ def test_removed_recovery_roots_are_rejected(tmp_path, key):
     data["paths"][key] = str(tmp_path / "obsolete")
     with pytest.raises(ValidationError, match="Extra inputs"):
         AppConfig.model_validate(data)
+
+
+@pytest.mark.parametrize(
+    "value", [0, -0.1, 1.01, float("nan"), float("inf"), float("-inf"), None, "bad"]
+)
+def test_center_crop_ratio_rejects_invalid_settings(tmp_path, value):
+    data = make_config(tmp_path).model_dump()
+    data["inference"]["obb"]["center_crop_ratio"] = value
+    with pytest.raises(ValidationError, match="center_crop_ratio"):
+        AppConfig.model_validate(data)
+
+
+def test_center_crop_defaults_to_full_image_and_loads_custom_ratio(tmp_path):
+    data = make_config(tmp_path).model_dump()
+    del data["inference"]["obb"]["center_crop_ratio"]
+    assert AppConfig.model_validate(data).inference.obb.center_crop_ratio == 1.0
+    data["inference"]["obb"]["center_crop_ratio"] = 0.6
+    path = tmp_path / "crop.json"
+    path.write_text(json.dumps(data))
+    assert load_config(path).inference.obb.center_crop_ratio == 0.6

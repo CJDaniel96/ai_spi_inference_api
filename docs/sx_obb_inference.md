@@ -2,6 +2,10 @@
 
 單一主控使用常駐模型子程序執行七類 OBB：Solder_Paste、Stain、Missing、Insufficient、Slump、Foreign_object、Bridge。
 
+推論前依 `inference.obb.center_crop_ratio` 取原圖中心區域：`0.6` 保留原寬與原高各 60%，`1.0` 不裁切，省略欄位預設 `1.0`。尺寸取整數捨去且至少為 1 像素，起點取 `(原尺寸 - 裁切尺寸) // 2`。裁切後才送入 YOLO，三種模型格式共用相同前處理；備份仍保留完整原圖。
+
+OBB 多邊形的每個點會加回該影像的裁切偏移，因此 processed CSV 內的 `obb_raw_detections` 與 `obb_retained_detections` 使用原始完整影像的像素座標。manifest 的 `inspection_metadata.preprocessing` 記錄比例、取整方式與座標空間，前處理設定也納入規則版本。
+
 模型先使用 inference.obb.conf 過濾候選框，再使用 class_thresholds 的各類別門檻過濾。門檻必須不小於模型 conf，避免已在模型端丟棄的框無法恢復。通過外觀必須恰好一個合格 Solder_Paste，且沒有任何合格 NG 框。
 
 固定判定順序為外觀、volume、area、height、shift。數值規則直接讀取 CSV 每列的門檻；沒有 component 特例或另一組 config 門檻。

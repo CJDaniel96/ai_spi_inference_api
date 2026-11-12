@@ -28,6 +28,7 @@ def _serve(connection: Connection, settings: ObbConfig, model_factory) -> None:
                     {
                         "model_version": model.model_version,
                         "device": model.device,
+                        "center_crop_ratio": settings.center_crop_ratio,
                     },
                 )
             )

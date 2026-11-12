@@ -51,10 +51,6 @@ class InspectionRun:
     def inference_folder(self):
         return str(Path(self.workspace_folder) / self.job_id)
 
-    @property
-    def original_backup_folder(self):
-        return self.backup_folder
-
 
 def write_report(run: InspectionRun):
     snapshot = asdict(run)

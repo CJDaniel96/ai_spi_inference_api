@@ -309,3 +309,113 @@ def test_onnx_input_declares_fixed_or_dynamic_batch(monkeypatch, tmp_path, batch
         sys.modules, "onnx", SimpleNamespace(load=lambda *args, **kwargs: model)
     )
     assert yolo_obb._onnx_fixed_batch(tmp_path / "model.onnx") == (batch or None)
+
+
+class RecordingYolo(FakeYolo):
+    def __init__(self):
+        super().__init__()
+        self.input_batches = []
+
+    def predict(self, *, source, **kwargs):
+        self.input_batches.append([image.copy() for image in source])
+        return super().predict(source=source, **kwargs)
+
+
+@pytest.fixture
+def crop_model(tmp_path, monkeypatch):
+    def make(suffix, onnx_batch, ratio):
+        path = tmp_path / f"crop-model{suffix}"
+        path.write_bytes(b"fake exported weights")
+        fake = RecordingYolo()
+        monkeypatch.setattr(yolo_obb, "_onnx_fixed_batch", lambda path: onnx_batch)
+        monkeypatch.setitem(
+            sys.modules, "ultralytics", SimpleNamespace(YOLO=lambda *a, **kw: fake)
+        )
+        monkeypatch.setitem(
+            sys.modules,
+            "onnxruntime",
+            SimpleNamespace(get_available_providers=lambda: ["CPUExecutionProvider"]),
+        )
+        settings = ObbConfig(
+            model_path=str(path),
+            device="cuda:0" if suffix == ".engine" else "cpu",
+            batch_size=2,
+            center_crop_ratio=ratio,
+        )
+        model = YoloObbModel(settings)
+        fake.input_batches.clear()
+        fake.calls.clear()
+        return model, fake
+
+    return make
+
+
+@pytest.mark.parametrize(
+    "suffix,onnx_batch",
+    [(".pt", None), (".onnx", None), (".onnx", 2), (".engine", None)],
+)
+@pytest.mark.parametrize(
+    "shape,ratio,bounds",
+    [
+        ((8, 10), 0.6, (2, 2, 8, 6)),
+        ((7, 9), 0.6, (2, 1, 7, 5)),
+        ((9, 7), 0.6, (1, 2, 5, 7)),
+        ((1, 3), 0.01, (1, 0, 2, 1)),
+        ((800, 1000), 0.6, (200, 160, 800, 640)),
+        ((7, 9), 1.0, (0, 0, 9, 7)),
+    ],
+)
+def test_center_crop_pixels_and_original_coordinate_restoration(
+    tmp_path, crop_model, suffix, onnx_batch, shape, ratio, bounds
+):
+    model, fake = crop_model(suffix, onnx_batch, ratio)
+    height, width = shape
+    pixels = (
+        (np.arange(height * width * 3, dtype=np.uint32) % 251)
+        .astype(np.uint8)
+        .reshape(height, width, 3)
+    )
+    path = tmp_path / "original.png"
+    assert cv2.imwrite(str(path), pixels)
+    original = path.read_bytes()
+    result = model.infer({path.name: str(path)}, time.time() + 5)
+    left, top, right, bottom = bounds
+    actual = fake.input_batches[0][0]
+    assert actual.shape == (bottom - top, right - left, 3)
+    np.testing.assert_array_equal(actual, pixels[top:bottom, left:right])
+    assert result.results[path.name][0].polygon == tuple(
+        (x + left, y + top) for x, y in POLYGON
+    )
+    assert path.read_bytes() == original
+    assert set(result.results) == {path.name}
+
+
+@pytest.mark.parametrize(
+    "suffix,onnx_batch",
+    [(".pt", None), (".onnx", None), (".onnx", 2), (".engine", None)],
+)
+def test_center_crop_offsets_are_per_image_and_padded_tail_is_discarded(
+    tmp_path, crop_model, suffix, onnx_batch
+):
+    model, fake = crop_model(suffix, onnx_batch, 0.6)
+    shapes = [(8, 10), (10, 20), (20, 8)]
+    offsets = [(2, 2), (4, 2), (2, 4)]
+    images = {}
+    for index, (height, width) in enumerate(shapes):
+        path = tmp_path / f"image{index}.png"
+        assert cv2.imwrite(
+            str(path), np.full((height, width, 3), index + 1, dtype=np.uint8)
+        )
+        images[path.name] = str(path)
+    result = model.infer(images, time.time() + 5)
+    assert set(result.results) == set(images)
+    for name, (left, top) in zip(images, offsets, strict=True):
+        assert result.results[name][0].polygon == tuple(
+            (x + left, y + top) for x, y in POLYGON
+        )
+    fixed = suffix == ".engine" or onnx_batch is not None
+    assert [len(batch) for batch in fake.input_batches] == ([2, 2] if fixed else [2, 1])
+    assert [image.shape[:2] for image in fake.input_batches[0]] == [(4, 6), (6, 12)]
+    assert fake.input_batches[1][0].shape[:2] == (12, 4)
+    if fixed:
+        assert np.count_nonzero(fake.input_batches[1][1]) == 0
