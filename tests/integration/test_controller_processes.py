@@ -93,7 +93,7 @@ def test_cli_without_model_returns_protection_result_and_uses_one_config(tmp_pat
         timeout=30,
     )
     assert result.returncode == 0, result.stderr
-    report = next(Path(config.paths.backup_output_root).glob("*/*/*/run.json"))
+    report = next(Path(config.paths.backup_output_root).glob("*/*/ai_result/run.json"))
     state = json.loads(report.read_text())
     assert state["status"] == "DONE"
     assert len(list(source.glob("*_DONE.csv"))) == 1
@@ -106,7 +106,10 @@ def test_cli_without_model_returns_protection_result_and_uses_one_config(tmp_pat
     assert repeated.returncode == 0, repeated.stderr
     assert not list(Path(config.paths.external_output_root).rglob("*.csv"))
     assert not list(Path(config.minifi.output_path).rglob("*.csv"))
-    assert len(list(Path(config.paths.backup_output_root).glob("*/*/*/run.json"))) == 1
+    assert (
+        len(list(Path(config.paths.backup_output_root).glob("*/*/ai_result/run.json")))
+        == 1
+    )
 
 
 def test_cli_config_check_does_not_load_model_libraries(tmp_path):

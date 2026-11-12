@@ -16,6 +16,7 @@ class InspectionRun:
     csv_names: tuple[str, ...]
     first_seen_at: float
     config_snapshot: dict
+    workspace_folder: str = ""
     source_signatures: dict = field(default_factory=dict)
     status: str = "QUEUED"
     reason: str | None = None
@@ -44,11 +45,15 @@ class InspectionRun:
 
     @property
     def csv_snapshot_folder(self):
-        return str(Path(self.backup_folder) / "input_csv")
+        return str(Path(self.workspace_folder) / "csv")
+
+    @property
+    def inference_folder(self):
+        return str(Path(self.workspace_folder) / self.job_id)
 
     @property
     def original_backup_folder(self):
-        return str(Path(self.backup_folder) / "raw")
+        return self.backup_folder
 
 
 def write_report(run: InspectionRun):
@@ -59,4 +64,4 @@ def write_report(run: InspectionRun):
         for key, value in snapshot.items()
         if key.endswith("_at") and isinstance(value, (int, float))
     }
-    atomic_json(Path(run.backup_folder) / "run.json", snapshot)
+    atomic_json(Path(run.backup_folder) / "ai_result" / "run.json", snapshot)

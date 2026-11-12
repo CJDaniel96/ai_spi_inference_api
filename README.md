@@ -41,7 +41,7 @@ app/minifi.py                       # 結果轉為 MiNiFi CSV
 - **所有沒有 `_DONE` 後綴的 CSV 都是待處理資料，包含啟動前既有的檔案及舊日期資料。** 沒有啟動略過清單，也不會查詢備份或 JSON 來排除工作。
 - `abc.csv` 成功回傳後，來源改為 **`abc_DONE.csv`**。`_DONE` 大小寫不敏感；CSV 副檔名保留。`abc_DONE1.csv` 不是完成標記。
 - 同資料夾多份 CSV 逐份回傳、逐份標記；只讀取本次認領的 CSV，後來新增的 CSV 留給下一批。
-- 手動將 `abc_DONE.csv` 改回 `abc.csv` 即可重跑，可以在程式運行中或停機時操作。重跑會建立全新的備份，不覆寫前次結果。
+- 手動將 `abc_DONE.csv` 改回 `abc.csv` 即可重跑，可以在程式運行中或停機時操作。重跑會重用相同內容的平鋪原始備份，並更新 `ai_result` 中該份 CSV 的最新結果。原始檔內容不同時報錯，不覆寫既有原始備份。
 - 掃描操作失敗會記錄警告並稍後重掃。`discovery_timeout_seconds` 是單次目錄讀取操作上限，並非等待機台產生資料的期限。正常一輪掃描結束後，依 `scan_interval_seconds` 再掃一次。
 
 來源共享目錄需要讀取及改名權限。輸入內 CSV／影像的名稱對應規則維持原契約，來源改成 `_DONE` 不會更改回傳 CSV 的原檔名。
@@ -72,7 +72,7 @@ app/minifi.py                       # 結果轉為 MiNiFi CSV
 4. OBB 外觀判斷後，再以原 CSV 每列的 volume、area、height、shift 門檻判定，見 [判定規則](docs/sx_obb_inference.md)。
 5. 固定並備份本次結果與 SPI 回傳 CSV，逐份回傳。回傳只更新原 CSV 的 is_pass，保留檔名、欄位、編碼、列序及其他值。重試只複製同一份固定結果，不重新推論。
 6. 確認某份 CSV 回傳成功後，核對來源內容仍與本次快照相同，再改成 `_DONE.csv`。已有同名完成檔時不覆寫。來源已變動、改名權限不足等狀況寫入 JSON 與日誌；本次運行只重試改名，不重送已確認回傳的結果。
-7. 將已確認回傳的逐份結果轉為 MiNiFi CSV。部分回傳成功時，成功的 CSV 仍可獨立匯出。匯出失敗在本次運行內重試，讀取固定備份，不重新推論或回傳。
+7. 將已確認回傳的逐份結果轉為 MiNiFi CSV。同一時間戳資料夾若仍有待改名或待匯出的結果，先完成收尾再接收下一批；其他資料夾繼續處理。部分回傳成功時，成功的 CSV 仍可獨立匯出。匯出失敗在本次運行內重試，讀取固定備份，不重新推論或回傳。
 
 `processing.folder_images_num_threshold` 預設 **60**，以整個來源工作資料夾符合副檔名的實際影像數判斷。60 張照常推論，61 張直接全 23。完整 CSV 等不到影像、模型失敗或推論逾時也使用全 23 保護結果；這些結果確認回傳後同樣標記 `_DONE`，原因保存在 JSON。無法完整解析 CSV 時不捏造結果、不標記完成。保護結果的影像備份為盡力保存，若不完整會記錄 `image_backup_status=incomplete`。
 
@@ -114,18 +114,19 @@ app/minifi.py                       # 結果轉為 MiNiFi CSV
 
 ```text
 backup_output_root/
-  YYYY-MM-DD/job_id/run_id/
-    run.json                   # 階段時間、耗時、設定、原因與逐份回傳／改名紀錄
-    input_csv/                 # 本次選定的不可變原始 CSV
-    raw/                       # 原始 CSV 與影像備份
+  YYYY-MM-DD/job_id/
+    board.csv                  # 原始 CSV，維持原檔名與內容
+    board_J001_001_0.jpg        # 原始影像直接平鋪
+    board_J001_001_1.jpg
     ai_result/
-      manifest.json            # 模型資訊、逐列結果與本次 run_id
-      returned/                # 固定 SPI 回傳內容
+      run.json                 # 最近一批的階段時間、設定、回傳與改名紀錄
+      manifest.json            # 最近一批的模型資訊、逐列結果與 run_id
+      returned/                # 各 CSV 最新的固定 SPI 回傳內容
       processed/               # 待匯出的 processed CSV
       exported/                # 已整理成 MiNiFi 格式的 processed CSV 備份
 ```
 
-每次重跑都有新的 run_id。`run.json` 記錄首次發現、開始處理、CSV 就緒、原始備份起訖、推論起訖、結果就緒、逐份回傳嘗試／完成、來源改名與 MiNiFi 匯出起訖。時間同時提供 epoch 秒與台灣時間 ISO 字串；JSON 透過暫存檔與原子替換更新。
+每次重跑仍有新的 run_id，僅保存在 JSON 欄位，不新增 run_id、input_csv 或 raw 資料夾。CSV 快照與本次推論使用的資料放在系統暫存區，完成後清除；備份時間戳資料夾只平鋪原始 CSV、影像與 ai_result。`ai_result/run.json` 與 manifest 保存最近一批處理紀錄，該批 CSV 的 returned／processed／exported 更新為最新結果，其他 CSV 的結果保留。`run.json` 記錄首次發現、開始處理、CSV 就緒、原始備份起訖、推論起訖、結果就緒、逐份回傳嘗試／完成、來源改名與 MiNiFi 匯出起訖。時間同時提供 epoch 秒與台灣時間 ISO 字串；JSON 透過暫存檔與原子替換更新。
 
 MiNiFi 只收集輸出目錄中的 `*.csv`，忽略 `.tmp`。同一次執行重試使用穩定 UUID，手動重跑使用新的 run_id／UUID 與輸出名稱。NG 中沒有缺陷名稱的全 23 保護列標記 `AI_SKIP`。部分輸出失敗後重試可能再次輸出已被收走的 CSV，下游應依 UUID 去重／upsert。
 
@@ -136,11 +137,11 @@ spi_statistics.bat --output reports
 spi_statistics.bat --date 2026-11-09 --output reports
 ```
 
-輸出 jobs.csv、deliveries.csv、summary.csv；同一 job 重跑分成不同 run_id，日期以 AI 首次觀測的台灣日期篩選。工具不會改動來源、執行推論或回傳。
+輸出 jobs.csv、deliveries.csv、summary.csv；每個時間戳資料夾只統計目前 run.json 中最近一批的紀錄，不累積先前重跑歷史；日期以該批 AI 首次觀測的台灣日期篩選。工具不會改動來源、執行推論或回傳。
 
 ## 舊版本切換
 
-停止舊程式，換成新版設定並移除 database、state_root、history_root 與 minifi.poll_seconds。舊 SQLite、state/history 及既有備份可留存查閱，新版不會讀取或刪除它們。
+停止舊程式，換成新版設定並移除 database、state_root、history_root 與 minifi.poll_seconds。舊 SQLite、state/history 及既有備份可留存查閱，新版不會刪除它們。先前使用 run_id/input_csv/raw 的備份不會自動搬移；後續處理使用新的平鋪結構。
 
 **舊版已完成但來源仍沒有 `_DONE` 的 CSV，新版會再次處理。** 切換前需核對並將不需重跑的來源改成 `_DONE.csv`。來源不需重跑時，不能只依舊版歷史紀錄判斷新版會自動略過。
 

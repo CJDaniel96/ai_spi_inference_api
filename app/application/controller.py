@@ -16,6 +16,7 @@ from pathlib import Path
 from app.application.inference.obb_service import ObbInspectionService, build_fallback
 from app.application.ingest import io as ingest_io
 from app.application.ingest.service import (
+    IngestCollisionError,
     IngestStorageError,
     IngestValidationError,
     SourceChangedError,
@@ -137,7 +138,10 @@ class Controller:
                 if key[0] not in folders:
                     del self._deferred[key]
             for folder in folders:
-                if folder in self._busy_folders:
+                if folder in self._busy_folders or any(
+                    run.source_folder == str(folder)
+                    for run in self._background_runs.values()
+                ):
                     continue
                 _, signatures, _ = await self._io(
                     lane,
@@ -167,7 +171,6 @@ class Controller:
                     Path(self.config.paths.backup_output_root)
                     / datetime.strptime(folder.name, "%Y%m%d%H%M%S").date().isoformat()
                     / folder.name
-                    / run_id
                 )
                 run = InspectionRun(
                     folder.name,
@@ -177,6 +180,7 @@ class Controller:
                     tuple(names),
                     time.time(),
                     self.config.model_dump(),
+                    workspace_folder=str(self.artifacts / run_id),
                     source_signatures={name: current[name] for name in names},
                     export_status="pending"
                     if self.config.minifi.enabled
@@ -253,6 +257,13 @@ class Controller:
                     run.source_signatures = {
                         signature[0]: signature for signature in csv_sig
                     }
+                    await self._io(
+                        lane,
+                        ingest_io.preserve_flat,
+                        Path(run.csv_snapshot_folder),
+                        Path(run.backup_folder),
+                        self.config.processing.image_extensions,
+                    )
                     run.status = "CSV_READY"
                     await self._save(run, lane, "input.csv_ready")
                 if (
@@ -278,8 +289,9 @@ class Controller:
                         ingest_io.archive_source,
                         self.config,
                         validated,
-                        Path(run.original_backup_folder),
+                        Path(run.inference_folder),
                         Path(run.csv_snapshot_folder),
+                        backup_folder=Path(run.backup_folder),
                     )
                     run.ready_at = time.time()
                     run.backup_finished_at = run.ready_at
@@ -288,6 +300,10 @@ class Controller:
                     run.image_backup_status = "complete"
                     await self._save(run, lane, "input.raw_backup_ready")
                     return True
+            except IngestCollisionError as exc:
+                run.status, run.reason = "INPUT_FAILED", "raw_backup_conflict"
+                run.last_error = str(exc)
+                return False
             except SourceChangedError as exc:
                 run.last_error = str(exc)
                 run.csv_ready_at = None
@@ -297,6 +313,9 @@ class Controller:
                     shutil.rmtree,
                     Path(run.csv_snapshot_folder),
                     ignore_errors=True,
+                )
+                await self._io(
+                    lane, shutil.rmtree, Path(run.inference_folder), ignore_errors=True
                 )
                 csv_settle.forget(str(source))
                 image_settle.forget(str(source))
@@ -318,8 +337,10 @@ class Controller:
                 lane,
                 ingest_io.backup_images,
                 source,
-                Path(run.original_backup_folder),
+                Path(run.inference_folder),
                 None,
+                backup_folder=Path(run.backup_folder),
+                image_extensions=self.config.processing.image_extensions,
             )
         return False
 
@@ -342,8 +363,10 @@ class Controller:
                 lane,
                 ingest_io.backup_images,
                 Path(run.source_folder),
-                Path(run.original_backup_folder),
+                Path(run.inference_folder),
                 Path(run.csv_snapshot_folder),
+                backup_folder=Path(run.backup_folder),
+                image_extensions=self.config.processing.image_extensions,
             )
             run.backup_finished_at = time.time()
 
@@ -537,7 +560,7 @@ class Controller:
                     await self._save(run, lane, "inference.started")
                     manifest, path = await self.inference.prepare(
                         job_id=run.job_id,
-                        staged_folder=Path(run.original_backup_folder),
+                        staged_folder=Path(run.inference_folder),
                     )
                     run.inference_finished_at = time.time()
                     run.result_manifest_path, run.reason = str(path), manifest.reason
@@ -588,6 +611,9 @@ class Controller:
                     )
                 await self._io(
                     lane, shutil.rmtree, self.artifacts / run.job_id, ignore_errors=True
+                )
+                await self._io(
+                    lane, shutil.rmtree, Path(run.workspace_folder), ignore_errors=True
                 )
             finally:
                 lane.close()

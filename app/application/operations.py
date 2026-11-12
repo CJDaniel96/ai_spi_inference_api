@@ -161,7 +161,10 @@ def backup_result(
                 and filecmp.cmp(source, exported, shallow=False)
             ):
                 continue
-            raise FileExistsError(f"Exported result differs: {exported}")
+            # A manual rerun replaces only this CSV's latest generated results.
+            _copy_atomic(source, destination)
+            exported.unlink()
+            continue
         _copy_atomic(source, destination)
     manifest.write_atomic(manifest_backup)
 

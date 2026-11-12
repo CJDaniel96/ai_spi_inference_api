@@ -2,14 +2,24 @@
 
 from __future__ import annotations
 
+import hashlib
+import os
 import shutil
+import stat
+import tempfile
 from pathlib import Path
 
-from app.application.ingest.service import IngestService
+from app.application.ingest.service import (
+    IngestCollisionError,
+    IngestService,
+    IngestStorageError,
+)
 from app.infrastructure.input.sinic_folder_input import (
     MachineJobFiles,
     SinicFolderInput,
+    is_pending_csv,
 )
+from app.infrastructure.local_store import fsync_directory
 
 
 def candidates(extensions, root, target_date=None):
@@ -53,16 +63,87 @@ def validate_source(config, source, csv_snapshot=None):
     )
 
 
-def archive_source(config, validated, target, csv_snapshot=None):
-    return _service(config).archive(
+def archive_source(
+    config,
+    validated,
+    target,
+    csv_snapshot=None,
+    *,
+    backup_folder=None,
+):
+    result = _service(config).archive(
         validated,
         backup_root=target.parent,
         csv_snapshot=csv_snapshot,
         target_folder=target,
     )
+    if backup_folder is not None:
+        preserve_flat(target, backup_folder, config.processing.image_extensions)
+    return result
 
 
-def backup_images(source: Path, target: Path, csv_snapshot: Path | None) -> str:
+def preserve_flat(source: Path, target: Path, image_extensions):
+    """Merge verified originals into the flat backup, ignoring generated results."""
+    extensions = {
+        extension.lower() if extension.startswith(".") else f".{extension.lower()}"
+        for extension in image_extensions
+    }
+    entries = [
+        entry
+        for entry in IngestService._content_manifest(source)
+        if entry.kind == "file"
+        and Path(entry.relative_path).name == entry.relative_path
+        and (
+            is_pending_csv(Path(entry.relative_path))
+            or Path(entry.relative_path).suffix.lower() in extensions
+        )
+    ]
+    target.mkdir(parents=True, exist_ok=True)
+    missing = []
+    # Check every existing original before adding files. ai_result is never compared.
+    for entry in entries:
+        destination = target / entry.relative_path
+        if destination.exists() or destination.is_symlink():
+            if not stat.S_ISREG(destination.lstat().st_mode):
+                raise IngestCollisionError(
+                    f"Original backup is not a regular file: {destination}"
+                )
+            with destination.open("rb") as handle:
+                digest = hashlib.file_digest(handle, "sha256").hexdigest()
+            if digest != entry.sha256:
+                raise IngestCollisionError(f"Original backup differs: {destination}")
+        else:
+            missing.append(entry)
+    for entry in missing:
+        destination = target / entry.relative_path
+        fd, name = tempfile.mkstemp(
+            prefix=f".{destination.name}.", suffix=".tmp", dir=target
+        )
+        os.close(fd)
+        temporary = Path(name)
+        try:
+            shutil.copy2(source / entry.relative_path, temporary)
+            with temporary.open("r+b") as handle:
+                digest = hashlib.file_digest(handle, "sha256").hexdigest()
+                os.fsync(handle.fileno())
+            if digest != entry.sha256:
+                raise IngestStorageError(
+                    f"Original backup copy verification failed: {destination}"
+                )
+            temporary.replace(destination)
+        finally:
+            temporary.unlink(missing_ok=True)
+    fsync_directory(target)
+
+
+def backup_images(
+    source: Path,
+    target: Path,
+    csv_snapshot: Path | None,
+    *,
+    backup_folder=None,
+    image_extensions=None,
+) -> str:
     """Best-effort undecoded raw backup for a protection result."""
     if not source.is_dir():
         return "incomplete"
@@ -88,6 +169,8 @@ def backup_images(source: Path, target: Path, csv_snapshot: Path | None) -> str:
                 return "incomplete"
         service._assert_snapshot_unchanged(source, initial, "raw backup", names)
         prepared = service._commit_copy(prepared, manifest)
+        if backup_folder is not None:
+            preserve_flat(target, backup_folder, image_extensions)
         return "complete"
     except (OSError, ValueError):
         return "incomplete"

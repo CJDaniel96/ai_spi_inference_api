@@ -63,7 +63,7 @@ DELIVERY_FIELDS = [
 
 
 def reports(backup_root):
-    for path in sorted(backup_root.glob("*/*/*/run.json")):
+    for path in sorted(backup_root.glob("*/*/ai_result/run.json")):
         yield path, json.loads(path.read_text(encoding="utf-8"))
 
 
@@ -80,12 +80,14 @@ def _duration(start, end):
 def job_rows(backup_root: Path) -> list[dict]:
     rows = []
     for path, run in reports(backup_root):
-        manifest_path = path.parent / "ai_result" / "manifest.json"
+        manifest_path = path.parent / "manifest.json"
         manifest = (
             PipelineResultManifest.read(manifest_path)
             if manifest_path.exists()
             else None
         )
+        if manifest and manifest.inspection_metadata.get("run_id") != run["run_id"]:
+            manifest = None
         publications = run["publications"]
         returned_codes = (
             [

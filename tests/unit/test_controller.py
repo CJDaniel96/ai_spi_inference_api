@@ -1,4 +1,4 @@
-"""Source markers, independent backups, bounded delivery and JSON reporting."""
+"""Source markers, flat backups, bounded delivery and JSON reporting."""
 
 import asyncio
 import csv
@@ -55,7 +55,9 @@ def test_existing_old_date_csv_is_processed_backed_up_marked_and_exported(tmp_pa
     ).read_bytes() == original
     assert job.export_status == "complete"
     assert len(list(Path(config.minifi.output_path).rglob("*.csv"))) == 2
-    report = json.loads((Path(job.backup_folder) / "run.json").read_text())
+    report = json.loads(
+        (Path(job.backup_folder) / "ai_result" / "run.json").read_text()
+    )
     assert report["run_id"] == job.run_id
     assert report["processing_started_at"] <= report["inference_started_at"]
     record = report["publications"][original_path.name]
@@ -80,17 +82,21 @@ def test_done_csvs_are_excluded_from_all_ingest_and_inference_paths(tmp_path):
     assert runs == [] and runtime.calls == 0
 
 
-def test_remove_done_after_restart_creates_new_backup_and_minifi_identity(tmp_path):
+def test_remove_done_after_restart_reuses_flat_backup_and_updates_latest_result(
+    tmp_path,
+):
     config = make_config(tmp_path)
     source = write_job(config)
     first = run_once(config)[0][0]
-    first_report = (Path(first.backup_folder) / "run.json").read_bytes()
+    first_report = (Path(first.backup_folder) / "ai_result" / "run.json").read_bytes()
     first_names = {p.name for p in Path(config.minifi.output_path).rglob("*.csv")}
     marker = next(source.glob("*_DONE.csv"))
     marker.rename(marker.with_name(marker.stem[:-5] + marker.suffix))
     second = run_once(config)[0][0]
-    assert first.run_id != second.run_id and first.backup_folder != second.backup_folder
-    assert (Path(first.backup_folder) / "run.json").read_bytes() == first_report
+    assert first.run_id != second.run_id and first.backup_folder == second.backup_folder
+    report_path = Path(second.backup_folder) / "ai_result" / "run.json"
+    assert report_path.read_bytes() != first_report
+    assert json.loads(report_path.read_text())["run_id"] == second.run_id
     assert (
         len(
             {p.name for p in Path(config.minifi.output_path).rglob("*.csv")}
@@ -99,14 +105,14 @@ def test_remove_done_after_restart_creates_new_backup_and_minifi_identity(tmp_pa
         == 2
     )
     root = Path(config.paths.backup_output_root)
-    assert len(job_rows(root)) == len(delivery_rows(root)) == 2
+    assert len(job_rows(root)) == len(delivery_rows(root)) == 1
 
 
 def test_restart_ignores_even_broken_reports_and_uses_only_source_markers(tmp_path):
     config = make_config(tmp_path)
     source = write_job(config)
     job = run_once(config)[0][0]
-    (Path(job.backup_folder) / "run.json").write_text("broken old report")
+    (Path(job.backup_folder) / "ai_result" / "run.json").write_text("broken old report")
     runs, runtime = run_once(config)
     assert runs == [] and runtime.calls == 0
     marker = next(source.glob("*_DONE.csv"))
@@ -147,7 +153,7 @@ def test_bad_csv_never_produces_fabricated_result_or_done_marker(tmp_path):
     runs, runtime = run_once(config)
     assert runs[0].status == "INPUT_FAILED" and runtime.calls == 0
     assert codes(config) == [] and not list(source.glob("*_DONE.csv"))
-    assert (Path(runs[0].backup_folder) / "run.json").is_file()
+    assert (Path(runs[0].backup_folder) / "ai_result" / "run.json").is_file()
 
 
 def test_delivery_retries_reuse_result_and_mark_only_successful_csvs(
@@ -272,7 +278,10 @@ def test_continuous_scanning_detects_new_csv_and_live_done_removal(tmp_path):
                 await task
 
     asyncio.run(exercise())
-    assert len(list(Path(config.paths.backup_output_root).glob("*/*/*/run.json"))) == 3
+    assert (
+        len(list(Path(config.paths.backup_output_root).glob("*/*/ai_result/run.json")))
+        == 1
+    )
 
 
 def test_minifi_failure_does_not_resend_and_can_retry_from_committed_result(
@@ -411,7 +420,7 @@ def test_marker_retry_completes_json_without_extra_delivery(tmp_path, monkeypatc
             )
             report = json.loads(
                 next(
-                    Path(config.paths.backup_output_root).glob("*/*/*/run.json")
+                    Path(config.paths.backup_output_root).glob("*/*/ai_result/run.json")
                 ).read_text()
             )
             assert report["status"] == "DONE"
@@ -458,9 +467,10 @@ def test_csv_arriving_during_inference_is_left_for_next_run(tmp_path):
     asyncio.run(exercise())
     reports = [
         json.loads(p.read_text())
-        for p in Path(config.paths.backup_output_root).glob("*/*/*/run.json")
+        for p in Path(config.paths.backup_output_root).glob("*/*/ai_result/run.json")
     ]
-    assert sorted(len(r["csv_names"]) for r in reports) == [1, 1]
+    assert len(reports) == 1 and reports[0]["csv_names"] == ["late.csv"]
+    assert len(codes(config)) == 2
 
 
 def test_lock_is_held_until_workers_have_finished_closing(tmp_path, monkeypatch):
@@ -554,3 +564,166 @@ def test_csv_changed_between_stability_check_and_snapshot_is_waited_for_again(
     assert len(calls) == 2
     assert runs[0].status == "DONE" and runtime.calls == 1
     assert next(source.glob("*_DONE.csv"))
+
+
+@pytest.mark.usefixtures("writable_file_fsync")
+def test_backup_timestamp_folder_contains_flat_originals_and_ai_result_only(tmp_path):
+    config = make_config(tmp_path)
+    source = write_job(config, rows=2)
+    originals = {p.name: p.read_bytes() for p in source.iterdir()}
+    job = run_once(config)[0][0]
+    backup = Path(config.paths.backup_output_root) / "2026-11-09" / source.name
+    assert Path(job.backup_folder) == backup
+    assert {p.name for p in backup.iterdir()} == set(originals) | {"ai_result"}
+    for name, payload in originals.items():
+        assert (backup / name).read_bytes() == payload
+    assert (backup / "ai_result/run.json").is_file()
+    assert (backup / "ai_result/manifest.json").is_file()
+    assert not (backup / job.run_id).exists()
+    assert not Path(job.workspace_folder).exists()
+    assert not list(backup.rglob("*.tmp"))
+
+
+def test_flat_backup_with_existing_ai_result_and_originals_is_reused(tmp_path):
+    config = make_config(tmp_path)
+    source = write_job(config)
+    backup = Path(config.paths.backup_output_root) / "2026-11-09" / source.name
+    (backup / "ai_result").mkdir(parents=True)
+    (backup / "ai_result/run.json").write_text("older report")
+    for p in source.iterdir():
+        (backup / p.name).write_bytes(p.read_bytes())
+    job = run_once(config)[0][0]
+    assert job.status == "DONE" and job.reason is None
+    assert next(source.glob("*_DONE.csv"))
+
+
+def test_changed_source_image_does_not_overwrite_flat_original_backup(tmp_path):
+    config = make_config(tmp_path)
+    source = write_job(config)
+    first = run_once(config)[0][0]
+    image = next(source.glob("*.jpg"))
+    original = (Path(first.backup_folder) / image.name).read_bytes()
+    image.write_bytes(original + b"changed source bytes")
+    marker = next(source.glob("*_DONE.csv"))
+    marker.rename(marker.with_name(marker.stem[:-5] + marker.suffix))
+    jobs, runtime = run_once(config)
+    assert jobs[0].status == "INPUT_FAILED"
+    assert jobs[0].reason == "raw_backup_conflict" and runtime.calls == 0
+    assert (Path(first.backup_folder) / image.name).read_bytes() == original
+    assert not list(source.glob("*_DONE.csv"))
+
+
+def test_rerun_replaces_selected_csv_result_and_keeps_other_csv_results(tmp_path):
+    config = make_config(tmp_path)
+    source = write_job(config, csv_count=2)
+    first = run_once(config)[0][0]
+    root = Path(first.backup_folder)
+    other_name = f"{source.name}_board0.csv"
+    rerun_name = f"{source.name}_board1.csv"
+    other_result = (root / "ai_result/returned" / other_name).read_bytes()
+    marker = source / f"{source.name}_board1_DONE.csv"
+    marker.rename(source / rerun_name)
+    second = run_once(config, FakeRuntime(fail=True))[0][0]
+    assert second.status == "DONE" and second.run_id != first.run_id
+    assert list(second.publications) == [rerun_name]
+    assert (root / "ai_result/returned" / other_name).read_bytes() == other_result
+    with (root / "ai_result/returned" / rerun_name).open(
+        encoding="utf-8-sig"
+    ) as handle:
+        assert [row["is_pass"] for row in csv.DictReader(handle)] == ["23"]
+    assert (
+        root / "ai_result/exported" / f"{Path(rerun_name).stem}_processed.csv"
+    ).exists()
+    assert not (
+        root / "ai_result/processed" / f"{Path(rerun_name).stem}_processed.csv"
+    ).exists()
+
+
+def test_new_batch_statistics_do_not_use_previous_batch_manifest(tmp_path, monkeypatch):
+    config = make_config(tmp_path)
+    source = write_job(config)
+    first = run_once(config)[0][0]
+    marker = next(source.glob("*_DONE.csv"))
+    marker.rename(marker.with_name(marker.stem[:-5] + marker.suffix))
+    checked = []
+    original = module.write_report
+
+    def observe(run):
+        original(run)
+        if run.status == "QUEUED":
+            row = job_rows(Path(config.paths.backup_output_root))[0]
+            assert row["run_id"] != first.run_id
+            assert row["outcome"] == "" and row["pass_count"] == 0
+            checked.append(True)
+
+    monkeypatch.setattr(module, "write_report", observe)
+    assert run_once(config)[0][0].status == "DONE"
+    assert checked
+
+
+def test_flat_backup_accepts_configured_image_extension_without_leading_dot(tmp_path):
+    config = make_config(tmp_path)
+    config.processing.image_extensions = ["JPG"]
+    source = write_job(config)
+    job = run_once(config)[0][0]
+    image = next(source.glob("*.jpg"))
+    assert job.status == "DONE"
+    assert (Path(job.backup_folder) / image.name).read_bytes() == image.read_bytes()
+
+
+def test_same_folder_waits_for_pending_export_while_other_folders_continue(
+    tmp_path, monkeypatch
+):
+    config = make_config(tmp_path)
+    config.runtime.background_retry_seconds = 0.02
+    source = write_job(config)
+    original_export = module.export_result
+    gate = {"ready": False}
+
+    def export(settings, folder, names):
+        if folder.name == source.name and not gate["ready"]:
+            raise OSError("temporary MiNiFi failure")
+        return original_export(settings, folder, names)
+
+    monkeypatch.setattr(module, "export_result", export)
+    runtime = FakeRuntime()
+    controller = Controller(config, runtime, io_factory=AsyncTestIO)
+
+    async def exercise():
+        task = asyncio.create_task(controller.run())
+        try:
+            await until(
+                lambda: bool(controller._background_runs) and not controller.jobs
+            )
+            csv_path = next(source.glob("*_DONE.csv"))
+            (source / "extra.csv").write_bytes(csv_path.read_bytes())
+            image = next(source.glob("*.jpg"))
+            (source / "extra_J001_001_0.jpg").write_bytes(image.read_bytes())
+            other = write_job(config, job_id="20261109120100")
+            await until(
+                lambda: bool(list(other.glob("*_DONE.csv"))) and not controller.jobs
+            )
+            assert runtime.calls == 2
+            assert (source / "extra.csv").exists()
+            assert not (source / "extra_DONE.csv").exists()
+            gate["ready"] = True
+            await until(
+                lambda: (source / "extra_DONE.csv").exists() and not controller.jobs
+            )
+            assert runtime.calls == 3
+            report = json.loads(
+                (
+                    Path(config.paths.backup_output_root)
+                    / "2026-11-09"
+                    / source.name
+                    / "ai_result/run.json"
+                ).read_text()
+            )
+            assert report["csv_names"] == ["extra.csv"]
+            assert report["export_status"] == "complete"
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    asyncio.run(exercise())
