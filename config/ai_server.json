@@ -8,9 +8,7 @@
   "paths": {
     "watch_root": "D:/spi_ai/output/01/sfcTemp",
     "external_output_root": "D:/Dre/JQ_SPI_02_AI_API/data",
-    "backup_output_root": "D:/Dre/JQ_SPI_02_AI_API/backup",
-    "state_root": "D:/Dre/JQ_SPI_02_AI_API/controller_state",
-    "history_root": "D:/Dre/JQ_SPI_02_AI_API/history"
+    "backup_output_root": "D:/Dre/JQ_SPI_02_AI_API/backup"
   },
   "processing": {
     "folder_images_num_threshold": 60,
@@ -61,16 +59,9 @@
   "output": {
     "preserve_job_folder": false
   },
-  "database": {
-    "enabled": true,
-    "path": "D:/Dre/JQ_SPI_02_AI_API/records/audit.sqlite3",
-    "poll_seconds": 5.0,
-    "busy_timeout_seconds": 0.1
-  },
   "minifi": {
     "enabled": true,
-    "output_path": "D:/Project/AMR/Result/TEMP/spi",
-    "poll_seconds": 30.0
+    "output_path": "D:/Project/AMR/Result/TEMP/spi"
   },
   "logging": {
     "log_dir": "log",

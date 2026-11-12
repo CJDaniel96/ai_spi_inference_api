@@ -140,8 +140,7 @@ class ObbInspectionService:
                 deadline_at=time.time()
                 + self._config.runtime.io_startup_timeout_seconds,
             )
-            # Also enforce the policy on an already verified backup restored
-            # after a restart, before loading inputs or invoking the model.
+            # Recheck the verified backup before loading inputs or the model.
             files, _, _ = await call_io(
                 lane,
                 inspect_source,

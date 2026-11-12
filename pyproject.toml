@@ -1,7 +1,7 @@
 [project]
 name = "ai-spi-controller"
 version = "0.2.0"
-description = "Single-controller SPI OBB inspection with durable local recovery"
+description = "SPI OBB inspection with source DONE markers and JSON backup reports"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [

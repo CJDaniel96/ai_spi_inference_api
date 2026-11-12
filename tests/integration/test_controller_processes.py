@@ -14,7 +14,6 @@ from app.application.controller import Controller
 from app.infrastructure.async_io import call_io
 from app.infrastructure.deadline_io import DeadlineExceeded, DeadlineIO
 from app.infrastructure.inference.resident_process import ResidentObbRuntime
-from app.infrastructure.job_history import history_folder, read_receipt
 from tests.helpers import FakeResidentModel, make_config, write_job
 
 
@@ -24,11 +23,12 @@ def test_real_processes_complete_native_pipeline_without_http_or_gpu(tmp_path):
     runtime = ResidentObbRuntime(config.inference.obb, model_factory=FakeResidentModel)
     controller = Controller(config, runtime)
     jobs = asyncio.run(controller.run(once=True, target_date=date(2026, 11, 9)))
-    job = jobs[source.name]
+    job = next(iter(jobs.values()))
     assert job.status == "DONE" and job.export_status == "complete"
     assert job.primary_returned_at >= job.processing_started_at
     assert json.loads(Path(job.result_manifest_path).read_text())["outcome"] == "normal"
     assert runtime.pid is None
+    assert len(list(source.glob("*_DONE.csv"))) == 1
 
 
 def delayed_write(path):
@@ -93,12 +93,10 @@ def test_cli_without_model_returns_protection_result_and_uses_one_config(tmp_pat
         timeout=30,
     )
     assert result.returncode == 0, result.stderr
-    state_path = Path(config.paths.state_root) / "jobs" / source.name
-    assert not state_path.exists()
-    state = read_receipt(history_folder(Path(config.paths.history_root), source.name))[
-        "snapshot"
-    ]
+    report = next(Path(config.paths.backup_output_root).glob("*/*/*/run.json"))
+    state = json.loads(report.read_text())
     assert state["status"] == "DONE"
+    assert len(list(source.glob("*_DONE.csv"))) == 1
     manifest = json.loads(Path(state["result_manifest_path"]).read_text())
     assert manifest["outcome"] == "fallback"
     for root in (config.paths.external_output_root, config.minifi.output_path):
@@ -108,7 +106,7 @@ def test_cli_without_model_returns_protection_result_and_uses_one_config(tmp_pat
     assert repeated.returncode == 0, repeated.stderr
     assert not list(Path(config.paths.external_output_root).rglob("*.csv"))
     assert not list(Path(config.minifi.output_path).rglob("*.csv"))
-    assert not state_path.exists()
+    assert len(list(Path(config.paths.backup_output_root).glob("*/*/*/run.json"))) == 1
 
 
 def test_cli_config_check_does_not_load_model_libraries(tmp_path):

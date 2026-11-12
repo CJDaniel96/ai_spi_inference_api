@@ -4,7 +4,7 @@ Configures a single ``app.system`` logger with a rotating file handler
 (``<log_dir>/<system_log_file>``) plus a console handler. The log directory and
 system-log filename come from config (``logging.log_dir`` /
 ``logging.system_log_file``). The directory is created when needed.
-Job facts are persisted separately in the local event journal.
+Per-run details are recorded separately in backup ``run.json`` reports.
 """
 
 from __future__ import annotations

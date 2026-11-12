@@ -21,7 +21,9 @@ def main(argv: list[str] | None = None) -> int:
         help="Discover one batch and drain one bounded background attempt",
     )
     parser.add_argument(
-        "--date", type=date.fromisoformat, help="Input date for --once, YYYY-MM-DD"
+        "--date",
+        type=date.fromisoformat,
+        help="Optional folder date for --once, YYYY-MM-DD",
     )
     args = parser.parse_args(argv)
     if args.date and not args.once:
@@ -29,7 +31,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         config = load_config(args.config)
         if args.check_config:
-            print("Configuration valid: single controller, native OBB, async audit DB")
+            print("Configuration valid: source _DONE markers, JSON backup reports")
             return 0
         setup_logging(
             Path(config.logging.log_dir), system_log_file=config.logging.system_log_file
@@ -44,13 +46,12 @@ def main(argv: list[str] | None = None) -> int:
         if args.once and any(
             job.status
             in {
-                "EXPIRED",
                 "FAILED",
                 "PUBLICATION_UNKNOWN",
-                "HISTORY_CONFLICT",
                 "RETURN_FAILED",
                 "PARTIAL_RETURN",
                 "INPUT_FAILED",
+                "MARK_PENDING",
             }
             for job in jobs.values()
         ):
@@ -60,7 +61,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     except Exception:
         get_logger().exception(
-            "Controller stopped; local journal retained for recovery"
+            "Controller stopped; unmarked source CSVs remain eligible"
         )
         return 1
 

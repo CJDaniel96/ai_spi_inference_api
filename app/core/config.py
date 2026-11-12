@@ -33,8 +33,6 @@ class PathConfig(Settings):
     watch_root: str = Field(min_length=1)
     external_output_root: str = Field(min_length=1)
     backup_output_root: str = Field(min_length=1)
-    state_root: str = Field(min_length=1)
-    history_root: str = Field(min_length=1)
 
 
 class ProcessingConfig(Settings):
@@ -73,17 +71,9 @@ class InferenceConfig(Settings):
     obb: ObbConfig = Field(default_factory=ObbConfig)
 
 
-class DatabaseConfig(Settings):
-    enabled: bool = True
-    path: str = Field(default="records/audit.sqlite3", min_length=1)
-    poll_seconds: float = Field(default=5.0, gt=0)
-    busy_timeout_seconds: float = Field(default=0.1, gt=0)
-
-
 class MinifiConfig(Settings):
     enabled: bool = True
     output_path: str = Field(min_length=1)
-    poll_seconds: float = Field(default=30.0, gt=0)
 
 
 class LoggingConfig(Settings):
@@ -99,23 +89,17 @@ class AppConfig(Settings):
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     inference: InferenceConfig = Field(default_factory=InferenceConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)
-    database: DatabaseConfig = Field(default_factory=DatabaseConfig)
     minifi: MinifiConfig
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
 
     @model_validator(mode="after")
     def separate_roots(self):
-        for value in (self.paths.state_root, self.database.path):
-            if value.startswith(("\\\\", "//")):
-                raise ValueError("state and audit database must use a local disk")
         roots = [
             resolve_under_project_root(value).resolve()
             for value in (
                 self.paths.watch_root,
                 self.paths.external_output_root,
                 self.paths.backup_output_root,
-                self.paths.state_root,
-                self.paths.history_root,
                 self.minifi.output_path,
             )
         ]
@@ -127,15 +111,8 @@ class AppConfig(Settings):
                     or right.is_relative_to(left)
                 ):
                     raise ValueError(
-                        "input, return, backup, state, history and MiNiFi roots "
-                        "must be separate"
+                        "input, return, backup and MiNiFi roots must be separate"
                     )
-        database = resolve_under_project_root(self.database.path).resolve()
-        if any(database.is_relative_to(root) for root in roots):
-            raise ValueError(
-                "audit database must be outside input, output, backup, state "
-                "and history trees"
-            )
         return self
 
     def resolved(self) -> AppConfig:
@@ -143,7 +120,6 @@ class AppConfig(Settings):
         for key, value in data["paths"].items():
             data["paths"][key] = str(resolve_under_project_root(value))
         for group, key in (
-            ("database", "path"),
             ("minifi", "output_path"),
             ("logging", "log_dir"),
         ):

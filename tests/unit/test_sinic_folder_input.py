@@ -78,3 +78,16 @@ def test_settle_tracker_does_not_accept_missing_required_files(tmp_path) -> None
     snapshot = adapter.snapshot(adapter.load(folder))
     assert tracker.observe_snapshot(str(folder), snapshot, False, now=1.0) is False
     assert tracker.observe_snapshot(str(folder), snapshot, False, now=2.0) is False
+
+
+def test_default_scan_includes_old_dates_and_done_suffix_is_reserved(tmp_path):
+    folder = tmp_path / "20200101120000"
+    folder.mkdir()
+    for name in ("board_DONE.csv", "board_done.CSV", "board_DONE1.csv", "new.csv"):
+        (folder / name).write_text("is_pass\n0\n")
+    adapter = SinicFolderInput()
+    assert adapter.list_candidates(tmp_path) == (folder,)
+    assert [p.name for p in adapter.load(folder).csv_files] == [
+        "board_DONE1.csv",
+        "new.csv",
+    ]

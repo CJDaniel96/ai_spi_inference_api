@@ -319,13 +319,10 @@ def service_case(tmp_path, rows, runtime=None):
     settings = json.loads((ROOT / "config/ai_server.json").read_text())
     settings["paths"] = {
         "watch_root": str(tmp_path / "input"),
-        "state_root": str(tmp_path / "state"),
         "external_output_root": str(tmp_path / "return"),
         "backup_output_root": str(tmp_path / "backup"),
-        "history_root": str(tmp_path / "history"),
     }
     settings["processing"]["image_name_template"] = "{image}"
-    settings["database"]["path"] = str(tmp_path / "records/audit.sqlite3")
     settings["minifi"]["output_path"] = str(tmp_path / "minifi")
     config = AppConfig.model_validate(settings)
     runtime = runtime or FakeRuntime()

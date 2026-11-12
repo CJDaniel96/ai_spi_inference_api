@@ -17,7 +17,13 @@ from pathlib import Path
 
 _TIMESTAMP_PATTERN = re.compile(r"\d{14}")
 _TIMESTAMP_FORMAT = "%Y%m%d%H%M%S"
-_CSV_SUFFIX = ".csv"
+
+
+def is_pending_csv(path: Path) -> bool:
+    """The reserved _DONE suffix marks completed source CSVs."""
+    return path.suffix.lower() == ".csv" and not path.stem.upper().endswith("_DONE")
+
+
 _DEFAULT_IMAGE_SUFFIXES = frozenset({".jpg", ".jpeg"})
 
 FileSnapshot = tuple[tuple[str, int, int], ...]
@@ -70,12 +76,11 @@ class SinicFolderInput:
     def list_candidates(
         self, input_root: Path, target_date: date | None = None
     ) -> tuple[Path, ...]:
-        """List today's timestamp jobs under ``input_root``.
+        """List timestamp jobs, optionally filtered by date, under ``input_root``.
 
         ``input_root`` may itself be a timestamp job, which is useful for
         one-shot validation and local tests.
         """
-        target_date = target_date or datetime.now().date()
         if not input_root.exists() or not input_root.is_dir():
             return ()
 
@@ -97,9 +102,7 @@ class SinicFolderInput:
         files = tuple(path for path in folder.iterdir() if path.is_file())
         return MachineJobFiles(
             folder=folder,
-            csv_files=tuple(
-                sorted(path for path in files if path.suffix.lower() == _CSV_SUFFIX)
-            ),
+            csv_files=tuple(sorted(path for path in files if is_pending_csv(path))),
             image_files=tuple(
                 sorted(
                     path

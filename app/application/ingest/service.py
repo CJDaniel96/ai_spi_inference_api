@@ -23,13 +23,13 @@ import pandas as pd
 
 from app.core.errors import AppError, CsvSchemaError
 from app.domain.services.csv_merger import CsvMerger
+from app.infrastructure.input.sinic_folder_input import is_pending_csv
 from app.infrastructure.local_store import ensure_directory, fsync_directory
 from app.infrastructure.output.sinic_csv_output import _parse_document
 from app.infrastructure.repositories.csv_repository import CsvRepository
 
 _TIMESTAMP_FORMAT = "%Y%m%d%H%M%S"
 _TIMESTAMP_PATTERN = re.compile(r"\d{14}")
-_CSV_SUFFIX = ".csv"
 _HASH_CHUNK_SIZE = 1024 * 1024
 
 
@@ -82,6 +82,7 @@ class ValidatedIngest:
     expected_image_keys: tuple[str, ...]
     source_snapshot: TreeSnapshot
     images_decoded: bool = True
+    csv_names: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -112,12 +113,25 @@ class IngestService:
         self._template = image_name_template
         self._csv_merger = CsvMerger()
 
-    def snapshot_csv(self, source_folder: Path, destination: Path) -> Path:
+    def snapshot_csv(
+        self,
+        source_folder: Path,
+        destination: Path,
+        csv_names=None,
+        *,
+        expected_signature=None,
+    ) -> Path:
         """Validate/atomically snapshot only CSV bytes; never inspect images."""
         source = self._resolve_source(source_folder)
         self._validate_job_id(source.name)
         self._validate_target(source, destination.resolve(strict=False))
-        csv_files = self._csv_files(source)
+        csv_files = tuple(
+            p
+            for p in self._csv_files(source)
+            if csv_names is None or p.name in csv_names
+        )
+        if csv_names is not None and len(csv_files) != len(csv_names):
+            raise SourceChangedError("Selected CSV disappeared")
         if not csv_files:
             raise IngestValidationError("No CSV files found")
 
@@ -125,9 +139,12 @@ class IngestService:
             return tuple(
                 (p.name, p.stat().st_size, p.stat().st_mtime_ns)
                 for p in self._csv_files(source)
+                if csv_names is None or p.name in csv_names
             )
 
         initial = snapshot()
+        if expected_signature is not None and initial != expected_signature:
+            raise SourceChangedError("CSV changed after the stability check")
         payloads = {}
         seen: set[str] = set()
         for path in csv_files:
@@ -192,8 +209,9 @@ class IngestService:
         """
         source = self._resolve_source(source_folder)
         job_id = self._validate_job_id(source.name)
-        initial_snapshot = self._snapshot_tree(source)
         csv_files = self._csv_files(csv_snapshot or source)
+        csv_names = tuple(p.name for p in csv_files) if csv_snapshot else None
+        initial_snapshot = self._snapshot_tree(source, csv_names)
         if not csv_files:
             raise IngestValidationError(f"No CSV files found in job: {source}")
 
@@ -232,13 +250,16 @@ class IngestService:
                     self._validate_image_metadata(source / image_key, image_key)
                 image_keys.append(image_key)
 
-        self._assert_snapshot_unchanged(source, initial_snapshot, "validation")
+        self._assert_snapshot_unchanged(
+            source, initial_snapshot, "validation", csv_names
+        )
         return ValidatedIngest(
             source_folder=source,
             job_id=job_id,
             expected_image_keys=tuple(image_keys),
             source_snapshot=initial_snapshot,
             images_decoded=decode_images,
+            csv_names=csv_names,
         )
 
     def archive(
@@ -247,21 +268,24 @@ class IngestService:
         *,
         backup_root: str | Path,
         csv_snapshot: Path | None = None,
+        target_folder: Path | None = None,
     ) -> IngestResult:
         """Copy and verify a single raw backup without touching the source."""
         source = validated.source_folder
-        backup_target = (
+        backup_target = target_folder or (
             Path(backup_root).expanduser().resolve(strict=False)
             / self._job_date(validated.job_id).isoformat()
             / validated.job_id
         )
         self._validate_target(source, backup_target)
-        self._assert_snapshot_unchanged(source, validated.source_snapshot, "copy")
+        self._assert_snapshot_unchanged(
+            source, validated.source_snapshot, "copy", validated.csv_names
+        )
         prepared = None
         committed = False
         try:
             prepared, manifest = self._prepare_streamed_copy(
-                source, backup_target, validated.source_snapshot
+                source, backup_target, validated.source_snapshot, validated.csv_names
             )
             local_source = prepared.temporary or prepared.target
             if csv_snapshot is not None:
@@ -276,11 +300,15 @@ class IngestService:
             if not validated.images_decoded:
                 for image_key in validated.expected_image_keys:
                     self._validate_image(local_source / image_key, image_key)
-            self._assert_snapshot_unchanged(source, validated.source_snapshot, "copy")
+            self._assert_snapshot_unchanged(
+                source, validated.source_snapshot, "copy", validated.csv_names
+            )
             before_commit = prepared
             prepared = self._commit_copy(prepared, manifest)
             committed = before_commit.temporary is not None and not prepared.reused
-            self._assert_snapshot_unchanged(source, validated.source_snapshot, "copy")
+            self._assert_snapshot_unchanged(
+                source, validated.source_snapshot, "copy", validated.csv_names
+            )
         except SourceChangedError:
             # Roll back only the destination this attempt created, never an
             # existing, byte-identical backup reused during recovery.
@@ -331,8 +359,7 @@ class IngestService:
             sorted(
                 child
                 for child in source.iterdir()
-                if child.suffix.lower() == _CSV_SUFFIX
-                and stat.S_ISREG(child.lstat().st_mode)
+                if is_pending_csv(child) and stat.S_ISREG(child.lstat().st_mode)
             )
         )
 
@@ -393,10 +420,16 @@ class IngestService:
             raise IngestValidationError(f"Expected image is not decodable: {image_key}")
 
     @classmethod
-    def _snapshot_tree(cls, root: Path) -> TreeSnapshot:
+    def _snapshot_tree(cls, root: Path, csv_names=None) -> TreeSnapshot:
         try:
             entries: list[FileSnapshotEntry] = []
             for path in cls._walk_tree(root):
+                if (
+                    csv_names is not None
+                    and path.suffix.lower() == ".csv"
+                    and path.relative_to(root).as_posix() not in csv_names
+                ):
+                    continue
                 metadata = path.lstat()
                 relative = path.relative_to(root).as_posix()
                 if stat.S_ISDIR(metadata.st_mode):
@@ -470,9 +503,9 @@ class IngestService:
 
     @classmethod
     def _assert_snapshot_unchanged(
-        cls, root: Path, expected: TreeSnapshot, phase: str
+        cls, root: Path, expected: TreeSnapshot, phase: str, csv_names=None
     ) -> None:
-        current = cls._snapshot_tree(root)
+        current = cls._snapshot_tree(root, csv_names)
         if current != expected:
             raise SourceChangedError(
                 f"Source job changed during {phase}; retry after it becomes stable: "
@@ -488,7 +521,7 @@ class IngestService:
 
     @classmethod
     def _prepare_streamed_copy(
-        cls, source: Path, target: Path, snapshot: TreeSnapshot
+        cls, source: Path, target: Path, snapshot: TreeSnapshot, csv_names=None
     ) -> tuple[_PreparedCopy, ContentManifest]:
         """Read source bytes once, hashing during copy and verifying locally."""
         ensure_directory(target.parent)
@@ -536,9 +569,18 @@ class IngestService:
 
         try:
             shutil.copytree(
-                source, temporary, dirs_exist_ok=True, copy_function=copy_and_hash
+                source,
+                temporary,
+                dirs_exist_ok=True,
+                copy_function=copy_and_hash,
+                ignore=lambda directory, names: [
+                    name
+                    for name in names
+                    if (Path(directory) / name).relative_to(source).as_posix()
+                    not in expected
+                ],
             )
-            cls._assert_snapshot_unchanged(source, snapshot, "copy")
+            cls._assert_snapshot_unchanged(source, snapshot, "copy", csv_names)
             manifest = tuple(sorted(entries, key=lambda item: item.relative_path))
             if set(expected) != {entry.relative_path for entry in manifest}:
                 raise SourceChangedError("Source file set changed during copy")

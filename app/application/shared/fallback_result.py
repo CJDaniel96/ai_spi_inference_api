@@ -17,7 +17,7 @@ from app.domain.entities.pipeline_result import (
     PipelineResultManifest,
 )
 from app.domain.services.csv_merger import CsvMerger
-from app.infrastructure.repositories.csv_repository import CsvRepository
+from app.infrastructure.input.sinic_folder_input import is_pending_csv
 
 _DEFECT_COLUMN = "ai_defect_name"
 _IS_PASS_COLUMN = "is_pass"
@@ -35,7 +35,6 @@ class FallbackResultBuilder:
     ) -> None:
         self._config = config
         self._clock = clock
-        self._csv_repo = CsvRepository()
         self._merger = CsvMerger()
         self._artifacts = ResultArtifactWriter(result_root)
 
@@ -54,7 +53,7 @@ class FallbackResultBuilder:
         csv_results = []
         count = 0
         for source in sorted(csv_folder.iterdir()):
-            if source.suffix.lower() != ".csv":
+            if not is_pending_csv(source):
                 continue
             document = _read_document(source)
             if "is_pass" not in document.fieldnames or not document.rows:

@@ -8,9 +8,7 @@
   "paths": {
     "watch_root": "data/spi_input",
     "external_output_root": "data/spi_return",
-    "backup_output_root": "data/backup",
-    "state_root": "data/controller_state",
-    "history_root": "data/history"
+    "backup_output_root": "data/backup"
   },
   "processing": {
     "folder_images_num_threshold": 60,
@@ -61,16 +59,9 @@
   "output": {
     "preserve_job_folder": false
   },
-  "database": {
-    "enabled": true,
-    "path": "data/records/audit.sqlite3",
-    "poll_seconds": 5.0,
-    "busy_timeout_seconds": 0.1
-  },
   "minifi": {
     "enabled": true,
-    "output_path": "data/minifi",
-    "poll_seconds": 30.0
+    "output_path": "data/minifi"
   },
   "logging": {
     "log_dir": "log",

@@ -69,6 +69,7 @@ def convert_rows(
                 job_id,
                 source_name,
                 index,
+                *([settings["run_id"]] if "run_id" in settings else []),
             ]
         )
         row["uuid"] = str(uuid.uuid5(uuid.NAMESPACE_URL, identity))
@@ -102,7 +103,9 @@ def atomic_csv(path: Path, rows: list[dict]) -> None:
         Path(name).unlink(missing_ok=True)
 
 
-def export_manifest(manifest_path: Path, output_root: Path, settings: dict) -> int:
+def export_manifest(
+    manifest_path: Path, output_root: Path, settings: dict, *, source_names=None
+) -> int:
     """Export only a committed result backup; archive each completed source.
 
     Retrying after partial delivery can repeat a consumed output. Stable UUIDs
@@ -111,12 +114,16 @@ def export_manifest(manifest_path: Path, output_root: Path, settings: dict) -> i
     if manifest_path.parent.name != "ai_result":
         raise ValueError("MiNiFi accepts committed result backups only")
     manifest = PipelineResultManifest.read(manifest_path)
+    if "run_id" in manifest.inspection_metadata:
+        settings = {**settings, "run_id": manifest.inspection_metadata["run_id"]}
     root = manifest_path.parent
     date_folder = datetime.strptime(manifest.job_id, "%Y%m%d%H%M%S").strftime(
         "%Y-%m-%d"
     )
     count = 0
     for item in manifest.csv_results:
+        if source_names is not None and item.source_csv not in source_names:
+            continue
         name = Path(item.processed_csv).name
         source = root / "processed" / name
         archived = root / "exported" / name
@@ -131,6 +138,8 @@ def export_manifest(manifest_path: Path, output_root: Path, settings: dict) -> i
         )
         identity = [settings[k] for k in ("site", "factory", "line", "station_id")]
         identity += [manifest.job_id, item.source_csv]
+        if "run_id" in settings:
+            identity.append(settings["run_id"])
         token = hashlib.sha256(
             json.dumps(identity, ensure_ascii=False).encode()
         ).hexdigest()[:16]

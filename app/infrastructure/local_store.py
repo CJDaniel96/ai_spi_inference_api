@@ -1,14 +1,11 @@
-"""Durable local facts; SQLite never participates in controller decisions."""
+"""Atomic backup reports and an OS lock; no work journal or recovery store."""
 
 from __future__ import annotations
 
 import json
 import os
 import tempfile
-import time
-import uuid
 from contextlib import AbstractContextManager
-from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 
@@ -34,7 +31,7 @@ def ensure_directory(path: Path) -> None:
 
 def atomic_json(path: Path, data: dict) -> None:
     ensure_directory(path.parent)
-    fd, name = tempfile.mkstemp(dir=path.parent, prefix=".state-", suffix=".tmp")
+    fd, name = tempfile.mkstemp(dir=path.parent, prefix=".report-", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(data, handle, ensure_ascii=False, indent=2, allow_nan=False)
@@ -84,131 +81,3 @@ class ControllerLock(AbstractContextManager):
                 msvcrt.locking(self.handle.fileno(), msvcrt.LK_UNLCK, 1)
             self.handle.close()
             self.handle = None
-
-
-@dataclass
-class JobState:
-    job_id: str
-    source_folder: str
-    original_backup_folder: str
-    first_seen_at: float
-    config_snapshot: dict
-    status: str = "QUEUED"
-    revision: int = 0
-    reason: str | None = None
-    last_error: str | None = None
-    first_seen_source: str = "csv_observation"
-    processing_started_at: float | None = None
-    processing_finished_at: float | None = None
-    processing_elapsed_ms: float = 0.0
-    queue_ms: float | None = None
-    csv_snapshot_folder: str | None = None
-    csv_ready_at: float | None = None
-    ready_at: float | None = None
-    inference_started_at: float | None = None
-    inference_finished_at: float | None = None
-    image_count: int | None = None
-    image_backup_status: str = "pending"
-    result_manifest_path: str | None = None
-    result_ready_at: float | None = None
-    publications: dict[str, dict] = field(default_factory=dict)
-    primary_returned_at: float | None = None
-    delivery_status: str = "pending"
-    backup_status: str = "pending"
-    export_status: str = "pending"
-    background_attempts: int = 0
-    next_background_at: float = 0.0
-    background_errors: dict[str, str] = field(default_factory=dict)
-    raw_backup_attempts: int = 0
-    completed_at: float | None = None
-
-    @property
-    def primary_terminal(self) -> bool:
-        return self.status in {
-            "FAILED",
-            "PRIMARY_RETURNED",
-            "DONE",
-            "EXPIRED",
-            "PUBLICATION_UNKNOWN",
-            "HISTORY_CONFLICT",
-            "RETURN_FAILED",
-            "PARTIAL_RETURN",
-            "INPUT_FAILED",
-        }
-
-    @property
-    def cleanup_ready(self) -> bool:
-        return (
-            self.primary_terminal
-            and self.status not in {"PUBLICATION_UNKNOWN", "HISTORY_CONFLICT"}
-            and self.backup_status == "complete"
-            and self.export_status in {"complete", "disabled"}
-            and self.image_backup_status in {"complete", "incomplete"}
-        )
-
-    @classmethod
-    def from_snapshot(cls, snapshot):
-        # Old deadline fields are historical evidence, not active runtime policy.
-        # Keep immutable events intact while reading their common state fields.
-        data = {
-            key: value
-            for key, value in snapshot.items()
-            if key in cls.__dataclass_fields__
-        }
-        if "delivery_status" not in data:
-            data["delivery_status"] = (
-                "returned" if data.get("primary_returned_at") else "pending"
-            )
-        return cls(**data)
-
-
-class LocalJobStore:
-    """Append events before snapshots; replay repairs a crash between the writes.
-
-    Only the controller writes. The audit child reads immutable event files.
-    Every event contains a full snapshot so it can reconstruct state without DB.
-    """
-
-    def __init__(self, root: Path):
-        self.root = root
-        ensure_directory(root / "jobs")
-
-    def folder(self, job_id: str) -> Path:
-        if len(job_id) != 14 or not job_id.isdecimal():
-            raise ValueError("job_id must be a 14 digit timestamp")
-        return self.root / "jobs" / job_id
-
-    def save(self, job: JobState, event_type: str) -> None:
-        revision = job.revision + 1
-        snapshot = {**asdict(job), "revision": revision}
-        event = {
-            "event_id": uuid.uuid4().hex,
-            "job_id": job.job_id,
-            "revision": revision,
-            "event_type": event_type,
-            "recorded_at": time.time(),
-            "snapshot": snapshot,
-        }
-        folder = self.folder(job.job_id)
-        atomic_json(folder / "events" / f"{revision:08d}.json", event)
-        job.revision = revision
-        atomic_json(folder / "job_state.json", snapshot)
-
-    def load(self, *, exclude=()) -> dict[str, JobState]:
-        jobs = {}
-        for folder in sorted((self.root / "jobs").iterdir()):
-            if folder.name in exclude:
-                continue
-            if not folder.is_dir() or not (folder / "events").is_dir():
-                continue
-            events = sorted((folder / "events").glob("*.json"))
-            if not events:
-                continue
-            # Fail closed on corruption rather than losing the SPI receipt.
-            event = json.loads(events[-1].read_text(encoding="utf-8"))
-            job = JobState.from_snapshot(event["snapshot"])
-            if job.job_id != folder.name or event["revision"] != job.revision:
-                raise ValueError(f"Invalid job journal: {folder}")
-            atomic_json(folder / "job_state.json", event["snapshot"])
-            jobs[job.job_id] = job
-        return jobs

@@ -16,6 +16,7 @@ from tests.helpers import make_config
         "model_clients",
         "watch_root",
         "reliability",
+        "database",
     ],
 )
 def test_removed_settings_are_rejected_instead_of_silently_ignored(tmp_path, old_key):
@@ -68,48 +69,14 @@ def test_roots_cannot_overlap_and_inbox_is_never_output(tmp_path):
         AppConfig.model_validate(data)
 
 
-@pytest.mark.parametrize("root", ["state_root", "history_root"])
-def test_database_is_outside_working_and_history_directories(tmp_path, root):
-    data = make_config(tmp_path).model_dump()
-    data["database"]["path"] = data["paths"][root] + "/audit.sqlite3"
-    with pytest.raises(ValidationError, match="outside"):
-        AppConfig.model_validate(data)
-
-
-def test_history_location_must_be_explicit(tmp_path):
-    data = make_config(tmp_path).model_dump()
-    del data["paths"]["history_root"]
-    with pytest.raises(ValidationError, match="history_root"):
-        AppConfig.model_validate(data)
-
-
-@pytest.mark.parametrize(
-    "group,key",
-    [
-        ("paths", "watch_root"),
-        ("paths", "external_output_root"),
-        ("paths", "backup_output_root"),
-        ("paths", "state_root"),
-        ("minifi", "output_path"),
-    ],
-)
-def test_history_is_separate_from_other_data_directories(tmp_path, group, key):
-    data = make_config(tmp_path).model_dump()
-    data["paths"]["history_root"] = data[group][key] + "/nested-history"
-    with pytest.raises(ValidationError, match="separate"):
-        AppConfig.model_validate(data)
-
-
 def test_single_file_loading_and_relative_paths(tmp_path, monkeypatch):
     data = make_config(tmp_path).model_dump()
-    data["paths"]["state_root"] = "data/test-state"
-    data["paths"]["history_root"] = "data/test-history"
+    data["paths"]["watch_root"] = "data/test-input"
     path = tmp_path / "settings.json"
     path.write_text(json.dumps(data))
     monkeypatch.setenv("AI_CONFIG_PATH", str(path))
     result = load_config()
-    assert result.paths.state_root.endswith("/data/test-state")
-    assert result.paths.history_root.endswith("/data/test-history")
+    assert result.paths.watch_root.endswith("/data/test-input")
     assert result.inference.obb.model_path.endswith("absent.pt")
 
 
@@ -118,3 +85,11 @@ def test_repository_configs_use_only_the_new_schema():
 
     for path in Path("config").glob("*.json"):
         load_config(path)
+
+
+@pytest.mark.parametrize("key", ["state_root", "history_root"])
+def test_removed_recovery_roots_are_rejected(tmp_path, key):
+    data = make_config(tmp_path).model_dump()
+    data["paths"][key] = str(tmp_path / "obsolete")
+    with pytest.raises(ValidationError, match="Extra inputs"):
+        AppConfig.model_validate(data)

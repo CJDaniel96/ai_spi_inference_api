@@ -16,9 +16,7 @@ TEST_DATE = "2026-11-09"
 POLYGON = ((0.0, 0.0), (2.0, 0.0), (2.0, 2.0), (0.0, 2.0))
 
 
-def make_config(
-    root: Path, *, input_timeout=0.3, inference_timeout=1.5, minifi=True, database=True
-):
+def make_config(root: Path, *, input_timeout=0.3, inference_timeout=1.5, minifi=True):
     return AppConfig.model_validate(
         {
             "identity": {
@@ -31,8 +29,6 @@ def make_config(
                 "watch_root": str(root / "input"),
                 "external_output_root": str(root / "return"),
                 "backup_output_root": str(root / "backup"),
-                "state_root": str(root / "state"),
-                "history_root": str(root / "history"),
             },
             "processing": {
                 "source_settle_seconds": 0.01,
@@ -56,16 +52,9 @@ def make_config(
                     "inference_timeout_seconds": inference_timeout,
                 }
             },
-            "database": {
-                "enabled": database,
-                "path": str(root / "records" / "audit.sqlite3"),
-                "busy_timeout_seconds": 0.01,
-                "poll_seconds": 0.02,
-            },
             "minifi": {
                 "enabled": minifi,
                 "output_path": str(root / "minifi"),
-                "poll_seconds": 0.02,
             },
             "logging": {"log_dir": str(root / "log")},
         }
