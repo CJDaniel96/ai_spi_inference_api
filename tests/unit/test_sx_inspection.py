@@ -4,6 +4,7 @@ import asyncio
 import csv
 import json
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import pandas as pd
@@ -65,13 +66,13 @@ def row(**changes):
     ],
 )
 def test_confidence_filtering_happens_before_counting(detections, passed, ok, ng):
-    result = judge().appearance.classify(detections)
+    result = judge().appearance.classify(detections, image_center=(5.0, 5.0))
     assert (result.passed, result.ok_count, result.ng_count) == (passed, ok, ng)
 
 
 @pytest.mark.parametrize("name", OBB_CLASSES[1:])
 def test_each_ng_class_blocks_appearance(name):
-    result = judge().judge(row(), (box(), box(name, 0.3)))
+    result = judge().judge(row(), (box(), box(name, 0.3)), image_center=(5.0, 5.0))
     assert result.failed_rule == "yolo_obb" and result.defect == name
 
 
@@ -79,8 +80,12 @@ def test_ng_thresholds_are_independent():
     thresholds = ObbConfig().class_thresholds
     thresholds["Bridge"] = 0.9
     classifier = AppearanceClassifier(thresholds)
-    assert classifier.classify((box(), box("Bridge", 0.8))).passed
-    assert not classifier.classify((box(), box("Stain", 0.3))).passed
+    assert classifier.classify(
+        (box(), box("Bridge", 0.8)), image_center=(5.0, 5.0)
+    ).passed
+    assert not classifier.classify(
+        (box(), box("Stain", 0.3)), image_center=(5.0, 5.0)
+    ).passed
 
 
 @pytest.mark.parametrize(
@@ -98,7 +103,7 @@ def test_csv_intervals_normalize_both_orders_and_include_boundaries(
     ]
     data = row(**{measurement: value, low_column: left, high_column: right})
     original = data.copy()
-    decision = judge().judge(data, (box(),))
+    decision = judge().judge(data, (box(),), image_center=(5.0, 5.0))
     assert decision.passed == (position in ("lower", "upper"))
     if not decision.passed:
         assert decision.failed_rule == name
@@ -124,7 +129,7 @@ def test_csv_intervals_normalize_both_orders_and_include_boundaries(
     ],
 )
 def test_rule_order_and_signed_displacements(changes, rule):
-    decision = judge().judge(row(**changes), (box(),))
+    decision = judge().judge(row(**changes), (box(),), image_center=(5.0, 5.0))
     assert decision.failed_rule == rule
     order = [check["rule"] for check in decision.checks]
     assert order == ["yolo_obb", "volume", "area", "height", "shift"][: len(order)]
@@ -147,7 +152,7 @@ def test_csv_limits_override_previous_component_specific_values():
         insp_x=-0.06,
         insp_y=0.07,
     )
-    assert judge().judge(data, (box(),)).passed
+    assert judge().judge(data, (box(),), image_center=(5.0, 5.0)).passed
 
 
 @pytest.mark.parametrize(
@@ -166,13 +171,13 @@ def test_csv_limits_override_previous_component_specific_values():
 @pytest.mark.parametrize("value", ["", "NaN", "inf", "invalid", None])
 def test_invalid_csv_limit_cannot_become_a_pass(column, value):
     with pytest.raises(ValueError, match="limit"):
-        judge().judge(row(**{column: value}), (box(),))
+        judge().judge(row(**{column: value}), (box(),), image_center=(5.0, 5.0))
 
 
 @pytest.mark.parametrize("column", ["shift_x_ng", "shift_y_ng"])
 def test_negative_shift_limit_is_invalid(column):
     with pytest.raises(ValueError, match="limits"):
-        judge().judge(row(**{column: -0.05}), (box(),))
+        judge().judge(row(**{column: -0.05}), (box(),), image_center=(5.0, 5.0))
 
 
 @pytest.mark.parametrize(
@@ -187,17 +192,29 @@ def test_negative_shift_limit_is_invalid(column):
 def test_shift_axes_use_their_own_csv_limits(x, y, passed):
     assert (
         judge()
-        .judge(row(insp_x=x, insp_y=y, shift_x_ng=0.03, shift_y_ng=0.07), (box(),))
+        .judge(
+            row(insp_x=x, insp_y=y, shift_x_ng=0.03, shift_y_ng=0.07),
+            (box(),),
+            image_center=(5.0, 5.0),
+        )
         .passed
         == passed
     )
 
 
 def test_zero_shift_limits_only_accept_zero_displacement():
-    assert judge().judge(row(shift_x_ng=0, shift_y_ng=0), (box(),)).passed
+    assert (
+        judge()
+        .judge(row(shift_x_ng=0, shift_y_ng=0), (box(),), image_center=(5.0, 5.0))
+        .passed
+    )
     assert (
         not judge()
-        .judge(row(shift_x_ng=0, shift_y_ng=0, insp_y=0.001), (box(),))
+        .judge(
+            row(shift_x_ng=0, shift_y_ng=0, insp_y=0.001),
+            (box(),),
+            image_center=(5.0, 5.0),
+        )
         .passed
     )
 
@@ -208,7 +225,7 @@ def test_zero_shift_limits_only_accept_zero_displacement():
 @pytest.mark.parametrize("value", ["", "NaN", "inf", "invalid"])
 def test_invalid_measurement_is_never_a_pass(column, value):
     with pytest.raises(ValueError, match="measurement"):
-        judge().judge(row(**{column: value}), (box(),))
+        judge().judge(row(**{column: value}), (box(),), image_center=(5.0, 5.0))
 
 
 @pytest.mark.parametrize(
@@ -239,8 +256,12 @@ def test_threshold_spelling_preserves_custom_ng_confidence(label):
     assert settings.model_dump()["class_thresholds"]["Foreign_object"] == 0.65
     assert set(settings.class_thresholds) == set(OBB_CLASSES)
     classifier = AppearanceClassifier(settings.class_thresholds)
-    assert classifier.classify((box(), box("Foreign_object", 0.649))).passed
-    decision = classifier.classify((box(), box("Foreign_object", 0.65)))
+    assert classifier.classify(
+        (box(), box("Foreign_object", 0.649)), image_center=(5.0, 5.0)
+    ).passed
+    decision = classifier.classify(
+        (box(), box("Foreign_object", 0.65)), image_center=(5.0, 5.0)
+    )
     assert not decision.passed
     assert decision.reason == "Foreign_object"
 
@@ -302,7 +323,13 @@ class FakeRuntime:
         results = {key: self.detections for key in images}
         if self.missing:
             results.pop(next(iter(results)))
-        return ObbBatchResult(results, 1.5, "test-weight-sha256", "cpu")
+        return ObbBatchResult(
+            results,
+            1.5,
+            "test-weight-sha256",
+            "cpu",
+            image_centers={key: (5.0, 5.0) for key in images},
+        )
 
 
 def service_case(tmp_path, rows, runtime=None):
@@ -407,6 +434,107 @@ def test_empty_successful_detections_are_normal_ng(tmp_path):
     )
     assert manifest.outcome is PipelineOutcome.NORMAL
     assert manifest.csv_results[0].result_codes == (23,)
+
+
+def test_center_with_disjoint_neighbors_continues_csv_rules_and_records_selection(
+    tmp_path,
+):
+    central = ObbDetection("Solder_Paste", 0.8, ((3, 3), (7, 3), (7, 7), (3, 7)))
+    neighbors = (
+        ObbDetection("Solder_Paste", 0.99, ((0, 0), (2, 0), (2, 2), (0, 2))),
+        ObbDetection("Solder_Paste", 0.9, ((8, 8), (10, 8), (10, 10), (8, 10))),
+    )
+    _config, folder, service, _ = service_case(
+        tmp_path,
+        [row(), row(insp_vol=49)],
+        FakeRuntime(detections=(*neighbors, central)),
+    )
+    manifest, path = asyncio.run(
+        service.prepare(job_id=folder.name, staged_folder=folder)
+    )
+    assert manifest.outcome is PipelineOutcome.NORMAL
+    assert manifest.csv_results[0].result_codes == (22, 23)
+    assert manifest.counts == {"pass_count": 1, "fail_count": 1, "low volume": 1}
+    policy = manifest.inspection_metadata["policy"]["appearance"]
+    assert policy["center"] == "original_image_midpoint"
+    processed = pd.read_csv(path.parent / manifest.csv_results[0].processed_csv)
+    assert processed["ai_failed_rule"].fillna("").tolist() == ["", "volume"]
+    assert processed["obb_ok_count"].tolist() == [3, 3]
+    checks = json.loads(processed.iloc[0]["ai_rule_checks"])
+    assert [check["rule"] for check in checks] == [
+        "yolo_obb",
+        "volume",
+        "area",
+        "height",
+        "shift",
+    ]
+    appearance = checks[0]
+    assert appearance["image_center"] == [5.0, 5.0]
+    assert appearance["center_count"] == 1
+    assert appearance["overlap_count"] == 0
+    assert appearance["ignored_solder_paste_count"] == 2
+    assert appearance["selected_solder_paste"] == central.to_dict()
+    assert len(json.loads(processed.iloc[0]["obb_raw_detections"])) == 3
+    assert len(json.loads(processed.iloc[0]["obb_retained_detections"])) == 3
+
+
+@pytest.mark.parametrize(
+    "centers",
+    [
+        {},
+        {"image0.jpg": (5, 5)},
+        {"image0.jpg": (5, 5), "unexpected.jpg": (5, 5)},
+        {"image0.jpg": (5, 5), "image1.jpg": (0, 5)},
+        {"image0.jpg": (5, 5), "image1.jpg": (float("nan"), 5)},
+        {"image0.jpg": (5, 5), "image1.jpg": None},
+    ],
+    ids=["missing", "partial", "wrong-key", "zero", "non-finite", "invalid-type"],
+)
+def test_missing_or_invalid_original_centers_use_whole_job_protection(
+    tmp_path, centers
+):
+    class InvalidCenterRuntime(FakeRuntime):
+        async def infer(self, images, *, deadline_at):
+            result = await super().infer(images, deadline_at=deadline_at)
+            return replace(result, image_centers=centers)
+
+    _config, folder, service, _ = service_case(
+        tmp_path, [row(), row()], InvalidCenterRuntime()
+    )
+    manifest, _path = asyncio.run(
+        service.prepare(job_id=folder.name, staged_folder=folder)
+    )
+    assert manifest.outcome is PipelineOutcome.FALLBACK
+    assert manifest.reason == "required_model_failure"
+    assert manifest.csv_results[0].result_codes == (23, 23)
+
+
+@pytest.mark.parametrize(
+    "center,expected_code,expected_reason",
+    [
+        ((5.0, 5.0), 22, ""),
+        ((15.0, 5.0), 23, "missing_center_solder_paste"),
+    ],
+)
+def test_judgment_uses_each_original_image_center_from_model(
+    tmp_path, center, expected_code, expected_reason
+):
+    class SizedRuntime(FakeRuntime):
+        async def infer(self, images, *, deadline_at):
+            result = await super().infer(images, deadline_at=deadline_at)
+            return replace(result, image_centers={key: center for key in images})
+
+    _config, folder, service, _ = service_case(tmp_path, [row()], SizedRuntime())
+    manifest, path = asyncio.run(
+        service.prepare(job_id=folder.name, staged_folder=folder)
+    )
+    assert manifest.outcome is PipelineOutcome.NORMAL
+    assert manifest.csv_results[0].result_codes == (expected_code,)
+    processed = pd.read_csv(path.parent / manifest.csv_results[0].processed_csv)
+    assert processed["ai_reason"].fillna("").tolist() == [expected_reason]
+    assert json.loads(processed.iloc[0]["ai_rule_checks"])[0]["image_center"] == list(
+        center
+    )
 
 
 def test_missing_measurement_uses_whole_job_fail_safe(tmp_path):
@@ -557,3 +685,48 @@ def test_different_crop_ratios_produce_distinct_rule_versions(tmp_path):
         cropped_result.inspection_metadata["rule_version"]
         != full_result.inspection_metadata["rule_version"]
     )
+
+
+def test_configured_tolerance_uses_original_size_and_is_audited_and_versioned(tmp_path):
+    target = ObbDetection("Solder_Paste", 0.8, ((5.4, 4), (7, 4), (7, 6), (5.4, 6)))
+    config, folder, tolerant, _ = service_case(
+        tmp_path, [row()], FakeRuntime(detections=(target,))
+    )
+    strict_config = config.model_copy(deep=True)
+    strict_config.inference.obb.center_tolerance_ratio = 0
+    strict = ObbInspectionService(
+        config=strict_config,
+        result_root=tmp_path / "strict-results",
+        runtime=FakeRuntime(detections=(target,)),
+        io_factory=AsyncTestIO,
+    )
+    tolerant_result, path = asyncio.run(
+        tolerant.prepare(job_id=folder.name, staged_folder=folder)
+    )
+    strict_result, _ = asyncio.run(
+        strict.prepare(job_id=folder.name, staged_folder=folder)
+    )
+    assert tolerant_result.outcome is strict_result.outcome is PipelineOutcome.NORMAL
+    assert tolerant_result.csv_results[0].result_codes == (22,)
+    assert strict_result.csv_results[0].result_codes == (23,)
+    metadata = tolerant_result.inspection_metadata
+    assert metadata["policy"]["appearance"]["center_tolerance_ratio"] == 0.05
+    assert (
+        metadata["policy"]["appearance"]["center_tolerance_basis"]
+        == "original_image_shorter_side"
+    )
+    assert (
+        strict_result.inspection_metadata["policy"]["appearance"][
+            "center_tolerance_ratio"
+        ]
+        == 0
+    )
+    assert metadata["rule_version"] != strict_result.inspection_metadata["rule_version"]
+    assert metadata["preprocessing"]["center_crop_ratio"] == 0.6
+    processed = pd.read_csv(path.parent / tolerant_result.csv_results[0].processed_csv)
+    check = json.loads(processed.iloc[0]["ai_rule_checks"])[0]
+    assert check["image_center"] == [5.0, 5.0]
+    # Original size is 10x10: tolerance is 0.5 px, not the cropped 6x6's 0.3 px.
+    assert check["center_tolerance_px"] == 0.5
+    assert check["center_selection_mode"] == "within_tolerance"
+    assert check["selected_solder_paste"] == target.to_dict()

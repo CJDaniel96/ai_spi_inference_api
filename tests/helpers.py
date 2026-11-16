@@ -13,7 +13,6 @@ from app.domain.entities.obb_result import ObbBatchResult, ObbDetection
 from app.infrastructure.deadline_io import DeadlineExceeded
 
 TEST_DATE = "2026-11-09"
-POLYGON = ((0.0, 0.0), (2.0, 0.0), (2.0, 2.0), (0.0, 2.0))
 
 
 def make_config(root: Path, *, input_timeout=0.3, inference_timeout=1.5, minifi=True):
@@ -105,6 +104,22 @@ def write_job(
     return source
 
 
+def centered_result(images, model_version, device):
+    results, centers = {}, {}
+    for name, path in images.items():
+        image = cv2.imread(path)
+        height, width = image.shape[:2]
+        centers[name] = (width / 2, height / 2)
+        polygon = (
+            (0.0, 0.0),
+            (float(width), 0.0),
+            (float(width), float(height)),
+            (0.0, float(height)),
+        )
+        results[name] = (ObbDetection("Solder_Paste", 0.9, polygon),)
+    return ObbBatchResult(results, 1.0, model_version, device, image_centers=centers)
+
+
 class FakeRuntime:
     def __init__(self, *, delay=0, fail=False):
         self.delay = delay
@@ -120,12 +135,7 @@ class FakeRuntime:
         await asyncio.sleep(self.delay)
         if self.fail:
             raise RuntimeError("fake GPU failure")
-        return ObbBatchResult(
-            {name: (ObbDetection("Solder_Paste", 0.9, POLYGON),) for name in images},
-            1.0,
-            "fake-weights",
-            "cpu",
-        )
+        return centered_result(images, "fake-weights", "cpu")
 
     def close(self):
         self.closed = True
@@ -139,12 +149,7 @@ class FakeResidentModel:
         self.device = "cpu"
 
     def infer(self, images, deadline_at):
-        return ObbBatchResult(
-            {name: (ObbDetection("Solder_Paste", 0.9, POLYGON),) for name in images},
-            1.0,
-            self.model_version,
-            self.device,
-        )
+        return centered_result(images, self.model_version, self.device)
 
 
 class AsyncTestIO:

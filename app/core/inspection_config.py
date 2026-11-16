@@ -17,6 +17,9 @@ class ObbConfig(BaseModel):
     device: str = "cuda:0"
     imgsz: int = Field(default=640, gt=0)
     center_crop_ratio: float = Field(default=1.0, gt=0, le=1, allow_inf_nan=False)
+    center_tolerance_ratio: float = Field(
+        default=0.05, ge=0, le=0.5, allow_inf_nan=False
+    )
     batch_size: int = Field(default=8, gt=0)
     engine_fixed_batch: bool = True
     conf: float = Field(default=0.25, ge=0, le=1, allow_inf_nan=False)

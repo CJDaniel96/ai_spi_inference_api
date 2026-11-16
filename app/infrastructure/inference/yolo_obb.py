@@ -102,6 +102,7 @@ class YoloObbModel:
 
         started = time.perf_counter()
         output = {}
+        image_centers = {}
         items = list(images.items())
         for offset in range(0, len(items), self._batch_size):
             if time.time() >= deadline_at:
@@ -109,11 +110,12 @@ class YoloObbModel:
             batch_items = items[offset : offset + self._batch_size]
             decoded = []
             crop_offsets = []
-            for _key, path in batch_items:
+            for key, path in batch_items:
                 image = cv2.imread(path)
                 if image is None:
                     raise ValueError(f"OBB cannot decode image: {path}")
                 height, width = image.shape[:2]
+                image_centers[key] = (width / 2, height / 2)
                 crop_width = max(1, int(width * self._settings.center_crop_ratio))
                 crop_height = max(1, int(height * self._settings.center_crop_ratio))
                 left = (width - crop_width) // 2
@@ -162,4 +164,5 @@ class YoloObbModel:
             (time.perf_counter() - started) * 1000,
             self.model_version,
             self.device,
+            image_centers=image_centers,
         )

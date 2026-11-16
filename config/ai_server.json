@@ -39,6 +39,7 @@
       "device": "cuda:0",
       "imgsz": 640,
       "center_crop_ratio": 0.6,
+      "center_tolerance_ratio": 0.05,
       "batch_size": 8,
       "engine_fixed_batch": true,
       "conf": 0.25,

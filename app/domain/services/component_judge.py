@@ -30,14 +30,27 @@ class JudgeDecision:
 
 
 class ComponentJudge:
-    def __init__(self, thresholds: dict[str, float]) -> None:
-        self.appearance = AppearanceClassifier(thresholds)
+    def __init__(
+        self, thresholds: dict[str, float], *, center_tolerance_ratio: float = 0.05
+    ) -> None:
+        self.appearance = AppearanceClassifier(
+            thresholds, center_tolerance_ratio=center_tolerance_ratio
+        )
 
-    @staticmethod
-    def policy_definition() -> dict:
+    def policy_definition(self) -> dict:
         """Describe the algorithm, not a second source of numerical limits."""
         return {
-            "version": "csv_limits_v1",
+            "version": "csv_limits_v3",
+            "appearance": {
+                "center": "original_image_midpoint",
+                "selection": "exact_center_then_unique_within_tolerance",
+                "center_tolerance_ratio": self.appearance.center_tolerance_ratio,
+                "center_tolerance_basis": "original_image_shorter_side",
+                "center_tolerance_distance": "point_to_obb_inclusive",
+                "neighbor_overlap": "reject_positive_intersection_area",
+                "disjoint_neighbors": "ignore",
+                "qualified_ng": "reject_anywhere",
+            },
             "limit_source": "csv",
             "range_normalization": "min_max_inclusive",
             "measurements": {
@@ -63,16 +76,31 @@ class ComponentJudge:
             raise ValueError(f"Non-finite {kind}: {column}")
         return number
 
-    def judge(self, row: dict, detections: tuple[ObbDetection, ...]) -> JudgeDecision:
+    def judge(
+        self,
+        row: dict,
+        detections: tuple[ObbDetection, ...],
+        *,
+        image_center: tuple[float, float],
+    ) -> JudgeDecision:
         source = "csv"
         checks = []
-        appearance = self.appearance.classify(detections)
+        appearance = self.appearance.classify(detections, image_center=image_center)
         checks.append(
             {
                 "rule": "yolo_obb",
                 "passed": appearance.passed,
                 "ok_count": appearance.ok_count,
                 "ng_count": appearance.ng_count,
+                "image_center": image_center,
+                "center_count": appearance.center_count,
+                "center_selection_mode": appearance.center_selection_mode,
+                "center_tolerance_px": appearance.center_tolerance_px,
+                "overlap_count": appearance.overlap_count,
+                "ignored_solder_paste_count": appearance.ignored_count,
+                "selected_solder_paste": appearance.selected.to_dict()
+                if appearance.selected
+                else None,
                 "retained": [box.to_dict() for box in appearance.retained],
             }
         )

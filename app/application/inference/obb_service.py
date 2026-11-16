@@ -42,7 +42,10 @@ class ObbInspectionService:
         self._result_root = result_root
         self._site_id = config.identity.site
         self._thresholds = dict(config.inference.obb.class_thresholds)
-        self._judge = ComponentJudge(self._thresholds)
+        self._judge = ComponentJudge(
+            self._thresholds,
+            center_tolerance_ratio=config.inference.obb.center_tolerance_ratio,
+        )
         self._policy = self._judge.policy_definition()
         self._preprocessing = {
             "center_crop_ratio": config.inference.obb.center_crop_ratio,
@@ -120,6 +123,18 @@ class ObbInspectionService:
             raise ValueError(
                 "Required OBB results do not cover exactly the expected images"
             )
+        if set(result.image_centers) != set(images):
+            raise ValueError("Image centers must cover exactly the inference images")
+        for center in result.image_centers.values():
+            if (
+                not isinstance(center, (tuple, list))
+                or len(center) != 2
+                or not all(
+                    isinstance(v, (int, float)) and math.isfinite(v) and v > 0
+                    for v in center
+                )
+            ):
+                raise ValueError("Invalid original image center")
         if not math.isfinite(result.inference_ms) or result.inference_ms < 0:
             raise ValueError("Invalid OBB inference time")
         for boxes in result.results.values():
@@ -216,7 +231,9 @@ class ObbInspectionService:
             audits = []
             for row in frame.to_dict("records"):
                 boxes = result.results[row["img_name"]]
-                decision = self._judge.judge(row, boxes)
+                decision = self._judge.judge(
+                    row, boxes, image_center=result.image_centers[row["img_name"]]
+                )
                 audits.append(self._judge.audit_row(decision, boxes))
                 counts["pass_count" if decision.passed else "fail_count"] += 1
                 if decision.defect:

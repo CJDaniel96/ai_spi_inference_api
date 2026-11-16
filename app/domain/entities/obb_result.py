@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 OBB_CLASSES = (
     "Solder_Paste",
@@ -52,3 +52,4 @@ class ObbBatchResult:
     inference_ms: float
     model_version: str
     device: str
+    image_centers: dict[str, tuple[float, float]] = field(default_factory=dict)

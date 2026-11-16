@@ -113,3 +113,26 @@ def test_center_crop_defaults_to_full_image_and_loads_custom_ratio(tmp_path):
     path = tmp_path / "crop.json"
     path.write_text(json.dumps(data))
     assert load_config(path).inference.obb.center_crop_ratio == 0.6
+
+
+@pytest.mark.parametrize(
+    "value", [-0.01, 0.501, float("nan"), float("inf"), float("-inf"), None, "bad"]
+)
+def test_center_tolerance_rejects_invalid_settings(tmp_path, value):
+    data = make_config(tmp_path).model_dump()
+    data["inference"]["obb"]["center_tolerance_ratio"] = value
+    with pytest.raises(ValidationError, match="center_tolerance_ratio"):
+        AppConfig.model_validate(data)
+
+
+@pytest.mark.parametrize("value", [0, 0.05, 0.5])
+def test_center_tolerance_defaults_to_five_percent_and_loads_custom_ratio(
+    tmp_path, value
+):
+    data = make_config(tmp_path).model_dump()
+    del data["inference"]["obb"]["center_tolerance_ratio"]
+    assert AppConfig.model_validate(data).inference.obb.center_tolerance_ratio == 0.05
+    data["inference"]["obb"]["center_tolerance_ratio"] = value
+    path = tmp_path / "tolerance.json"
+    path.write_text(json.dumps(data))
+    assert load_config(path).inference.obb.center_tolerance_ratio == value

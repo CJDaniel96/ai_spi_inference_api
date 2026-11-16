@@ -40,6 +40,7 @@ class FakeResidentModel:
             float(self.calls),
             self.model_version,
             self.device,
+            image_centers={key: (1.0, 1.0) for key in images},
         )
 
 
@@ -247,11 +248,13 @@ def test_foreign_object_export_spelling_uses_configured_ng_threshold(
     )
     model = YoloObbModel(settings)
     image = tmp_path / "pad.png"
-    assert cv2.imwrite(str(image), np.zeros((8, 8, 3), dtype=np.uint8))
+    assert cv2.imwrite(str(image), np.zeros((2, 2, 3), dtype=np.uint8))
     detections = model.infer({"pad": str(image)}, time.time() + 5).results["pad"]
 
     assert [box.class_name for box in detections] == ["Solder_Paste", "Foreign_object"]
-    decision = AppearanceClassifier(settings.class_thresholds).classify(detections)
+    decision = AppearanceClassifier(settings.class_thresholds).classify(
+        detections, image_center=(1.0, 1.0)
+    )
     assert not decision.passed
     assert (decision.ok_count, decision.ng_count, decision.reason) == (
         1,
@@ -259,7 +262,11 @@ def test_foreign_object_export_spelling_uses_configured_ng_threshold(
         "Foreign_object",
     )
     thresholds = {**settings.class_thresholds, "Foreign_object": 0.9}
-    assert AppearanceClassifier(thresholds).classify(detections).passed
+    assert (
+        AppearanceClassifier(thresholds)
+        .classify(detections, image_center=(1.0, 1.0))
+        .passed
+    )
 
 
 @pytest.mark.parametrize("invalid_label", [None, "Foreign_Objects", "Bridge"])
@@ -386,6 +393,7 @@ def test_center_crop_pixels_and_original_coordinate_restoration(
     assert result.results[path.name][0].polygon == tuple(
         (x + left, y + top) for x, y in POLYGON
     )
+    assert result.image_centers == {path.name: (width / 2, height / 2)}
     assert path.read_bytes() == original
     assert set(result.results) == {path.name}
 
@@ -409,6 +417,10 @@ def test_center_crop_offsets_are_per_image_and_padded_tail_is_discarded(
         images[path.name] = str(path)
     result = model.infer(images, time.time() + 5)
     assert set(result.results) == set(images)
+    assert result.image_centers == {
+        name: (width / 2, height / 2)
+        for name, (height, width) in zip(images, shapes, strict=True)
+    }
     for name, (left, top) in zip(images, offsets, strict=True):
         assert result.results[name][0].polygon == tuple(
             (x + left, y + top) for x, y in POLYGON
