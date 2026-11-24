@@ -164,6 +164,14 @@ spi_statistics.bat --date 2026-11-09 --output reports
 
 輸出 jobs.csv、deliveries.csv、summary.csv；每個時間戳資料夾只統計目前 run.json 中最近一批的紀錄，不累積先前重跑歷史；日期以該批 AI 首次觀測的台灣日期篩選。工具不會改動來源、執行推論或回傳。
 
+若要將「影像 AI 判 OK、CSV 數值超限」的體積、面積、高度、位移，以每 5 單位分組輸出製圖 CSV：
+
+```bat
+measurement_statistics.bat "D:\SPI\backup" --start-date 2026-11-01 --end-date 2026-11-24 --output "D:\SPI\reports\measurement_statistics.csv"
+```
+
+參數、分組方式與 CSV 欄位見 [量測超限分布統計](docs/spi_statistics.md#量測超限分布統計每-5-單位)。
+
 ## 舊版本切換
 
 停止舊程式，換成新版設定並移除 database、state_root、history_root 與 minifi.poll_seconds。舊 SQLite、state/history 及既有備份可留存查閱，新版不會刪除它們。先前使用 run_id/input_csv/raw 的備份不會自動搬移；後續處理使用新的平鋪結構。
