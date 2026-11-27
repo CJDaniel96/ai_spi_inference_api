@@ -55,6 +55,7 @@ app/minifi.py                       # 結果轉為 MiNiFi CSV
 | identity | site、factory、line、station_id，供結果與 MiNiFi 使用 |
 | paths | watch_root、external_output_root、backup_output_root |
 | processing | 影像數上限、副檔名、影像命名、檔案穩定等待與就緒上限 |
+| component_rules_path | 外觀通過後使用的元件體積與面積規則 JSON |
 | inference.obb | 權重、裝置、批次、暖機／推論上限與各類別門檻 |
 | delivery | 每次處理中，每份 CSV 的回傳次數、間隔與單次操作上限 |
 | runtime | 掃描、IO、背景操作上限與重試間隔 |
@@ -94,7 +95,7 @@ app/minifi.py                       # 結果轉為 MiNiFi CSV
 1. 發現未完成 CSV 後放入記憶體佇列，同一資料夾同時只處理一批。模型暖機與排隊時間獨立記錄。
 2. 等待選定的 CSV 與影像穩定，驗證並保存不可變 CSV 快照。預設影像名稱為 `{csv_stem}_{component_name}_{Array_id}_{Pad_id}.jpg`，保留 CSV 字串中的前導零。
 3. 在獨立備份位置串流複製、比對 SHA-256 並驗證影像可解碼，再交給 AI。來源若仍在變動則重新等待。
-4. 先依中心裁切設定處理推論影像；OBB 外觀判斷後，再以原 CSV 每列的 volume、area、height、shift 門檻判定，見 [判定規則](docs/sx_obb_inference.md)。
+4. 先依中心裁切設定處理推論影像。OBB 外觀通過後，依 CSV 的 `component_name` 查元件規則，檢查體積和面積。見 [判定規則](docs/sx_obb_inference.md)。
 5. 固定並備份本次結果與 SPI 回傳 CSV，逐份回傳。回傳只更新原 CSV 的 is_pass，保留檔名、欄位、編碼、列序及其他值。重試只複製同一份固定結果，不重新推論。
 6. 確認某份 CSV 回傳成功後，核對來源內容仍與本次快照相同，再改成 `_DONE.csv`。已有同名完成檔時不覆寫。來源已變動、改名權限不足等狀況寫入 JSON 與日誌；本次運行只重試改名，不重送已確認回傳的結果。
 7. 將已確認回傳的逐份結果轉為 MiNiFi CSV。同一時間戳資料夾若仍有待改名或待匯出的結果，先完成收尾再接收下一批；其他資料夾繼續處理。部分回傳成功時，成功的 CSV 仍可獨立匯出。匯出失敗在本次運行內重試，讀取固定備份，不重新推論或回傳。
@@ -164,7 +165,7 @@ spi_statistics.bat --date 2026-11-09 --output reports
 
 輸出 jobs.csv、deliveries.csv、summary.csv；每個時間戳資料夾只統計目前 run.json 中最近一批的紀錄，不累積先前重跑歷史；日期以該批 AI 首次觀測的台灣日期篩選。工具不會改動來源、執行推論或回傳。
 
-若要將「影像 AI 判 OK、CSV 數值超限」的體積、面積、高度、位移，以每 5 單位分組輸出製圖 CSV：
+若要將「影像 AI 判 OK、量測值超限」以每 5 單位分組輸出製圖 CSV，新備份統計體積與面積，舊備份依原規則另計高度與位移：
 
 ```bat
 measurement_statistics.bat "D:\SPI\backup" --start-date 2026-11-01 --end-date 2026-11-24 --output "D:\SPI\reports\measurement_statistics.csv"

@@ -27,19 +27,27 @@ OBB 多邊形的每個點會加回該影像的裁切偏移，因此 processed CS
 
 其他合格 NG 類別沿用類別名稱作為原因；同時存在時優先於上述原因。
 
-固定判定順序為外觀、volume、area、height、shift。數值規則直接讀取 CSV 每列的門檻；沒有 component 特例或另一組 config 門檻。
+## 元件體積與面積判定
 
-| 項目 | 量測 | 門檻 | 比較方式 |
-|---|---|---|---|
-| volume | insp_vol | vol_l_ng、vol_h_ng | 將兩端正規化為 min/max，包含邊界 |
-| area | insp_area | area_l_ng、area_h_ng | 將兩端正規化為 min/max，包含邊界 |
-| height | insp_hei | hei_l_ng、hei_h_ng | 將兩端正規化為 min/max，包含邊界 |
-| shift X | insp_x | shift_x_ng | abs(X) 小於等於非負門檻 |
-| shift Y | insp_y | shift_y_ng | abs(Y) 小於等於非負門檻 |
+外觀通過後，從 SPI CSV 讀取 `component_name`、`insp_vol`、`insp_area`。元件名稱去除前後空白，依完整名稱比對 `components`，未列出的元件套用 `others`。空白元件名稱視為輸入無效。體積及面積都須落在各自的 `min_pct` 到 `max_pct` 之間（含邊界）。兩項都超限時，第一個失敗項目記為 `volume`，稽核保留兩項結果。
 
-量測與門檻必須是有限數值。必要資料缺漏、模型失敗、模型結果或原圖中心資料不完整／無效、超時時，整份工作走全 23 保護；正常推論也可能因品質判定全部 NG，兩者透過 manifest.outcome 區分。
+規則檔由 `component_rules_path` 指定，預設 [SX 元件規則](../config/rules/sx_component_judge.json)，在啟動時載入，修改後重啟生效。JSON 和 SPI CSV 都使用百分比刻度，`30%` 對應數值 `30`。啟動時會驗證 `others`、重複鍵與各上下限。
 
-processed CSV 保留逐列判定原因、門檻、原始與保留框資訊，以及模型／規則版本。SPI 回傳 CSV 只更新原始 is_pass（22 通過，23 不通過），保留欄位、編碼、列序與原始值。
+量測值必須是有限數值。必要資料缺漏、模型失敗、模型結果或原圖中心資料不完整／無效、超時時，整份工作走全 23 保護。`manifest.outcome` 記錄工作屬於正常判定或保護結果。
+
+processed CSV 的 `ai_component_rule` 記錄實際使用的元件或 `others`，`ai_rule_checks` 記錄量測與實際上下限。`ai_rule_version` 的雜湊納入整份元件規則。SPI 回傳 CSV 只更新原始 `is_pass`（22 通過，23 不通過），保留欄位、編碼、列序與其他原始值。
+
+### 從 Excel 更新規則
+
+在維護環境安裝 `openpyxl`，從專案根目錄執行下列命令。匯入器會驗證整張表後才替換 JSON。預設使用活頁簿的作用中工作表，也可用 `--sheet Sheet1` 指定。
+
+```bash
+python -m pip install "openpyxl>=3.1,<4"
+python -m app.tools.import_component_rules "SX SPI Component Judge Rules.xlsx" config/rules/sx_component_judge.json
+python -m app.main --check-config
+```
+
+原始範本使用 `Component`、`OBB外觀`、`體積`、`面積` 四欄，接受 `30% ~ 170%` 這類文字範圍。拆分上下限時使用 `Component`、`OBB外觀`、`體積下限`、`體積上限`、`面積下限`、`面積上限`，四個門檻以 Excel 百分比儲存。兩種格式皆須包含一列 `others`，且 `OBB外觀` 填 `啟用`。
 
 `ai_rule_checks` 的 `yolo_obb` 項目記錄 `image_center`、`center_count`、`center_selection_mode`、`center_tolerance_px`、`overlap_count`、`ignored_solder_paste_count` 與 `selected_solder_paste`。選取模式為 `contains_center`（包含中心）、`within_tolerance`（容許距離內）或 `none`（無候選），`center_count` 為該階段的候選數量。`obb_ok_count` 仍是全圖達信心門檻的 Solder_Paste 數量，因此外觀通過時也可能大於 1；`obb_retained_detections` 保留所有達門檻的框，包含被忽略的鄰近框。`manifest.inspection_metadata.policy.appearance` 記錄容許比例、中心選取與重疊規則，並納入 `rule_version`。
 

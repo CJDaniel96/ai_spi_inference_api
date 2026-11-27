@@ -4,6 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.core.config import AppConfig, load_config
+from app.core.errors import ConfigError
 from tests.helpers import make_config
 
 
@@ -85,6 +86,32 @@ def test_repository_configs_use_only_the_new_schema():
 
     for path in Path("config").glob("*.json"):
         load_config(path)
+
+
+def test_component_rules_are_validated_and_kept_for_the_running_config(tmp_path):
+    config = make_config(tmp_path)
+    data = config.model_dump()
+    rules = config.component_rules.model_dump()
+    rules_file = tmp_path / "rules.json"
+    rules_file.write_text(json.dumps(rules))
+    data["component_rules_path"] = str(rules_file)
+    config_file = tmp_path / "settings.json"
+    config_file.write_text(json.dumps(data))
+
+    first = load_config(config_file)
+    rules["others"]["area"]["min_pct"] = 55
+    rules_file.write_text(json.dumps(rules))
+    assert first.resolved().component_rules.others.area.min_pct == 50
+    assert load_config(config_file).component_rules.others.area.min_pct == 55
+
+    rules["others"]["volume"]["min_pct"] = 180
+    rules_file.write_text(json.dumps(rules))
+    with pytest.raises(ConfigError, match="min_pct must be <= max_pct"):
+        load_config(config_file)
+
+    rules_file.write_text('{"others": {}, "others": {}, "components": {}}')
+    with pytest.raises(ConfigError, match="Duplicate rule key"):
+        load_config(config_file)
 
 
 @pytest.mark.parametrize("key", ["state_root", "history_root"])

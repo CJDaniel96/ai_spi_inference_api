@@ -5,8 +5,20 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    ValidationError,
+    model_validator,
+)
 
+from app.core.component_rules import (
+    DEFAULT_COMPONENT_RULES_PATH,
+    ComponentRules,
+    load_component_rules,
+)
 from app.core.errors import ConfigError
 from app.core.inspection_config import ObbConfig
 
@@ -91,6 +103,17 @@ class AppConfig(Settings):
     output: OutputConfig = Field(default_factory=OutputConfig)
     minifi: MinifiConfig
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
+    component_rules_path: str = Field(
+        default=DEFAULT_COMPONENT_RULES_PATH, min_length=1
+    )
+    _component_rules: tuple[Path, ComponentRules] | None = PrivateAttr(default=None)
+
+    @property
+    def component_rules(self) -> ComponentRules:
+        path = resolve_under_project_root(self.component_rules_path)
+        if self._component_rules is None or self._component_rules[0] != path:
+            self._component_rules = (path, load_component_rules(path))
+        return self._component_rules[1]
 
     @model_validator(mode="after")
     def separate_roots(self):
@@ -127,7 +150,15 @@ class AppConfig(Settings):
         data["inference"]["obb"]["model_path"] = str(
             resolve_under_project_root(data["inference"]["obb"]["model_path"])
         )
-        return AppConfig.model_validate(data)
+        data["component_rules_path"] = str(
+            resolve_under_project_root(data["component_rules_path"])
+        )
+        resolved = AppConfig.model_validate(data)
+        resolved._component_rules = (
+            Path(resolved.component_rules_path),
+            self.component_rules,
+        )
+        return resolved
 
 
 def load_config(path: Path | None = None) -> AppConfig:

@@ -40,18 +40,18 @@ python app/tools/measurement_statistics.py /path/to/backup --start-date 2026-11-
 1. 遞迴尋找 `manifest.json`，依日期選取 `outcome=normal` 的紀錄；`fallback` 保護性 NG 不納入量測統計。
 2. 依 `csv_results[].processed_csv` 讀取相對路徑；若檔案已由 MiNiFi 搬移，改讀同行 `exported` 中的同名 CSV。整份 backup 搬移後仍適用。
 3. 檢查 CSV 列數、`is_pass` 是否與 manifest 的 `result_codes` 一致，並讀取 `ai_rule_checks` 中 `yolo_obb.passed=true` 確認影像 AI 判 OK。最終 `is_pass=23` 可以是量測 NG，不會因此排除。
-4. 預設 `--mode all`，用每列原始量測值與該列門檻，分別重算四項條件。即使原流程在體積 NG 後停止，仍會分析該列後續的面積、高度、位移；同一影像在每項最多各計一次，因此四項數量合計可能大於 NG 影像數。
+4. 預設 `--mode all`。新備份從 `ai_rule_checks` 讀取實際套用的體積與面積門檻及量測值。舊備份依該列原始 CSV 量測與門檻重算體積、面積、高度及位移。同一影像可在多個項目各計一次，因此各項合計可能大於 NG 影像數。
 
-如果只需要原始判定記錄的**第一個 NG 項目**，加上 `--mode first-failure`。此模式只分析 `ai_failed_rule` 指定的項目，順序沿用原始體積 → 面積 → 高度 → 位移；不需要原流程未執行項目的量測數據。
+如果只需要原始判定記錄的**第一個 NG 項目**，加上 `--mode first-failure`。此模式只分析 `ai_failed_rule` 指定的項目。新備份的判定順序為體積、面積，舊備份另含高度、位移。
 
-| 項目 | 量測欄位 | 門檻欄位 | 超限量計算 |
+| 舊備份項目 | 量測欄位 | 門檻欄位 | 超限量計算 |
 |---|---|---|---|
 | 體積 volume | `insp_vol` | `vol_l_ng`、`vol_h_ng` | 低於下限：下限 − 量測值；高於上限：量測值 − 上限 |
 | 面積 area | `insp_area` | `area_l_ng`、`area_h_ng` | 同上 |
 | 高度 height | `insp_hei` | `hei_l_ng`、`hei_h_ng` | 同上 |
 | 位移 shift | `insp_x`、`insp_y` | `shift_x_ng`、`shift_y_ng` | `max(abs(X) − X門檻, abs(Y) − Y門檻)` |
 
-體積、面積、高度的上下限先取 min/max，與現行判定一致；剛好等於門檻視為 OK。這三項沿用 CSV 的百分比刻度，例如上限 150、量測 156，超限量為 **6 個百分點**，不再除以上限換算比例。位移保留 **mm**，負位移先取絕對值；X/Y 都超限時只計一張，以較大超限量分組，歸入 `high_ng_count`。
+新舊規則的上下限都包含邊界。舊備份的體積、面積、高度以兩個 CSV 門檻的較小值及較大值為上下限。百分比量測的超限量以百分點計，例如上限 150、量測 156，超限量為 **6 個百分點**。舊備份的位移以 **mm** 計，負位移先取絕對值。X/Y 都超限時只計一張，以較大超限量分組，歸入 `high_ng_count`。
 
 ### 分組與小數
 

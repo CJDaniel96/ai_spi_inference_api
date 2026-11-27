@@ -1,0 +1,184 @@
+{
+  "others": {
+    "volume": {
+      "min_pct": 30.0,
+      "max_pct": 170.0
+    },
+    "area": {
+      "min_pct": 50.0,
+      "max_pct": 150.0
+    }
+  },
+  "components": {
+    "U0500": {
+      "volume": {
+        "min_pct": 1.0,
+        "max_pct": 180.0
+      },
+      "area": {
+        "min_pct": 10.0,
+        "max_pct": 160.0
+      }
+    },
+    "U0900": {
+      "volume": {
+        "min_pct": 1.0,
+        "max_pct": 180.0
+      },
+      "area": {
+        "min_pct": 10.0,
+        "max_pct": 160.0
+      }
+    },
+    "C1174": {
+      "volume": {
+        "min_pct": 30.0,
+        "max_pct": 180.0
+      },
+      "area": {
+        "min_pct": 60.0,
+        "max_pct": 160.0
+      }
+    },
+    "C1175": {
+      "volume": {
+        "min_pct": 30.0,
+        "max_pct": 180.0
+      },
+      "area": {
+        "min_pct": 60.0,
+        "max_pct": 160.0
+      }
+    },
+    "C1176": {
+      "volume": {
+        "min_pct": 30.0,
+        "max_pct": 180.0
+      },
+      "area": {
+        "min_pct": 60.0,
+        "max_pct": 160.0
+      }
+    },
+    "C1177": {
+      "volume": {
+        "min_pct": 30.0,
+        "max_pct": 180.0
+      },
+      "area": {
+        "min_pct": 60.0,
+        "max_pct": 160.0
+      }
+    },
+    "C1178": {
+      "volume": {
+        "min_pct": 30.0,
+        "max_pct": 180.0
+      },
+      "area": {
+        "min_pct": 60.0,
+        "max_pct": 160.0
+      }
+    },
+    "C1100": {
+      "volume": {
+        "min_pct": 30.0,
+        "max_pct": 170.0
+      },
+      "area": {
+        "min_pct": 60.0,
+        "max_pct": 150.0
+      }
+    },
+    "C1110": {
+      "volume": {
+        "min_pct": 30.0,
+        "max_pct": 170.0
+      },
+      "area": {
+        "min_pct": 60.0,
+        "max_pct": 150.0
+      }
+    },
+    "C1120": {
+      "volume": {
+        "min_pct": 30.0,
+        "max_pct": 170.0
+      },
+      "area": {
+        "min_pct": 60.0,
+        "max_pct": 150.0
+      }
+    },
+    "C1130": {
+      "volume": {
+        "min_pct": 30.0,
+        "max_pct": 170.0
+      },
+      "area": {
+        "min_pct": 60.0,
+        "max_pct": 150.0
+      }
+    },
+    "C1140": {
+      "volume": {
+        "min_pct": 30.0,
+        "max_pct": 170.0
+      },
+      "area": {
+        "min_pct": 60.0,
+        "max_pct": 150.0
+      }
+    },
+    "C1150": {
+      "volume": {
+        "min_pct": 30.0,
+        "max_pct": 170.0
+      },
+      "area": {
+        "min_pct": 60.0,
+        "max_pct": 150.0
+      }
+    },
+    "C1202": {
+      "volume": {
+        "min_pct": 30.0,
+        "max_pct": 170.0
+      },
+      "area": {
+        "min_pct": 60.0,
+        "max_pct": 150.0
+      }
+    },
+    "RS0500": {
+      "volume": {
+        "min_pct": 30.0,
+        "max_pct": 170.0
+      },
+      "area": {
+        "min_pct": 60.0,
+        "max_pct": 150.0
+      }
+    },
+    "RS0501": {
+      "volume": {
+        "min_pct": 30.0,
+        "max_pct": 170.0
+      },
+      "area": {
+        "min_pct": 60.0,
+        "max_pct": 150.0
+      }
+    },
+    "RS0502": {
+      "volume": {
+        "min_pct": 30.0,
+        "max_pct": 170.0
+      },
+      "area": {
+        "min_pct": 60.0,
+        "max_pct": 150.0
+      }
+    }
+  }
+}

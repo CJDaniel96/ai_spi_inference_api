@@ -1,4 +1,4 @@
-"""Export five-unit histograms of CSV limit excesses for appearance-AI OK images.
+"""Export five-unit histograms of measurement excesses for appearance-AI OK images.
 
 Standard library only: this file can also run outside the project checkout.
 """
@@ -21,6 +21,7 @@ METRICS = {
     "height": ("高度", "%", "insp_hei", "hei_l_ng", "hei_h_ng"),
     "shift": ("位移", "mm", "insp_x", "insp_y", "shift_x_ng", "shift_y_ng"),
 }
+COMPONENT_METRICS = ("volume", "area")
 HISTOGRAM_FIELDS = [
     "metric",
     "metric_zh",
@@ -66,6 +67,7 @@ class Statistics:
     counts: Counter = field(default_factory=Counter)
     errors: list[dict] = field(default_factory=list)
     details: list[dict] = field(default_factory=list)
+    metrics: set[str] = field(default_factory=set)
 
 
 def number(value, label):
@@ -126,6 +128,8 @@ def load_manifest(path):
         raise ValueError("Unsupported manifest schema_version")
     if data.get("outcome") not in {"normal", "fallback"}:
         raise ValueError("Unknown manifest outcome")
+    if not isinstance(data.get("inspection_metadata", {}), dict):
+        raise ValueError("Invalid inspection_metadata")
     if not isinstance(data.get("job_id"), str) or not data["job_id"].strip():
         raise ValueError("Missing manifest job_id")
     timestamp = float(number(data["created_at"], "created_at"))
@@ -175,10 +179,14 @@ def read_processed(manifest_path, item):
     return source, rows
 
 
-def appearance_ok(row):
-    checks = json.loads(row["ai_rule_checks"])
+def audit_checks(row):
+    checks = json.loads(row["ai_rule_checks"], parse_float=Decimal)
     if not isinstance(checks, list) or any(not isinstance(c, dict) for c in checks):
         raise ValueError("ai_rule_checks must be a list of objects")
+    return checks
+
+
+def appearance_ok(checks):
     appearance = [c for c in checks if c.get("rule") == "yolo_obb"]
     if len(appearance) != 1 or type(appearance[0].get("passed")) is not bool:
         raise ValueError("Missing or ambiguous yolo_obb passed flag")
@@ -206,7 +214,10 @@ def metric_excess(row, metric):
             else None
         )
     value, left, right = values
-    low, high = min(left, right), max(left, right)
+    return range_excess(value, min(left, right), max(left, right))
+
+
+def range_excess(value, low, high):
     if low <= value <= high:
         return None
     return {
@@ -218,18 +229,40 @@ def metric_excess(row, metric):
     }
 
 
-def row_excesses(row, code, mode):
+def component_metric_excess(checks, metric):
+    matching = [check for check in checks if check.get("rule") == metric]
+    if len(matching) != 1:
+        raise ValueError(f"Missing or ambiguous {metric} check in ai_rule_checks")
+    check = matching[0]
+    value, low, high = (
+        number(check.get(key), f"{metric}.{key}") for key in ("value", "low", "high")
+    )
+    if low < 0 or low > high:
+        raise ValueError(f"Invalid audited limits for {metric}")
+    excess = range_excess(value, low, high)
+    if check.get("passed") is not (excess is None):
+        raise ValueError(f"Audited {metric} check disagrees with its value and limits")
+    return excess
+
+
+def row_excesses(row, code, mode, *, component_rules=False):
     failed_rule = row["ai_failed_rule"].strip()
-    if not appearance_ok(row):
+    checks = audit_checks(row)
+    if not appearance_ok(checks):
         if code != 23 or failed_rule != "yolo_obb":
             raise ValueError("Appearance NG disagrees with final result/failed rule")
         return None
-    if code == 22 and failed_rule or code == 23 and failed_rule not in METRICS:
+    metrics = COMPONENT_METRICS if component_rules else METRICS
+    if code == 22 and failed_rule or code == 23 and failed_rule not in metrics:
         raise ValueError("Appearance OK disagrees with final failed rule")
-    selected = [failed_rule] if mode == "first-failure" and code == 23 else METRICS
+    selected = [failed_rule] if mode == "first-failure" and code == 23 else metrics
     excesses = {}
     for metric in selected:
-        result = metric_excess(row, metric)
+        result = (
+            component_metric_excess(checks, metric)
+            if component_rules
+            else metric_excess(row, metric)
+        )
         if result:
             excesses[metric] = result
     first = next(iter(excesses), "")
@@ -265,6 +298,11 @@ def collect(
             result.counts["fallback_manifests"] += 1
             continue
         result.counts["normal_manifests"] += 1
+        component_rules = (
+            manifest.get("inspection_metadata", {}).get("limit_source")
+            == "component_rules"
+        )
+        result.metrics.update(COMPONENT_METRICS if component_rules else METRICS)
         for item in manifest["csv_results"]:
             context["source_csv"] = item["source_csv"]
             context["csv_row"] = ""
@@ -281,7 +319,9 @@ def collect(
                 result.counts["total_rows"] += 1
                 context["csv_row"] = line
                 try:
-                    excesses = row_excesses(row, code, mode)
+                    excesses = row_excesses(
+                        row, code, mode, component_rules=component_rules
+                    )
                     events = []
                     for metric, values in (excesses or {}).items():
                         step = shift_width if metric == "shift" else width
@@ -327,6 +367,8 @@ def collect(
 def histogram_rows(statistics, width=Decimal(5), shift_width=None):
     shift_width = width if shift_width is None else shift_width
     for metric, (name, unit, *_) in METRICS.items():
+        if statistics.metrics and metric not in statistics.metrics:
+            continue
         step = shift_width if metric == "shift" else width
         last = max((i for m, i, _ in statistics.bins if m == metric), default=0)
         for index in range(last + 1):

@@ -1,4 +1,4 @@
-"""Native OBB appearance followed by measurements against each CSV row's limits."""
+"""Native OBB appearance followed by the matching component's measurement limits."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from pathlib import Path
 from app.application.ingest.io import inspect_source, ping
 from app.application.shared.fallback_result import FallbackResultBuilder
 from app.application.shared.result_artifacts import ResultArtifactWriter
+from app.core.component_rules import COMPONENT_LIMIT_SOURCE
 from app.core.config import AppConfig
 from app.core.errors import CsvSchemaError
 from app.domain.entities.obb_result import ObbBatchResult, ObbDetection
@@ -44,6 +45,7 @@ class ObbInspectionService:
         self._thresholds = dict(config.inference.obb.class_thresholds)
         self._judge = ComponentJudge(
             self._thresholds,
+            config.component_rules,
             center_tolerance_ratio=config.inference.obb.center_tolerance_ratio,
         )
         self._policy = self._judge.policy_definition()
@@ -77,7 +79,7 @@ class ObbInspectionService:
             "site_id": self._site_id,
             "rule_version": self._version,
             "policy": self._policy,
-            "limit_source": "csv",
+            "limit_source": COMPONENT_LIMIT_SOURCE,
             "rule_order": list(RULE_ORDER),
             "class_thresholds": self._thresholds,
             "model_conf": self._config.inference.obb.conf,

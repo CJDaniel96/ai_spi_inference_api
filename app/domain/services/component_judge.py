@@ -1,4 +1,4 @@
-"""Ordered OBB and row-specific SPI CSV limits, independent of limit ordering."""
+"""Judge OBB appearance, then apply the matching component's SPI limits."""
 
 from __future__ import annotations
 
@@ -7,16 +7,20 @@ import math
 from dataclasses import dataclass
 from typing import Any
 
+from app.core.component_rules import (
+    COMPONENT_LIMIT_SOURCE,
+    DEFAULT_COMPONENT_RULE,
+    ComponentRules,
+)
 from app.domain.entities.defect import FAIL_CODE, PASS_CODE
 from app.domain.entities.obb_result import ObbDetection
 from app.domain.services.appearance_classifier import AppearanceClassifier
 
-RULE_ORDER = ("yolo_obb", "volume", "area", "height", "shift")
 MEASUREMENTS = (
-    ("volume", "insp_vol", "vol_l_ng", "vol_h_ng"),
-    ("area", "insp_area", "area_l_ng", "area_h_ng"),
-    ("height", "insp_hei", "hei_l_ng", "hei_h_ng"),
+    ("volume", "insp_vol"),
+    ("area", "insp_area"),
 )
+RULE_ORDER = ("yolo_obb", *(name for name, _ in MEASUREMENTS))
 
 
 @dataclass(frozen=True)
@@ -27,20 +31,25 @@ class JudgeDecision:
     reason: str
     limit_source: str
     checks: tuple[dict, ...]
+    component_rule: str = ""
 
 
 class ComponentJudge:
     def __init__(
-        self, thresholds: dict[str, float], *, center_tolerance_ratio: float = 0.05
+        self,
+        thresholds: dict[str, float],
+        component_rules: ComponentRules,
+        *,
+        center_tolerance_ratio: float = 0.05,
     ) -> None:
+        self._component_rules = component_rules
         self.appearance = AppearanceClassifier(
             thresholds, center_tolerance_ratio=center_tolerance_ratio
         )
 
     def policy_definition(self) -> dict:
-        """Describe the algorithm, not a second source of numerical limits."""
         return {
-            "version": "csv_limits_v3",
+            "version": "component_limits_v1",
             "appearance": {
                 "center": "original_image_midpoint",
                 "selection": "exact_center_then_unique_within_tolerance",
@@ -51,29 +60,29 @@ class ComponentJudge:
                 "disjoint_neighbors": "ignore",
                 "qualified_ng": "reject_anywhere",
             },
-            "limit_source": "csv",
-            "range_normalization": "min_max_inclusive",
-            "measurements": {
-                name: {"value": value, "limits": [low, high], "unit": "%"}
-                for name, value, low, high in MEASUREMENTS
+            "limit_source": COMPONENT_LIMIT_SOURCE,
+            "component_matching": {
+                "column": "component_name",
+                "default": DEFAULT_COMPONENT_RULE,
             },
-            "shift": {
-                "x": {"value": "insp_x", "limit": "shift_x_ng"},
-                "y": {"value": "insp_y", "limit": "shift_y_ng"},
-                "comparison": "abs(value) <= nonnegative_limit",
-                "unit": "mm",
+            "component_rules": self._component_rules.model_dump(),
+            "comparison": "inclusive",
+            "measurements": {
+                name: {"value": value, "unit": "%"} for name, value in MEASUREMENTS
             },
         }
 
     @staticmethod
-    def _number(row: dict[str, Any], column: str, *, kind="measurement") -> float:
+    def _number(row: dict[str, Any], column: str) -> float:
         value = row.get(column)
         try:
             number = float(value)
         except (ValueError, TypeError) as exc:
-            raise ValueError(f"Missing or invalid {kind}: {column}={value!r}") from exc
+            raise ValueError(
+                f"Missing or invalid measurement: {column}={value!r}"
+            ) from exc
         if not math.isfinite(number):
-            raise ValueError(f"Non-finite {kind}: {column}")
+            raise ValueError(f"Non-finite measurement: {column}")
         return number
 
     def judge(
@@ -83,7 +92,6 @@ class ComponentJudge:
         *,
         image_center: tuple[float, float],
     ) -> JudgeDecision:
-        source = "csv"
         checks = []
         appearance = self.appearance.classify(detections, image_center=image_center)
         checks.append(
@@ -110,67 +118,50 @@ class ComponentJudge:
                 "yolo_obb",
                 appearance.reason,
                 appearance.reason,
-                source,
+                COMPONENT_LIMIT_SOURCE,
                 tuple(checks),
             )
-        for name, column, low_column, high_column in MEASUREMENTS:
-            source_low = self._number(row, low_column, kind="limit")
-            source_high = self._number(row, high_column, kind="limit")
-            low, high = min(source_low, source_high), max(source_low, source_high)
+        raw_name = row.get("component_name")
+        if not isinstance(raw_name, str) or not raw_name.strip():
+            raise ValueError("Missing or invalid component_name for component rules")
+        component = raw_name.strip()
+        if component in self._component_rules.components:
+            matched_name = component
+            rule = self._component_rules.components[component]
+        else:
+            matched_name = DEFAULT_COMPONENT_RULE
+            rule = self._component_rules.others
+
+        for name, column in MEASUREMENTS:
+            limits = getattr(rule, name)
+            low, high = limits.min_pct, limits.max_pct
             value = self._number(row, column)
-            passed = low <= value <= high
             checks.append(
                 {
                     "rule": name,
                     "column": column,
                     "value": value,
-                    "source_limits": {low_column: source_low, high_column: source_high},
                     "low": low,
                     "high": high,
-                    "limits_reversed": source_low > source_high,
                     "unit": "%",
-                    "passed": passed,
+                    "passed": low <= value <= high,
                 }
             )
-            if not passed:
-                defect = f"{'low' if value < low else 'high'} {name}"
-                return JudgeDecision(
-                    False,
-                    name,
-                    defect,
-                    f"{column}={value:g}% outside [{low:g}, {high:g}]%",
-                    source,
-                    tuple(checks),
-                )
-        x, y = self._number(row, "insp_x"), self._number(row, "insp_y")
-        x_limit = self._number(row, "shift_x_ng", kind="limit")
-        y_limit = self._number(row, "shift_y_ng", kind="limit")
-        if x_limit < 0 or y_limit < 0:
-            raise ValueError("Shift limits must be nonnegative")
-        passed = abs(x) <= x_limit and abs(y) <= y_limit
-        checks.append(
-            {
-                "rule": "shift",
-                "x_mm": x,
-                "y_mm": y,
-                "source_limits": {"shift_x_ng": x_limit, "shift_y_ng": y_limit},
-                "x_limit_mm": x_limit,
-                "y_limit_mm": y_limit,
-                "passed": passed,
-            }
-        )
-        reason = (
-            ""
-            if passed
-            else f"X/Y shift ({x:g}, {y:g}) mm exceeds ({x_limit:g}, {y_limit:g}) mm"
-        )
+        failed = next((check for check in checks[1:] if not check["passed"]), None)
+        if failed is None:
+            return JudgeDecision(
+                True, "", "", "", COMPONENT_LIMIT_SOURCE, tuple(checks), matched_name
+            )
+        name, column = failed["rule"], failed["column"]
+        value, low, high = failed["value"], failed["low"], failed["high"]
         return JudgeDecision(
-            passed,
-            "" if passed else "shift",
-            "" if passed else "shift",
-            reason,
-            source,
+            False,
+            name,
+            f"{'low' if value < low else 'high'} {name}",
+            f"{column}={value:g}% outside [{low:g}, {high:g}]%",
+            COMPONENT_LIMIT_SOURCE,
             tuple(checks),
+            matched_name,
         )
 
     def audit_row(
@@ -183,6 +174,7 @@ class ComponentJudge:
             "ai_failed_rule": decision.failed_rule,
             "ai_reason": decision.reason,
             "ai_limit_source": decision.limit_source,
+            "ai_component_rule": decision.component_rule,
             "obb_ok_count": appearance["ok_count"],
             "obb_ng_count": appearance["ng_count"],
             "obb_raw_detections": json.dumps([box.to_dict() for box in detections]),

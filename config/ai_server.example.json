@@ -33,6 +33,7 @@
     "io_timeout_seconds": 30,
     "io_startup_timeout_seconds": 30
   },
+  "component_rules_path": "config/rules/sx_component_judge.json",
   "inference": {
     "obb": {
       "model_path": "models/appearance/best.pt",

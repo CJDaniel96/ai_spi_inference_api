@@ -333,16 +333,43 @@ def test_standalone_script_does_not_require_project_imports(tmp_path):
 
 
 def test_real_judge_audits_are_supported_after_minifi_archive(tmp_path):
+    from app.core.component_rules import (
+        DEFAULT_COMPONENT_RULES_PATH,
+        load_component_rules,
+    )
     from app.core.inspection_config import ObbConfig
     from app.domain.entities.obb_result import ObbDetection
     from app.domain.services.component_judge import ComponentJudge
 
-    judge = ComponentJudge(ObbConfig().class_thresholds)
+    root = Path(__file__).resolve().parents[2]
+    judge = ComponentJudge(
+        ObbConfig().class_thresholds,
+        load_component_rules(root / DEFAULT_COMPONENT_RULES_PATH),
+    )
     boxes = (ObbDetection("Solder_Paste", 0.9, ((0, 0), (10, 0), (10, 10), (0, 10))),)
-    values = row(insp_hei="156")
+    values = row(
+        component_name="C1174",
+        insp_vol="186",
+        insp_area="54",
+        insp_hei="156",
+        vol_h_ng="200",
+        area_l_ng="0",
+    )
     decision = judge.judge(values, boxes, image_center=(5, 5))
     values.update(judge.audit_row(decision, boxes))
-    save(tmp_path, [values], exported=True)
+    save(
+        tmp_path,
+        [values],
+        exported=True,
+        inspection_metadata={"limit_source": "component_rules"},
+    )
     result = collect(tmp_path)
     assert not result.errors
-    assert result.bins == {("height", 1, "high"): 1}
+    assert result.bins == {("volume", 1, "high"): 1, ("area", 1, "low"): 1}
+    assert {entry["metric"] for entry in histogram_rows(result)} == {"volume", "area"}
+    assert collect(tmp_path, mode="first-failure").bins == {("volume", 1, "high"): 1}
+
+    save(tmp_path, [row(failed_rule="height", insp_hei="156")], name="legacy")
+    mixed = collect(tmp_path)
+    assert not mixed.errors
+    assert mixed.bins == {**result.bins, ("height", 1, "high"): 1}

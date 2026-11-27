@@ -1,4 +1,4 @@
-"""Per-row machine limits, confidence filtering and native result publication."""
+"""Component rules, confidence filtering and native result publication."""
 
 import asyncio
 import csv
@@ -13,12 +13,13 @@ from pydantic import ValidationError
 
 from app.application.inference.obb_service import ObbInspectionService
 from app.application.operations import backup_result, prepare_publications, publish_csv
+from app.core.component_rules import DEFAULT_COMPONENT_RULES_PATH, load_component_rules
 from app.core.config import AppConfig
 from app.core.inspection_config import ObbConfig
 from app.domain.entities.obb_result import OBB_CLASSES, ObbBatchResult, ObbDetection
 from app.domain.entities.pipeline_result import PipelineOutcome, PipelineResultManifest
 from app.domain.services.appearance_classifier import AppearanceClassifier
-from app.domain.services.component_judge import MEASUREMENTS, ComponentJudge
+from app.domain.services.component_judge import ComponentJudge
 from tests.helpers import AsyncTestIO
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -30,12 +31,15 @@ def box(name="Solder_Paste", confidence=0.8):
 
 
 def judge():
-    return ComponentJudge(ObbConfig().class_thresholds)
+    return ComponentJudge(
+        ObbConfig().class_thresholds,
+        load_component_rules(ROOT / DEFAULT_COMPONENT_RULES_PATH),
+    )
 
 
 def row(**changes):
     return {
-        "component_name": "others",
+        "component_name": "R0001",
         "insp_vol": "100",
         "insp_area": "100",
         "insp_hei": "100",
@@ -89,139 +93,67 @@ def test_ng_thresholds_are_independent():
 
 
 @pytest.mark.parametrize(
-    ("name", "measurement", "low_column", "high_column"),
-    MEASUREMENTS,
+    ("name", "measurement", "low", "high"),
+    [("volume", "insp_vol", 1, 180), ("area", "insp_area", 10, 160)],
 )
-@pytest.mark.parametrize(("left", "right"), [(40, 160), (160, 40), (75, 75)])
 @pytest.mark.parametrize("position", ["lower", "upper", "below", "above"])
-def test_csv_intervals_normalize_both_orders_and_include_boundaries(
-    name, measurement, low_column, high_column, left, right, position
-):
-    low, high = min(left, right), max(left, right)
+def test_component_intervals_include_boundaries(name, measurement, low, high, position):
     value = {"lower": low, "upper": high, "below": low - 0.001, "above": high + 0.001}[
         position
     ]
-    data = row(**{measurement: value, low_column: left, high_column: right})
-    original = data.copy()
-    decision = judge().judge(data, (box(),), image_center=(5.0, 5.0))
+    decision = judge().judge(
+        row(component_name="U0500", **{measurement: value}),
+        (box(),),
+        image_center=(5.0, 5.0),
+    )
     assert decision.passed == (position in ("lower", "upper"))
     if not decision.passed:
         assert decision.failed_rule == name
         assert decision.defect == f"{'low' if position == 'below' else 'high'} {name}"
     check = next(check for check in decision.checks if check["rule"] == name)
     assert (check["low"], check["high"]) == (low, high)
-    assert check["limits_reversed"] == (left > right)
-    assert check["source_limits"] == {low_column: left, high_column: right}
-    assert data == original
+    assert decision.component_rule == "U0500"
 
 
 @pytest.mark.parametrize(
-    ("changes", "rule"),
+    ("name", "volume", "area", "matched", "failed"),
     [
-        (
-            {"insp_vol": "20", "insp_area": "20", "insp_hei": "20", "insp_x": "1"},
-            "volume",
-        ),
-        ({"insp_area": "20", "insp_hei": "20", "insp_x": "1"}, "area"),
-        ({"insp_hei": "20", "insp_x": "1"}, "height"),
-        ({"insp_x": "-.051"}, "shift"),
-        ({"insp_y": ".051"}, "shift"),
+        ("U0500", 1, 10, "U0500", ""),
+        (" U0900 ", 190, 170, "U0900", "volume"),
+        ("C1174", 180, 59, "C1174", "area"),
+        ("C1178", 180, 160, "C1178", ""),
+        ("C1110", 180, 55, "C1110", "volume"),
+        ("RS0501", 170, 60, "RS0501", ""),
+        ("R0001", 170, 50, "others", ""),
+        ("U05001", 100, 12, "others", "area"),
     ],
 )
-def test_rule_order_and_signed_displacements(changes, rule):
-    decision = judge().judge(row(**changes), (box(),), image_center=(5.0, 5.0))
-    assert decision.failed_rule == rule
-    order = [check["rule"] for check in decision.checks]
-    assert order == ["yolo_obb", "volume", "area", "height", "shift"][: len(order)]
-
-
-def test_csv_limits_override_previous_component_specific_values():
-    data = row(
-        component_name="U0500",
-        insp_vol=55,
-        insp_area=55,
-        insp_hei=55,
-        vol_l_ng=65,
-        vol_h_ng=55,
-        area_l_ng=55,
-        area_h_ng=65,
-        hei_l_ng=65,
-        hei_h_ng=55,
-        shift_x_ng=0.06,
-        shift_y_ng=0.07,
-        insp_x=-0.06,
-        insp_y=0.07,
+def test_component_matching_and_default_record_both_checks(
+    name, volume, area, matched, failed
+):
+    decision = judge().judge(
+        row(component_name=name, insp_vol=volume, insp_area=area),
+        (box(),),
+        image_center=(5.0, 5.0),
     )
-    assert judge().judge(data, (box(),), image_center=(5.0, 5.0)).passed
+    assert decision.component_rule == matched
+    assert decision.failed_rule == failed
+    assert [check["rule"] for check in decision.checks] == [
+        "yolo_obb",
+        "volume",
+        "area",
+    ]
 
 
-@pytest.mark.parametrize(
-    "column",
-    [
-        "vol_l_ng",
-        "vol_h_ng",
-        "area_l_ng",
-        "area_h_ng",
-        "hei_l_ng",
-        "hei_h_ng",
-        "shift_x_ng",
-        "shift_y_ng",
-    ],
-)
-@pytest.mark.parametrize("value", ["", "NaN", "inf", "invalid", None])
-def test_invalid_csv_limit_cannot_become_a_pass(column, value):
-    with pytest.raises(ValueError, match="limit"):
-        judge().judge(row(**{column: value}), (box(),), image_center=(5.0, 5.0))
+@pytest.mark.parametrize("name", ["", "  ", None])
+def test_missing_component_is_invalid_after_appearance_passes(name):
+    data = row(component_name=name, insp_vol="")
+    with pytest.raises(ValueError, match="component_name"):
+        judge().judge(data, (box(),), image_center=(5.0, 5.0))
+    assert judge().judge(data, (), image_center=(5.0, 5.0)).failed_rule == "yolo_obb"
 
 
-@pytest.mark.parametrize("column", ["shift_x_ng", "shift_y_ng"])
-def test_negative_shift_limit_is_invalid(column):
-    with pytest.raises(ValueError, match="limits"):
-        judge().judge(row(**{column: -0.05}), (box(),), image_center=(5.0, 5.0))
-
-
-@pytest.mark.parametrize(
-    ("x", "y", "passed"),
-    [
-        (-0.03, 0.07, True),
-        (0.03, -0.07, True),
-        (-0.031, 0, False),
-        (0, -0.071, False),
-    ],
-)
-def test_shift_axes_use_their_own_csv_limits(x, y, passed):
-    assert (
-        judge()
-        .judge(
-            row(insp_x=x, insp_y=y, shift_x_ng=0.03, shift_y_ng=0.07),
-            (box(),),
-            image_center=(5.0, 5.0),
-        )
-        .passed
-        == passed
-    )
-
-
-def test_zero_shift_limits_only_accept_zero_displacement():
-    assert (
-        judge()
-        .judge(row(shift_x_ng=0, shift_y_ng=0), (box(),), image_center=(5.0, 5.0))
-        .passed
-    )
-    assert (
-        not judge()
-        .judge(
-            row(shift_x_ng=0, shift_y_ng=0, insp_y=0.001),
-            (box(),),
-            image_center=(5.0, 5.0),
-        )
-        .passed
-    )
-
-
-@pytest.mark.parametrize(
-    "column", ["insp_vol", "insp_area", "insp_hei", "insp_x", "insp_y"]
-)
+@pytest.mark.parametrize("column", ["insp_vol", "insp_area"])
 @pytest.mark.parametrize("value", ["", "NaN", "inf", "invalid"])
 def test_invalid_measurement_is_never_a_pass(column, value):
     with pytest.raises(ValueError, match="measurement"):
@@ -364,7 +296,7 @@ def service_case(tmp_path, rows, runtime=None):
 
 def test_native_result_preserves_machine_contract_and_metadata(tmp_path):
     config, folder, service, runtime = service_case(
-        tmp_path, [row(), row(insp_hei="49")]
+        tmp_path, [row(insp_hei="invalid", insp_x="999"), row(insp_area="49")]
     )
     original = (folder / "board.csv").read_bytes()
     manifest, path = asyncio.run(
@@ -373,17 +305,15 @@ def test_native_result_preserves_machine_contract_and_metadata(tmp_path):
     assert manifest.outcome is PipelineOutcome.NORMAL
     assert manifest.csv_results[0].result_codes == (22, 23)
     assert manifest.inspection_metadata["site_id"] == "SX"
-    assert manifest.inspection_metadata["limit_source"] == "csv"
+    assert manifest.inspection_metadata["limit_source"] == "component_rules"
     assert manifest.inspection_metadata["rule_order"] == [
         "yolo_obb",
         "volume",
         "area",
-        "height",
-        "shift",
     ]
     assert PipelineResultManifest.read(path) == manifest
     processed = pd.read_csv(path.parent / manifest.csv_results[0].processed_csv)
-    assert processed["ai_failed_rule"].fillna("").tolist() == ["", "height"]
+    assert processed["ai_failed_rule"].fillna("").tolist() == ["", "area"]
     assert (
         json.loads(processed.iloc[0]["obb_retained_detections"])[0]["confidence"] == 0.8
     )
@@ -436,7 +366,7 @@ def test_empty_successful_detections_are_normal_ng(tmp_path):
     assert manifest.csv_results[0].result_codes == (23,)
 
 
-def test_center_with_disjoint_neighbors_continues_csv_rules_and_records_selection(
+def test_center_with_disjoint_neighbors_continues_component_rules_and_records_selection(
     tmp_path,
 ):
     central = ObbDetection("Solder_Paste", 0.8, ((3, 3), (7, 3), (7, 7), (3, 7)))
@@ -446,7 +376,7 @@ def test_center_with_disjoint_neighbors_continues_csv_rules_and_records_selectio
     )
     _config, folder, service, _ = service_case(
         tmp_path,
-        [row(), row(insp_vol=49)],
+        [row(), row(insp_vol=29)],
         FakeRuntime(detections=(*neighbors, central)),
     )
     manifest, path = asyncio.run(
@@ -465,8 +395,6 @@ def test_center_with_disjoint_neighbors_continues_csv_rules_and_records_selectio
         "yolo_obb",
         "volume",
         "area",
-        "height",
-        "shift",
     ]
     appearance = checks[0]
     assert appearance["image_center"] == [5.0, 5.0]
@@ -549,7 +477,7 @@ def test_missing_measurement_uses_whole_job_fail_safe(tmp_path):
     assert manifest.csv_results[0].result_codes == (23, 23)
 
 
-def test_supplied_measurements_fail_volume_before_other_checks(tmp_path):
+def test_supplied_measurements_apply_component_rules(tmp_path):
     # Seven supplied SPI measurement rows, omitting board identifiers.
     samples = [
         ("C0626", 184.474, 110.748, 49.971, 0.008, 0),
@@ -581,13 +509,20 @@ def test_supplied_measurements_fail_volume_before_other_checks(tmp_path):
     manifest, path = asyncio.run(
         service.prepare(job_id=folder.name, staged_folder=folder)
     )
-    assert manifest.csv_results[0].result_codes == (23,) * 7
+    assert manifest.csv_results[0].result_codes == (23, 22, 22, 23, 23, 23, 22)
     processed = pd.read_csv(path.parent / manifest.csv_results[0].processed_csv)
-    assert processed["ai_failed_rule"].tolist() == ["volume"] * 7
-    assert processed["ai_defect_name"].tolist() == ["high volume"] + ["low volume"] * 6
+    assert processed["ai_failed_rule"].fillna("").tolist() == [
+        "volume",
+        "",
+        "",
+        "area",
+        "area",
+        "area",
+        "",
+    ]
 
 
-def test_same_component_uses_each_rows_limits_and_preserves_csv(tmp_path):
+def test_same_component_ignores_machine_limits_and_preserves_csv(tmp_path):
     rows = [
         row(component_name="U0500", vol_l_ng=200, vol_h_ng=300),
         row(component_name="U0500", vol_l_ng=150, vol_h_ng=50),
@@ -597,27 +532,32 @@ def test_same_component_uses_each_rows_limits_and_preserves_csv(tmp_path):
     manifest, path = asyncio.run(
         service.prepare(job_id=folder.name, staged_folder=folder)
     )
-    assert manifest.csv_results[0].result_codes == (23, 22)
+    assert manifest.csv_results[0].result_codes == (22, 22)
     processed = pd.read_csv(path.parent / manifest.csv_results[0].processed_csv)
-    assert processed["ai_limit_source"].tolist() == ["csv", "csv"]
+    assert processed["ai_limit_source"].tolist() == [
+        "component_rules",
+        "component_rules",
+    ]
+    assert processed["ai_component_rule"].tolist() == ["U0500", "U0500"]
     checks = json.loads(processed.iloc[1]["ai_rule_checks"])
-    assert checks[1]["limits_reversed"] is True
-    assert checks[1]["source_limits"] == {"vol_l_ng": 150, "vol_h_ng": 50}
+    assert (checks[1]["low"], checks[1]["high"]) == (1, 180)
     assert processed["vol_l_ng"].tolist() == [200, 150]
     assert processed["vol_h_ng"].tolist() == [300, 50]
     assert (folder / "board.csv").read_bytes() == original
 
 
-def test_missing_csv_limit_uses_whole_job_fail_safe_without_excel_fallback(tmp_path):
+def test_measurement_judge_only_requires_component_name_volume_and_area(tmp_path):
     _config, folder, service, _runtime = service_case(
-        tmp_path, [row(), row(vol_h_ng="")]
+        tmp_path,
+        [
+            {"component_name": "R0001", "insp_vol": "30", "insp_area": "50"},
+        ],
     )
     manifest, _path = asyncio.run(
         service.prepare(job_id=folder.name, staged_folder=folder)
     )
-    assert manifest.outcome is PipelineOutcome.FALLBACK
-    assert manifest.csv_results[0].result_codes == (23, 23)
-    assert "limit" in manifest.errors[0]
+    assert manifest.outcome is PipelineOutcome.NORMAL
+    assert manifest.csv_results[0].result_codes == (22,)
 
 
 def test_saved_backup_above_image_limit_returns_all_23_without_loading_model_inputs(
