@@ -7,7 +7,7 @@ import csv
 import json
 import os
 import tempfile
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from app.core.config import load_config
@@ -62,8 +62,22 @@ DELIVERY_FIELDS = [
 ]
 
 
-def reports(backup_root):
+def reports(
+    backup_root: Path, *, start_date: date | None = None, end_date: date | None = None
+):
     for path in sorted(backup_root.glob("*/*/ai_result/run.json")):
+        if start_date is not None or end_date is not None:
+            folder_name = path.relative_to(backup_root).parts[0]
+            try:
+                folder_date = date.fromisoformat(folder_name)
+            except ValueError:
+                continue
+            if (
+                folder_date.isoformat() != folder_name
+                or (start_date is not None and folder_date < start_date)
+                or (end_date is not None and folder_date > end_date)
+            ):
+                continue
         yield path, json.loads(path.read_text(encoding="utf-8"))
 
 
@@ -77,9 +91,11 @@ def _duration(start, end):
     )
 
 
-def job_rows(backup_root: Path) -> list[dict]:
+def job_rows(
+    backup_root: Path, *, start_date: date | None = None, end_date: date | None = None
+) -> list[dict]:
     rows = []
-    for path, run in reports(backup_root):
+    for path, run in reports(backup_root, start_date=start_date, end_date=end_date):
         manifest_path = path.parent / "manifest.json"
         manifest = (
             PipelineResultManifest.read(manifest_path)
@@ -135,9 +151,11 @@ def job_rows(backup_root: Path) -> list[dict]:
     return rows
 
 
-def delivery_rows(backup_root: Path) -> list[dict]:
+def delivery_rows(
+    backup_root: Path, *, start_date: date | None = None, end_date: date | None = None
+) -> list[dict]:
     rows = []
-    for _, run in reports(backup_root):
+    for _, run in reports(backup_root, start_date=start_date, end_date=end_date):
         for name, record in run["publications"].items():
             for attempt in record["attempt_log"]:
                 rows.append(
@@ -213,16 +231,35 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path)
     parser.add_argument("--output", type=Path, default=Path("reports"))
-    parser.add_argument("--date", help="Filter by AI first-observation date in Taiwan")
+    parser.add_argument(
+        "--start-date",
+        type=date.fromisoformat,
+        help="First backup folder date (YYYY-MM-DD, inclusive)",
+    )
+    parser.add_argument(
+        "--end-date",
+        type=date.fromisoformat,
+        help="Last backup folder date (YYYY-MM-DD, inclusive)",
+    )
+    parser.add_argument(
+        "--date", type=date.fromisoformat, help="Single backup folder date (YYYY-MM-DD)"
+    )
     args = parser.parse_args(argv)
+    if args.date and (args.start_date or args.end_date):
+        parser.error("--date cannot be combined with --start-date or --end-date")
+    start_date, end_date = args.date or args.start_date, args.date or args.end_date
+    if start_date and end_date and start_date > end_date:
+        parser.error("--start-date must be on or before --end-date")
+
     config = load_config(args.config)
     root = Path(config.paths.backup_output_root)
-    rows = job_rows(root)
-    if args.date:
-        datetime.strptime(args.date, "%Y-%m-%d")
-        rows = [row for row in rows if row["first_seen_at"].startswith(args.date)]
+    rows = job_rows(root, start_date=start_date, end_date=end_date)
     selected = {row["run_id"] for row in rows}
-    deliveries = [row for row in delivery_rows(root) if row["run_id"] in selected]
+    deliveries = [
+        row
+        for row in delivery_rows(root, start_date=start_date, end_date=end_date)
+        if row["run_id"] in selected
+    ]
     totals = summary(rows)
     write_csv(args.output / "jobs.csv", rows, JOB_FIELDS)
     write_csv(args.output / "deliveries.csv", deliveries, DELIVERY_FIELDS)

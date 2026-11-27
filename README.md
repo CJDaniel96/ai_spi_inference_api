@@ -160,10 +160,10 @@ MiNiFi 只收集輸出目錄中的 `*.csv`，忽略 `.tmp`。同一次執行重�
 
 ```bat
 spi_statistics.bat --output reports
-spi_statistics.bat --date 2026-11-09 --output reports
+spi_statistics.bat --start-date 2026-11-13 --end-date 2026-11-15 --output reports
 ```
 
-輸出 jobs.csv、deliveries.csv、summary.csv；每個時間戳資料夾只統計目前 run.json 中最近一批的紀錄，不累積先前重跑歷史；日期以該批 AI 首次觀測的台灣日期篩選。工具不會改動來源、執行推論或回傳。
+輸出 `jobs.csv`、`deliveries.csv`、`summary.csv`。日期依備份根目錄下的 `YYYY-MM-DD` 資料夾名稱篩選，包含起日與迄日。只指定其中一端時，另一端不設限。`--date` 可查單日，同樣依備份資料夾日期篩選。每個時間戳資料夾只統計目前 `run.json` 中最近一批的紀錄。
 
 若要將「影像 AI 判 OK、量測值超限」以每 5 單位分組輸出製圖 CSV，新備份統計體積與面積，舊備份依原規則另計高度與位移：
 

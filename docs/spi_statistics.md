@@ -4,7 +4,7 @@
 
 ```bat
 spi_statistics.bat --output reports
-spi_statistics.bat --date 2026-11-09 --output reports
+spi_statistics.bat --start-date 2026-11-13 --end-date 2026-11-15 --output reports
 ```
 
 也可執行 `python -m app.tools.spi_statistics --config config/ai_server.json --output reports`。
@@ -13,7 +13,9 @@ spi_statistics.bat --date 2026-11-09 --output reports
 - `deliveries.csv`：每份 CSV 每次回傳嘗試一列，包含起訖時間、耗時、狀態、錯誤、雜湊、來源完成標記與改名時間。
 - `summary.csv`：執行次數、成功／失敗／部分成功／不明次數、回傳 PASS／FAIL 數量、平均回傳耗時與待匯出數。
 
-同一份 CSV 取消 `_DONE` 後重新處理，仍有新的 run_id，但會更新同一個 ai_result/run.json。統計只計算目前報告中的最近一批，不累積先前重跑歷史。PASS／FAIL 只計算已確認回傳的 CSV。`--date` 依首次發現的台灣日期篩選，與來源資料夾日期可不同。
+`--start-date` 和 `--end-date` 依備份根目錄下一層的 `YYYY-MM-DD` 資料夾名稱篩選，包含起日與迄日。省略其中一端時，該端不設限。兩端都省略就統計全部日期。`--date` 可單獨查詢一天。例如備份在 `2026-11-13`，即使 AI 在 `2026-11-14` 才首次發現，仍會列入 `2026-11-13` 的統計。
+
+同一份 CSV 取消 `_DONE` 後重新處理，會有新的 `run_id`，並更新同一個 `ai_result/run.json`。統計取目前報告中的最近一批。PASS／FAIL 只計算已確認回傳的 CSV。
 
 結果 manifest 依報告同行路徑讀取，整份備份搬移後仍可統計；先前使用 run_id 子目錄的報告與沒有 ai_result/run.json 的舊備份不會混入新版統計。報告內容損壞時工具會報錯，請保留原檔核對。
 
